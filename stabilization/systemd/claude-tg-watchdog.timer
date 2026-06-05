@@ -1,0 +1,13 @@
+# M0 — fire the poller-liveness watchdog ~every 20s.
+[Unit]
+Description=Run claude-tg-watchdog periodically
+
+[Timer]
+OnBootSec=120
+OnUnitActiveSec=20
+AccuracySec=2s
+# If the system was asleep, don't fire a burst on wake.
+Persistent=false
+
+[Install]
+WantedBy=timers.target

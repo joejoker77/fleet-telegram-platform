@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# claude-tg-crashtail — capture why a bot unit stopped (M0, Problem B evidence).
+# Called from ExecStopPost as: claude-tg-crashtail <user> <result> <code> <status>
+#   <result> = $SERVICE_RESULT (success|oom-kill|exit-code|signal|timeout|...)
+#   <code>   = $EXIT_CODE       (exited|killed)
+#   <status> = $EXIT_STATUS     (numeric exit status or signal name)
+# Runs as the service user, so it can only touch that user's own files.
+set -uo pipefail
+
+user="${1:-unknown}"
+result="${2:-?}"
+code="${3:-?}"
+status="${4:-?}"
+
+state="/home/${user}/.claude/channels/telegram-${user}"
+logfile="${state}/logs/session_current.txt"
+crashdir="${state}/crash"
+ts="$(date -u +%Y%m%d_%H%M%S)"
+
+mkdir -p "$crashdir" 2>/dev/null || exit 0
+
+# Keep a bounded ring of crash captures (last 20).
+ls -1t "$crashdir"/crash_*.txt 2>/dev/null | tail -n +20 | xargs -r rm -f
+
+{
+  echo "==== claude-tg@${user} stopped at ${ts} UTC ===="
+  echo "SERVICE_RESULT=${result}  EXIT_CODE=${code}  EXIT_STATUS=${status}"
+  echo "MemoryPeak/limits (if accounting on):"
+  systemctl show "claude-tg@${user}" -p MemoryPeak,MemoryMax,MemoryHigh,NRestarts 2>/dev/null
+  echo
+  echo "---- last 80 lines of session_current.txt ----"
+  tail -n 80 "$logfile" 2>/dev/null || echo "(no session log)"
+} > "${crashdir}/crash_${ts}.txt" 2>/dev/null
+
+# Also emit a one-line journal marker so `journalctl -t claude-tg-crashtail`
+# gives a quick restart timeline with causes.
+logger -t claude-tg-crashtail "claude-tg@${user} stop: result=${result} code=${code} status=${status} (tail → ${crashdir}/crash_${ts}.txt)"
+exit 0

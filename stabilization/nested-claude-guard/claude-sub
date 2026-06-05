@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# claude-sub — launch a nested Claude Code session that NEVER loads the
+# telegram plugin, while keeping normal auth.
+#
+# Why this exists: every `claude` process boots its own telegram plugin, and
+# the plugin's startup code SIGTERMs whatever already holds the bot-token poll
+# lock (telegram allows one getUpdates poller per token). A nested plain
+# `claude` therefore kills the parent bot's poller and the chat goes silent
+# until a service restart.
+#
+# `--strict-mcp-config` makes the child use ONLY the MCP servers from the
+# --mcp-config files we pass, ignoring all other MCP configuration — including
+# the telegram plugin. Unlike `--bare`, it does NOT skip keychain/OAuth, so the
+# child authenticates the same way the parent bot does. (Both verified
+# 2026-06-01: --bare -> "Not logged in"; --strict-mcp-config -> runs + no 2nd
+# plugin, parent poller untouched.)
+#
+# The child does real work and returns its result on stdout; the PARENT session
+# is what replies to Telegram. The child never needs to receive chat input, so
+# it never needs the telegram plugin.
+#
+# Default: no MCP servers at all (empty-mcp.json). To give the child its own
+# isolated MCP set (e.g. a Postgres/n8n MCP pointed at a different server),
+# just pass another --mcp-config; it composes, telegram still excluded:
+#   claude-sub --mcp-config /path/other.json -p "task"
+#   claude-sub --model opus --permission-mode plan -p "..."
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec claude --strict-mcp-config --mcp-config "$HERE/empty-mcp.json" "$@"

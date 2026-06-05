@@ -1,0 +1,17 @@
+{
+  "_comment": "Merge this PreToolUse entry into each bot's ~/.claude/settings.json (under .hooks.PreToolUse). It runs block-nested-claude.py before every Bash call and blocks a non-isolated nested `claude`. NOTE: settings.json is AgentShield-protected, so this must be applied by the operator, not self-written by the bot. install path assumed: /usr/local/share/claude-guard/block-nested-claude.py",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/share/claude-guard/block-nested-claude.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

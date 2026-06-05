@@ -1,0 +1,3 @@
+stabilization/nested-claude-guard/*.out
+stabilization/nested-claude-guard/*.err
+*.log

@@ -1,0 +1,14 @@
+# M0 — poller-liveness watchdog (oneshot, driven by the .timer).
+[Unit]
+Description=Claude-TG poller liveness watchdog (restart unit if bot.pid is dead)
+# Don't run during shutdown.
+DefaultDependencies=no
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/claude-tg-watchdog
+# Hardening: it only needs to read pidfiles and call systemctl.
+ProtectHome=read-only
+ProtectSystem=strict
+NoNewPrivileges=true
