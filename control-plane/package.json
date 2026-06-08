@@ -1,0 +1,24 @@
+{
+  "name": "@fleet/control-plane",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Fleet platform control plane — central services (Postgres/Redis/audit/API) built alongside the Genesis prototype. M1 of the rearchitecture.",
+  "engines": {
+    "node": ">=20.11",
+    "pnpm": ">=9"
+  },
+  "packageManager": "pnpm@9.12.3",
+  "scripts": {
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint",
+    "db:generate": "pnpm --filter @fleet/db generate",
+    "db:migrate": "pnpm --filter @fleet/db migrate",
+    "db:seed": "pnpm --filter @fleet/db seed"
+  },
+  "devDependencies": {
+    "typescript": "5.6.3",
+    "tsx": "4.19.2",
+    "@types/node": "20.17.6"
+  }
+}
