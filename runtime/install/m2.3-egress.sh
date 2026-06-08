@@ -51,6 +51,15 @@ sed -e "s#__SUBNET__#$SUBNET#g" -e "s#__GW__#$GW#g" "$RT/nftables/cl-egress.nft.
 nft -f "$NFT_FILE"
 nft list table inet cl_egress >/dev/null || die "cl_egress table not loaded"
 
+# 4b) the host runs UFW with input policy=drop; a separate-table accept can't
+#     override it, so allow the tenant subnet to reach the proxy port via UFW.
+#     Scoped (subnet -> :10255 only) and reversible (rollback does ufw delete).
+#     UFW manages its own 'ip filter' table; this does NOT touch inet cl_egress.
+if command -v ufw >/dev/null 2>&1; then
+  log "ufw: allow $SUBNET -> tcp/10255 (proxy)"
+  ufw allow from "$SUBNET" to any port 10255 proto tcp >/dev/null || true
+fi
+
 # 5) restart the pod so it joins cl-net (adaptive wrapper picks it up)
 log "restarting claude-pod@$TEST_USER onto cl-net"
 systemctl restart "claude-pod@$TEST_USER"

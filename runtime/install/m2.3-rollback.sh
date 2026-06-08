@@ -10,6 +10,12 @@ FWD_UNIT=/etc/systemd/system/cl-egress-forwarder.service
 TEST_USER=cptest
 [ "$(id -u)" -eq 0 ] || { echo "run as root"; exit 1; }
 
+echo "== removing the UFW proxy allow (read subnet from env before it's deleted) =="
+if command -v ufw >/dev/null 2>&1 && [ -f /etc/cl-egress.env ]; then
+  . /etc/cl-egress.env
+  [ -n "${SUBNET:-}" ] && ufw delete allow from "$SUBNET" to any port 10255 proto tcp >/dev/null 2>&1 && echo "ufw rule removed" || echo "(no ufw rule / already gone)"
+fi
+
 echo "== removing nftables table inet cl_egress =="
 nft delete table inet cl_egress 2>/dev/null && echo "deleted" || echo "(not present)"
 
