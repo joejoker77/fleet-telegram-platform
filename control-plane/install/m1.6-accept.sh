@@ -16,10 +16,11 @@ podman ps --filter name=cp- --format '{{.Names}}  {{.Status}}' || fail=1
 
 echo
 echo "############ 3) auth round-trip: initData -> /auth/session -> /me (+ tamper=401) ############"
-podman run --rm --network cp-net --workdir "$REPO" -v "$REPO:$REPO:ro" \
-  --secret cp_bot_token \
-  -e BOT_TOKEN_FILE=/run/secrets/cp_bot_token -e API=http://cp-api:8080 -e TG_ID=2112420187 \
-  "$NODE_IMAGE" node install/auth-roundtrip.mjs || fail=1
+# Run inside the live cp-api container (has node, the repo, and the bot-token
+# secret) hitting its own loopback — avoids any cross-container DNS dependency.
+podman exec --workdir "$REPO" \
+  -e BOT_TOKEN_FILE=/run/secrets/cp_bot_token -e API=http://127.0.0.1:8080 -e TG_ID=2112420187 \
+  cp-api node install/auth-roundtrip.mjs || fail=1
 
 echo
 echo "############ 4) audit hash-chain verifies (incl. the auth.session event above) ############"
