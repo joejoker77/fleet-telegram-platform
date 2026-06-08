@@ -12,14 +12,14 @@ delete table inet cl_egress
 table inet cl_egress {
   chain forward {
     type filter hook forward priority -10; policy accept;
-    ip saddr __SUBNET__ ct state established,related accept
-    ip saddr __SUBNET__ ip daddr __GW__ accept
-    ip saddr __SUBNET__ drop
+    ip saddr __SUBNET__ ct state established,related counter accept
+    ip saddr __SUBNET__ ip daddr __GW__ counter accept
+    ip saddr __SUBNET__ counter drop
   }
   chain input {
     type filter hook input priority -10; policy accept;
-    ip saddr __SUBNET__ ct state established,related accept
-    ip saddr __SUBNET__ tcp dport 10255 accept
-    ip saddr __SUBNET__ drop
+    ip saddr __SUBNET__ ct state established,related counter accept
+    ip saddr __SUBNET__ tcp dport 10255 counter accept
+    ip saddr __SUBNET__ counter drop
   }
 }
