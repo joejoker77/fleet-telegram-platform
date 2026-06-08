@@ -1,31 +1,83 @@
 #!/usr/bin/env bash
-# M2.1 draft entrypoint for the user runtime container. Finalized at M2.2/M3
-# (cutover), where the tmux+claude Telegram-plugin session and code-server are
-# wired exactly like the current claude-tg launcher (no plugin patch) and the
-# session is seeded/resumed from the tenant's existing logs.
-#
-# For M2.1 the image only needs to build and expose the toolchain; this script
-# starts code-server and an idle tmux 'claude' session as a placeholder so the
-# container is runnable, and logs a startup event to the audit socket if mounted.
-set -euo pipefail
+# M3.0 — user runtime entrypoint. Faithful port of /usr/local/bin/claude-tg-launcher
+# adapted for the container: launches `claude` with the official Telegram plugin
+# channel (no plugin patch) in a supervised tmux session, seeds prior-session
+# context, and runs code-server. Differences from the host launcher:
+#   - model/secret egress env (HTTPS_PROXY + onecli CA) is provided by the pod
+#     wrapper (claude-pod-run) for the cl-net path; we PRESERVE it so the bot's
+#     .env can't clobber it with the host-loopback proxy.
+#   - HOME/uid come from the container (--user + -e HOME).
+set -u
 
+USER_NAME="$(basename "$HOME")"
+export TELEGRAM_STATE_DIR="${TELEGRAM_STATE_DIR:-$HOME/.claude/channels/telegram-$USER_NAME}"
+export TMUX_TMPDIR="$HOME/.claude"
+mkdir -p "$TMUX_TMPDIR"
+SESSION="claude"
+
+# best-effort audit: runtime started
 AUDIT_SOCK="${AUDIT_SOCKET:-/run/audit/collector.sock}"
-USER_NAME="$(id -un)"
+[ -S "$AUDIT_SOCK" ] && printf '%s\n' \
+  "{\"userId\":null,\"kind\":\"runtime.start\",\"actor\":\"$USER_NAME\",\"payload\":{}}" \
+  | timeout 2 socat - "UNIX-CONNECT:$AUDIT_SOCK" 2>/dev/null || true
 
-audit() {
-  # best-effort: write one NDJSON line to the audit collector if the socket is mounted
-  [ -S "$AUDIT_SOCK" ] || return 0
-  printf '%s\n' "{\"userId\":null,\"kind\":\"runtime.start\",\"actor\":\"$USER_NAME\",\"payload\":{}}" \
-    | timeout 2 socat - "UNIX-CONNECT:$AUDIT_SOCK" 2>/dev/null || true
-}
-audit
-
-# code-server (web IDE) — bound to loopback; reverse-proxied by Caddy at M5.
-if command -v code-server >/dev/null 2>&1; then
-  code-server --bind-addr 127.0.0.1:8443 --auth none "$HOME/work" >/tmp/code-server.log 2>&1 &
+# Source the tenant's bot env (TELEGRAM_BOT_TOKEN, etc.) WITHOUT letting it
+# override the egress proxy/CA the wrapper set for the cl-net path.
+_HP="${HTTPS_PROXY:-}"; _NP="${NO_PROXY:-}"; _CA="${NODE_EXTRA_CA_CERTS:-}"
+if [ -f "$TELEGRAM_STATE_DIR/.env" ]; then
+  set -a; . "$TELEGRAM_STATE_DIR/.env"; set +a
+fi
+if [ -n "$_HP" ]; then
+  export HTTPS_PROXY="$_HP" HTTP_PROXY="$_HP" NO_PROXY="$_NP"
+  export NODE_EXTRA_CA_CERTS="$_CA" SSL_CERT_FILE="$_CA" REQUESTS_CA_BUNDLE="$_CA" CURL_CA_BUNDLE="$_CA"
 fi
 
-# Placeholder Claude session holder. M3 replaces this with the real
-# tmux + claude + official Telegram plugin launch (seeded/resumed session).
-tmux new-session -d -s claude "sleep infinity"
-exec tail -f /dev/null
+# code-server (web IDE; reverse-proxied by Caddy at M5)
+command -v code-server >/dev/null 2>&1 && \
+  code-server --bind-addr 127.0.0.1:8443 --auth none "$HOME/work" >/tmp/code-server.log 2>&1 &
+
+# Claude + official Telegram plugin channel (no patch), or remote-only if opted out.
+REMOTE_CONTROL_NAME="${REMOTE_CONTROL_NAME:-$USER_NAME-main}"
+if [ "${DISABLE_TELEGRAM_CHANNEL:-0}" = "1" ]; then
+  CLAUDE_CMD="/usr/bin/claude --remote-control $REMOTE_CONTROL_NAME"
+else
+  CLAUDE_CMD="/usr/bin/claude --channels plugin:telegram@claude-plugins-official --remote-control $REMOTE_CONTROL_NAME"
+fi
+
+tmux kill-session -t "$SESSION" 2>/dev/null || true
+TMUX_CFG="$(mktemp)"; trap 'rm -f "$TMUX_CFG"' EXIT
+echo "set-option -g history-limit 100000" > "$TMUX_CFG"
+tmux -f "$TMUX_CFG" new-session -d -s "$SESSION" -x 200 -y 60 "exec $CLAUDE_CMD"
+
+# Seed prior-session context (same logic as the host launcher; silent restore).
+(
+  sleep 15
+  LOG_FILE="$TELEGRAM_STATE_DIR/logs/session_current.txt"
+  ROT_DIR=$(dirname "$LOG_FILE")
+  ROT_LATEST=$(ls -t "$ROT_DIR"/session_*.txt 2>/dev/null | grep -v "/$(basename "$LOG_FILE")$" | head -1)
+  if ! [ -s "$LOG_FILE" ] && [ -z "$ROT_LATEST" ]; then exit 0; fi
+  if [ -s "$LOG_FILE" ] && [ -n "$ROT_LATEST" ]; then
+    TAIL=$({ tail -n 400 "$ROT_LATEST"; tail -n 400 "$LOG_FILE"; } | tail -n 400)
+  elif [ -s "$LOG_FILE" ]; then
+    TAIL=$(tail -n 400 "$LOG_FILE")
+  else
+    TAIL=$(tail -n 400 "$ROT_LATEST")
+  fi
+  [ -n "$TAIL" ] || exit 0
+  HEADER='⟪SESSION-RESTORE — context only, do NOT reply in Telegram unless followed by an actual user message⟫'
+  MSG_FILE=$(mktemp -t session_restore.XXXXXX)
+  {
+    echo "$HEADER"; echo
+    echo "Below is the tail of the previous Claude session in this bot. Read it silently to recover continuity. If the previous session was mid-task, be ready to resume from where it left off when the user next writes."
+    echo; echo '----- BEGIN PREVIOUS SESSION TAIL -----'; echo "$TAIL"; echo '----- END PREVIOUS SESSION TAIL -----'
+  } > "$MSG_FILE"
+  tmux load-buffer -b session_restore "$MSG_FILE"
+  tmux paste-buffer -t "$SESSION" -b session_restore -d -p
+  rm -f "$MSG_FILE"
+  sleep 0.4
+  tmux send-keys -t "$SESSION" Enter
+) &
+
+# Supervise: exit (→ unit Restart) when the claude session ends.
+while tmux has-session -t "$SESSION" 2>/dev/null; do sleep 5; done
+exit 1
