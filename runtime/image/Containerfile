@@ -1,0 +1,36 @@
+# M2.1 — user runtime image (one tenant per container).
+# First-party Claude Code on the tenant's own subscription: NO ANTHROPIC_BASE_URL
+# override (per ADR-001 — direct to api.anthropic.com, no LiteLLM/proxy).
+# Tools land in system paths (/usr/*) so they work under --userns=keep-id where
+# the runtime process is the tenant user, not root.
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl ca-certificates git tmux python3 unzip xz-utils socat \
+ && rm -rf /var/lib/apt/lists/*
+
+# Node 22 (NodeSource) — Claude Code + the official Telegram plugin's tooling.
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+ && apt-get install -y --no-install-recommends nodejs \
+ && rm -rf /var/lib/apt/lists/*
+
+# Official Claude Code CLI.
+RUN npm install -g @anthropic-ai/claude-code
+
+# Bun — dependency of the official Telegram plugin. Install to /usr/local so it
+# is on PATH and readable by any uid (not /root, which keep-id can't reach).
+RUN curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash
+
+# code-server — per-tenant web IDE (authoring; wired at M5).
+RUN curl -fsSL https://code-server.dev/install.sh | sh
+
+# Platform layer: locked hooks + settings + entrypoint (full security hooks land
+# at M4; this is the read-only scaffold).
+COPY platform/ /opt/platform/
+RUN chmod 0755 /opt/platform/entrypoint.sh
+
+# Sanity: fail the build early if a core tool is missing.
+RUN claude --version && bun --version && code-server --version && node --version
+
+ENTRYPOINT ["/opt/platform/entrypoint.sh"]

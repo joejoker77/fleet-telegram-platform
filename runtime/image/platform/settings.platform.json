@@ -1,0 +1,7 @@
+{
+  "_comment": "M2.1 placeholder for the locked platform settings layer. Baked read-only into the image and merged ahead of the tenant's own ~/.claude/settings.json. The real locked layer (deny rules, PreToolUse guards like the nested-claude guard + shellfirm, no model base-URL override) is populated at M4 (security stack). Kept minimal here so the image builds and the layer path exists.",
+  "permissions": {
+    "deny": []
+  },
+  "hooks": {}
+}
