@@ -56,6 +56,12 @@ else
   NETWORK=podman
 fi
 
+# Claude Code's top-level config (~/.claude.json: onboarding/trust state) lives
+# in HOME, NOT under ~/.claude — without it Claude treats the run as first-run
+# and exits in a non-interactive pane. Mount it when present.
+CFG_ARGS=()
+[ -f "$HOME_DIR/.claude.json" ] && CFG_ARGS+=(-v "$HOME_DIR/.claude.json:$HOME_DIR/.claude.json")
+
 exec /usr/bin/podman run --rm --name "claude-$U" \
   --init \
   --user "${UID_N}:${GID_N}" \
@@ -66,5 +72,6 @@ exec /usr/bin/podman run --rm --name "claude-$U" \
   -e HOME="$HOME_DIR" -e XDG_RUNTIME_DIR=/tmp "${PROXY_ARGS[@]}" \
   -v "$HOME_DIR/.claude:$HOME_DIR/.claude" \
   -v "$HOME_DIR/work:$HOME_DIR/work" \
+  "${CFG_ARGS[@]}" \
   -w "$HOME_DIR/work" \
   "$IMAGE"

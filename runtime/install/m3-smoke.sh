@@ -27,10 +27,13 @@ log "2) create test tenant OS account + dirs"
 id "$U" >/dev/null 2>&1 || useradd --create-home --shell /usr/sbin/nologin "$U"
 install -d -o "$U" -g "$U" "$DST" "$DST/channels/telegram-$U" "$DST/channels/telegram-$U/logs" "/home/$U/work"
 
-log "3) copy telegram plugin cache + Claude OAuth from vitaliy"
+log "3) copy telegram plugin cache + Claude OAuth + top-level config from vitaliy"
 cp -a "$SRC/plugins" "$DST/plugins"
 cp -a "$SRC/.credentials.json" "$DST/.credentials.json"
-chown -R "$U:$U" "$DST/plugins" "$DST/.credentials.json"
+# ~/.claude.json (onboarding/trust state) lives in HOME, not under ~/.claude;
+# without it Claude does first-run onboarding and exits in the pane.
+cp -a /home/vitaliy/.claude.json "/home/$U/.claude.json"
+chown -R "$U:$U" "$DST/plugins" "$DST/.credentials.json" "/home/$U/.claude.json"
 chmod 600 "$DST/.credentials.json"
 
 log "4) minimal tenant settings (model pin + metering hook; NOT vitaliy's host-path hooks)"
@@ -76,6 +79,7 @@ if [ -n "$ok" ] && ! grep -qi '409' "$SDIR/logs/plugin_stderr.log" 2>/dev/null; 
   echo "   Optional round-trip: message @my_wordzilla_remply_bot and confirm a reply."
 else
   echo "❌ M3.0-smoke: plugin not confirmed polling — see log tail above."
+  echo "   claude pane log (launch errors):"; tail -n 30 "$SDIR/logs/claude-pane.log" 2>/dev/null | sed 's/^/      /' || echo "      (none)"
   echo "   container logs:"; podman logs --tail 25 "claude-$U" 2>&1 | sed 's/^/      /'
   exit 1
 fi

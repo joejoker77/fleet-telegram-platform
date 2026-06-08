@@ -48,6 +48,10 @@ tmux kill-session -t "$SESSION" 2>/dev/null || true
 TMUX_CFG="$(mktemp)"; trap 'rm -f "$TMUX_CFG"' EXIT
 echo "set-option -g history-limit 100000" > "$TMUX_CFG"
 tmux -f "$TMUX_CFG" new-session -d -s "$SESSION" -x 200 -y 60 "exec $CLAUDE_CMD"
+# Non-destructively capture the pane (claude's TUI/errors) to a log so launch
+# failures are diagnosable from the host (the pty itself is preserved).
+mkdir -p "$TELEGRAM_STATE_DIR/logs"
+tmux pipe-pane -t "$SESSION" -o "cat >> '$TELEGRAM_STATE_DIR/logs/claude-pane.log'" 2>/dev/null || true
 
 # Seed prior-session context (same logic as the host launcher; silent restore).
 (
