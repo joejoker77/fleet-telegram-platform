@@ -59,8 +59,7 @@ fi
 
 # ---- audit storage ---------------------------------------------------------
 log "audit storage"
-mkdir -p "$SRV_AUDIT"
-chown 0:0 "$SRV_AUDIT"
+mkdir -p "$SRV_AUDIT"  # created root-owned by the root-run script; no chown needed
 # Append-only directory: entries can be added but not removed/renamed. Combined
 # with the per-record hash-chain this makes tampering detectable. (Per-file +a
 # is a later hardening step.)
