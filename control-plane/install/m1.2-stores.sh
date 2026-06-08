@@ -69,7 +69,7 @@ podman run -d --name cp-postgres --network cp-net \
   -e POSTGRES_USER="${PG_USER}" -e POSTGRES_DB="${PG_DB}" \
   -e POSTGRES_PASSWORD_FILE=/run/secrets/${SECRET} \
   --secret "${SECRET}" \
-  -v cp-pgdata:/var/lib/postgresql/data \
+  -v cp-pgdata:/var/lib/postgresql \
   --restart=unless-stopped \
   "${PG_IMAGE}" >/dev/null
 
