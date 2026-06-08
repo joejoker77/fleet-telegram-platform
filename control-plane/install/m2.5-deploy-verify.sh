@@ -19,8 +19,8 @@ podman exec -e ACTOR=vitaliy cp-api node "$REPO/install/inject-usage.mjs"
 sleep 1
 
 log "usage_records rows (newest)"
-podman exec cp-postgres psql -U cplane -d control_plane -tAc \
-  "select model||'  tokens='||tokens||'  win='||window from usage_records order by id desc limit 3;"
+podman exec cp-postgres psql -U cplane -d control_plane -tAF'  ' -c \
+  "select model, tokens, \"window\" from usage_records order by id desc limit 3;"
 
 log "authed GET /usage (vitaliy)"
 podman exec -e BOT_TOKEN_FILE=/run/secrets/cp_bot_token -e API=http://127.0.0.1:8080 -e TG_ID=2112420187 \
