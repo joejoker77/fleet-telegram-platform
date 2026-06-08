@@ -44,13 +44,11 @@ id cplane
 #    NOTE on the OneCLI rule: OneCLI is for EXTERNAL-request secrets (injected at
 #    the HTTPS egress proxy). A local store credential is internal, so the right
 #    mechanism is a podman/systemd secret, not OneCLI. Consistent with the rule.
-FRESH_PW=""
 if ! podman secret inspect "$SECRET" >/dev/null 2>&1; then
   log "creating podman secret $SECRET"
-  FRESH_PW="$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 40)"
-  printf '%s' "$FRESH_PW" | podman secret create "$SECRET" -
+  openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 40 | podman secret create "$SECRET" - >/dev/null
 else
-  echo "secret $SECRET already exists (value not readable back)"
+  echo "secret $SECRET already exists"
 fi
 
 # 4) network
@@ -88,18 +86,20 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 
-# 8) migrations + seed (only possible the run that freshly generated the password)
-if [ -n "${FRESH_PW}" ]; then
-  log "applying migrations + seed (as vitaliy, against 127.0.0.1:${PG_PORT})"
-  sudo -u vitaliy -H bash -lc "cd '${REPO}' && export COREPACK_ENABLE_DOWNLOAD_PROMPT=0 && export DATABASE_URL='postgres://${PG_USER}:${FRESH_PW}@127.0.0.1:${PG_PORT}/${PG_DB}' && corepack pnpm install --silent && corepack pnpm db:migrate && corepack pnpm db:seed"
-  unset FRESH_PW
-else
-  cat <<EOF
-secret pre-existed, so this run did NOT re-apply migrations (the password is not
-readable back from the podman secret). If the schema is not yet present, start
-clean:  podman rm -f cp-postgres; podman volume rm cp-pgdata; podman secret rm ${SECRET}; then re-run.
-EOF
-fi
+# 8) migrations + seed. Idempotent: read the live password from the running
+#    container (not the unreadable secret), and invoke drizzle-kit/tsx directly
+#    via `pnpm exec` — the package.json wrapper scripts call bare `pnpm`, which
+#    isn't on PATH (we only use `corepack pnpm`), so they fail in this context.
+log "applying migrations + seed (as vitaliy, against 127.0.0.1:${PG_PORT})"
+PW="$(podman exec cp-postgres printenv POSTGRES_PASSWORD)"
+[ -n "$PW" ] || { echo "could not read POSTGRES_PASSWORD from cp-postgres"; exit 1; }
+sudo -u vitaliy -H bash -lc "cd '${REPO}' \
+  && export COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+  && export DATABASE_URL='postgres://${PG_USER}:${PW}@127.0.0.1:${PG_PORT}/${PG_DB}' \
+  && corepack pnpm install --silent \
+  && corepack pnpm --filter @fleet/db exec drizzle-kit migrate \
+  && corepack pnpm --filter @fleet/db exec tsx src/seed.ts"
+unset PW
 
 log "status"
 podman ps --filter name=cp- --format '{{.Names}}  {{.Status}}  {{.Ports}}'
