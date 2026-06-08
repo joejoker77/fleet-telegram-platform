@@ -43,10 +43,24 @@ To apply now without waiting, restart bots one at a time during idle:
 
 ### Manual step (AgentShield-protected — operator only)
 
-Wire the guard into each bot's `~/.claude/settings.json` by merging
-`nested-claude-guard/settings-hook-snippet.json` into `.hooks.PreToolUse`
-(matcher `Bash`). A bot self-writing this gets rolled back, so do it as operator.
-The guard installs to `/usr/local/share/claude-guard/block-nested-claude.py`.
+`.hooks.PreToolUse` is a JSON path **inside** each bot's
+`/home/<user>/.claude/settings.json` — not a separate file. Use the idempotent
+merger (run as root); it appends the guard to the existing `Bash` matcher
+(alongside shellfirm), backs up first, and is safe to re-run:
+
+```bash
+cd nested-claude-guard
+./wire-guard.py --dry-run /home/vitaliy/.claude/settings.json   # preview
+./wire-guard.py /home/vitaliy/.claude/settings.json             # one bot (pilot)
+./wire-guard.py /home/*/.claude/settings.json                   # all bots
+```
+
+`settings-hook-snippet.json` is just the stanza for reference if you prefer to
+merge by hand. The guard script is installed at
+`/usr/local/share/claude-guard/block-nested-claude.py` by `apply.sh`.
+
+If AgentShield rolls the edit back, re-baseline/approve it via the security-stack
+tooling before relying on the guard.
 
 ## Exit criteria (from doc 01)
 
