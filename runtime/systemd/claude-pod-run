@@ -42,6 +42,15 @@ if podman network exists cl-net >/dev/null 2>&1; then
     TOKEN_FILE="/etc/cl-egress/$U.token"
     [ -f "$TOKEN_FILE" ] && AUTH="x:$(cat "$TOKEN_FILE")@"
     PROXY_ARGS=(-e HTTPS_PROXY="http://${AUTH}${GW}:10255" -e HTTP_PROXY="http://${AUTH}${GW}:10255" -e NO_PROXY="127.0.0.1,localhost,::1")
+    # OneCLI is a TLS-intercepting proxy — clients must trust its CA bundle,
+    # else the CONNECT tunnel opens but TLS fails. Mount the host CA + point the
+    # standard CA-trust env vars (curl/node/python) at it.
+    CA=/etc/onecli/ca-bundle.pem
+    if [ -f "$CA" ]; then
+      PROXY_ARGS+=(-v "$CA:$CA:ro" \
+        -e NODE_EXTRA_CA_CERTS="$CA" -e SSL_CERT_FILE="$CA" \
+        -e REQUESTS_CA_BUNDLE="$CA" -e CURL_CA_BUNDLE="$CA")
+    fi
   fi
 else
   NETWORK=podman
