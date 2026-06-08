@@ -3,6 +3,7 @@
 // types. Only the M1 surface (auth + profile) is defined now; later milestones
 // add builders/registry/usage/approvals contracts here.
 
+import { createHash } from "node:crypto";
 import { z } from "zod";
 
 // ── enum mirrors (kept in sync with @fleet/db schema enums) ──
@@ -50,3 +51,41 @@ export const auditEvent = z.object({
   payload: z.record(z.unknown()).default({}),
 });
 export type AuditEvent = z.infer<typeof auditEvent>;
+
+// A committed audit record: the event plus the chain fields the collector adds.
+export const auditRecord = auditEvent.extend({
+  ts: z.string().datetime(),
+  prevHash: z.string(),
+  hash: z.string(),
+});
+export type AuditRecord = z.infer<typeof auditRecord>;
+
+// Genesis link for the very first record in a chain.
+export const AUDIT_GENESIS_HASH = "0".repeat(64);
+
+// Deterministic JSON: object keys sorted recursively, so the same logical
+// payload always hashes identically regardless of key insertion order.
+export function canonicalize(value: unknown): string {
+  return JSON.stringify(sortKeys(value));
+}
+function sortKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortKeys);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value as Record<string, unknown>)
+        .sort()
+        .map((k) => [k, sortKeys((value as Record<string, unknown>)[k])]),
+    );
+  }
+  return value;
+}
+
+// Chain hash = sha256(prevHash + canonical(core)). The core is the immutable
+// content of the record (everything except prevHash/hash). Pure + dependency-free
+// (node:crypto) so the collector and any verifier compute identical hashes.
+export function chainHash(
+  prevHash: string,
+  core: { ts: string; userId: string | null; kind: string; actor: string; payload: Record<string, unknown> },
+): string {
+  return createHash("sha256").update(prevHash).update(canonicalize(core)).digest("hex");
+}
