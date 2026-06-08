@@ -36,7 +36,12 @@ if podman network exists cl-net >/dev/null 2>&1; then
   GW="$(podman network inspect cl-net --format json 2>/dev/null \
         | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["subnets"][0]["gateway"])' 2>/dev/null || true)"
   if [ -n "${GW:-}" ]; then
-    PROXY_ARGS=(-e HTTPS_PROXY="http://${GW}:10255" -e HTTP_PROXY="http://${GW}:10255" -e NO_PROXY="127.0.0.1,localhost,::1")
+    # Per-tenant OneCLI scoped proxy token (provisioned at M2.4/M2.6). When present,
+    # the agent authenticates to the proxy as itself (selective secrets, isolation).
+    AUTH=""
+    TOKEN_FILE="/etc/cl-egress/$U.token"
+    [ -f "$TOKEN_FILE" ] && AUTH="x:$(cat "$TOKEN_FILE")@"
+    PROXY_ARGS=(-e HTTPS_PROXY="http://${AUTH}${GW}:10255" -e HTTP_PROXY="http://${AUTH}${GW}:10255" -e NO_PROXY="127.0.0.1,localhost,::1")
   fi
 else
   NETWORK=podman

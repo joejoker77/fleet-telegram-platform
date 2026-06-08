@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# M2.4 — per-tenant OneCLI agent + scoped token + isolation, validated on cptest.
+# ADDITIVE only: creates the cptest-bot agent; never touches existing agents,
+# secrets, or rules. Run as root on the host (onecli must be authed in this
+# context). Idempotent. DEV scaffolding (teardown).
+set -euo pipefail
+
+TEST_USER=cptest
+AGENT_ID_NAME=cptest          # display name
+AGENT_IDENT=cptest-bot        # identifier
+TOKDIR=/etc/cl-egress
+TOKFILE="$TOKDIR/$TEST_USER.token"
+
+log() { printf '\n== %s ==\n' "$*"; }
+die() { echo "ERROR: $*" >&2; exit 1; }
+[ "$(id -u)" -eq 0 ] || die "run as root"
+command -v onecli >/dev/null 2>&1 || die "onecli not found"
+export HOME=/root   # onecli reads its stored API key from \$HOME
+onecli auth status >/dev/null 2>&1 || die "onecli not authenticated (run 'onecli auth login' as root first)"
+podman container exists "claude-$TEST_USER" || die "claude-$TEST_USER not running (run m2.3-egress.sh first)"
+
+# 1) create (or look up) the tenant agent
+log "ensuring OneCLI agent $AGENT_IDENT"
+AID="$(onecli agents list --json 2>/dev/null | python3 -c "
+import json,sys
+d=json.load(sys.stdin); rows=d.get('data',d) if isinstance(d,dict) else d
+print(next((a['id'] for a in rows if a.get('identifier')=='$AGENT_IDENT'),''))" 2>/dev/null || true)"
+
+if [ -z "$AID" ]; then
+  CREATE_OUT="$(onecli agents create --name "$AGENT_ID_NAME" --identifier "$AGENT_IDENT")"
+  echo "$CREATE_OUT" | python3 -c "
+import json,sys
+d=json.load(sys.stdin); a=d.get('data',d) if isinstance(d,dict) else d
+open('$TOKDIR/.cptest_agent.json','w').write(json.dumps(a))
+"
+else
+  echo "agent exists ($AID); regenerating token"
+  onecli agents regenerate-token --id "$AID" | python3 -c "
+import json,sys
+d=json.load(sys.stdin); a=d.get('data',d) if isinstance(d,dict) else d
+open('$TOKDIR/.cptest_agent.json','w').write(json.dumps(a))
+"
+fi
+
+mkdir -p "$TOKDIR"; chmod 0700 "$TOKDIR"
+AID="$(python3 -c "import json;print(json.load(open('$TOKDIR/.cptest_agent.json'))['id'])")"
+TOKEN="$(python3 -c "import json;print(json.load(open('$TOKDIR/.cptest_agent.json'))['accessToken'])")"
+[ -n "$AID" ] && [ -n "$TOKEN" ] || die "could not obtain agent id/token"
+rm -f "$TOKDIR/.cptest_agent.json"
+echo "agent id=$AID"
+
+# 2) selective secret mode → tenant isolation (does NOT inherit shared secrets)
+log "setting secretMode=selective (isolation)"
+onecli agents set-secret-mode --id "$AID" --mode selective >/dev/null
+
+# 3) verify isolation: the agent sees NO secrets (none assigned)
+log "agent's visible secrets (expect none)"
+onecli agents secrets --id "$AID" 2>&1 | python3 -c "
+import json,sys
+try:
+  d=json.load(sys.stdin); rows=d.get('data',d) if isinstance(d,dict) else d
+  print(f'  visible secrets: {len(rows)}'+('' if rows else '  -> isolated (sees no shared secrets)'))
+except Exception: print('  (could not parse; check manually)')"
+
+# 4) write the token for the wrapper, restart the pod to pick it up
+log "wiring token into the tenant container"
+umask 077; printf '%s' "$TOKEN" > "$TOKFILE"; chmod 0600 "$TOKFILE"
+systemctl restart "claude-pod@$TEST_USER"
+for _ in $(seq 1 30); do [ "$(podman inspect -f '{{.State.Running}}' claude-$TEST_USER 2>/dev/null)" = "true" ] && break; sleep 1; done
+
+# 5) verify: proxy accepts the tenant token + anthropic reachable; unknown host denied
+GW="$(podman network inspect cl-net --format json | python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["subnets"][0]["gateway"])')"
+log "VERIFY per-tenant proxy auth + allow/deny"
+echo -n "  anthropic via tenant token (expect reached: 401, NOT 407 token-reject): "
+a=$(podman exec claude-$TEST_USER curl -m12 -s -o /dev/null -w '%{http_code}' -x "http://x:$TOKEN@$GW:10255" https://api.anthropic.com/v1/messages 2>/dev/null || true); echo "$a"
+echo -n "  unconfigured host example.com via tenant token (expect denied, NOT 200): "
+u=$(podman exec claude-$TEST_USER curl -m12 -s -o /dev/null -w '%{http_code}' -x "http://x:$TOKEN@$GW:10255" https://example.com/ 2>/dev/null || true); echo "$u"
+
+echo
+if [ "$a" = "401" ] || { [ "$a" != "000" ] && [ "$a" != "407" ]; }; then
+  echo "✅ M2.4: tenant agent token works (proxy authed as cptest-bot, anthropic allowed); selective isolation set"
+  echo "   (anthropic=$a, example.com=$u — example.com should be a deny code, not 200)"
+else
+  echo "❌ M2.4 unexpected (anthropic=$a, example.com=$u) — see above"; exit 1
+fi
