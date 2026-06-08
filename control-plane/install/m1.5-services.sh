@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# M1.5 — bring up the control-plane services as Podman containers on cp-net:
+#   cp-audit-collector  (hash-chain WORM sink, unix socket)
+#   cp-api              (Fastify: initData auth, /auth/session, /me) on 127.0.0.1:8080
+#
+# Run as root on the host. Idempotent (recreates the service containers each run;
+# stores cp-postgres/cp-redis from m1.2 are left running). Prompts once, silently,
+# for the vitaliy bot token and stores it as a podman secret (never a file/argv).
+#
+# Services run the TypeScript directly via the workspace's tsx (no build step):
+# the repo is bind-mounted read-only at its real path so pnpm's symlinked
+# node_modules resolve. Secrets are mounted as files under /run/secrets and read
+# at container start; the PG password is composed into DATABASE_URL in-container
+# only. Stores are reached by container DNS (cp-postgres/cp-redis on cp-net).
+#
+# Pilot: vitaliy only. All artifacts tracked for teardown (project_fleet_dev_teardown).
+set -euo pipefail
+
+REPO=/home/vitaliy/work/fleet-platform/control-plane
+NODE_IMAGE=docker.io/library/node:22-alpine
+PG_SECRET=cp_pg_password
+BOT_SECRET=cp_bot_token
+JWT_SECRET=cp_jwt_secret
+API_PORT=8080
+SRV_AUDIT=/srv/audit
+
+log() { printf '\n== %s ==\n' "$*"; }
+die() { echo "ERROR: $*" >&2; exit 1; }
+[ "$(id -u)" -eq 0 ] || die "run as root"
+
+# ---- preflight -------------------------------------------------------------
+command -v podman >/dev/null 2>&1 || die "podman not installed (run m1.2-stores.sh first)"
+podman container exists cp-postgres || die "cp-postgres not found (run m1.2-stores.sh first)"
+podman container exists cp-redis    || die "cp-redis not found (run m1.2-stores.sh first)"
+podman secret inspect "$PG_SECRET" >/dev/null 2>&1 || die "$PG_SECRET secret missing (m1.2)"
+[ -d "$REPO/node_modules" ] || die "node_modules missing in $REPO — run 'corepack pnpm install' as vitaliy"
+
+# ---- secrets ---------------------------------------------------------------
+# Bot token: prompt silently, store as podman secret. Used for LOCAL initData
+# HMAC verification (not an outbound call) → local credential, not OneCLI.
+if ! podman secret inspect "$BOT_SECRET" >/dev/null 2>&1; then
+  printf 'Paste the vitaliy Telegram bot token (hidden), then Enter: ' >&2
+  read -rs BOT_TOKEN; echo >&2
+  [ -n "${BOT_TOKEN:-}" ] || die "empty bot token"
+  printf '%s' "$BOT_TOKEN" | podman secret create "$BOT_SECRET" - >/dev/null
+  unset BOT_TOKEN
+  echo "stored $BOT_SECRET"
+else
+  echo "$BOT_SECRET already exists"
+fi
+
+# JWT signing secret: generated, never displayed.
+if ! podman secret inspect "$JWT_SECRET" >/dev/null 2>&1; then
+  openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 64 | podman secret create "$JWT_SECRET" - >/dev/null
+  echo "generated $JWT_SECRET"
+else
+  echo "$JWT_SECRET already exists"
+fi
+
+# ---- audit storage ---------------------------------------------------------
+log "audit storage"
+mkdir -p "$SRV_AUDIT"
+chown 0:0 "$SRV_AUDIT"
+# Append-only directory: entries can be added but not removed/renamed. Combined
+# with the per-record hash-chain this makes tampering detectable. (Per-file +a
+# is a later hardening step.)
+chattr +a "$SRV_AUDIT" 2>/dev/null || echo "note: chattr +a not supported on this fs — relying on hash-chain"
+podman volume exists cp-audit-run >/dev/null 2>&1 || podman volume create cp-audit-run >/dev/null
+
+# ---- pull runtime image ----------------------------------------------------
+podman image exists "$NODE_IMAGE" || { log "pulling $NODE_IMAGE"; podman pull "$NODE_IMAGE" >/dev/null; }
+
+# ---- cp-audit-collector ----------------------------------------------------
+log "starting cp-audit-collector"
+podman rm -f cp-audit-collector >/dev/null 2>&1 || true
+podman run -d --name cp-audit-collector --network cp-net \
+  --workdir "$REPO" \
+  -v "$REPO:$REPO:ro" \
+  -v "$SRV_AUDIT:/srv/audit" \
+  -v cp-audit-run:/run/audit \
+  --secret "$PG_SECRET" \
+  --restart=unless-stopped \
+  "$NODE_IMAGE" \
+  sh -c 'set -e; export AUDIT_DIR=/srv/audit AUDIT_SOCKET=/run/audit/collector.sock;
+    export DATABASE_URL="postgres://cplane:$(cat /run/secrets/'"$PG_SECRET"')@cp-postgres:5432/control_plane";
+    exec node_modules/.bin/tsx apps/audit-collector/src/index.ts' >/dev/null
+
+# ---- cp-api ----------------------------------------------------------------
+log "starting cp-api (127.0.0.1:${API_PORT})"
+podman rm -f cp-api >/dev/null 2>&1 || true
+podman run -d --name cp-api --network cp-net \
+  -p 127.0.0.1:${API_PORT}:8080 \
+  --workdir "$REPO" \
+  -v "$REPO:$REPO:ro" \
+  -v cp-audit-run:/run/audit \
+  --secret "$PG_SECRET" --secret "$BOT_SECRET" --secret "$JWT_SECRET" \
+  --restart=unless-stopped \
+  "$NODE_IMAGE" \
+  sh -c 'set -e; export HOST=0.0.0.0 PORT=8080 REDIS_URL=redis://cp-redis:6379 AUDIT_SOCKET=/run/audit/collector.sock;
+    export TELEGRAM_BOT_TOKEN_FILE=/run/secrets/'"$BOT_SECRET"' JWT_SECRET_FILE=/run/secrets/'"$JWT_SECRET"';
+    export DATABASE_URL="postgres://cplane:$(cat /run/secrets/'"$PG_SECRET"')@cp-postgres:5432/control_plane";
+    exec node_modules/.bin/tsx apps/api/src/index.ts' >/dev/null
+
+# reboot persistence for all --restart containers
+systemctl enable podman-restart.service >/dev/null 2>&1 || true
+
+# ---- health ----------------------------------------------------------------
+log "waiting for cp-api /healthz"
+ok=""
+for _ in $(seq 1 30); do
+  if curl -sf "http://127.0.0.1:${API_PORT}/healthz" >/dev/null 2>&1; then ok=1; echo "healthz OK"; break; fi
+  for c in cp-api cp-audit-collector; do
+    [ "$(podman inspect -f '{{.State.Status}}' "$c" 2>/dev/null)" = "running" ] || { echo "$c not running:"; podman logs --tail 30 "$c" 2>&1 || true; exit 1; }
+  done
+  sleep 1
+done
+[ -n "$ok" ] || { echo "cp-api did not answer /healthz:"; podman logs --tail 40 cp-api 2>&1 || true; exit 1; }
+
+log "status"
+podman ps --filter name=cp- --format '{{.Names}}  {{.Status}}  {{.Ports}}'
