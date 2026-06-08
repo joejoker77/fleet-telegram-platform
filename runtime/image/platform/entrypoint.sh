@@ -56,9 +56,12 @@ proj = d.setdefault("projects", {}).setdefault(work, {})
 proj["hasTrustDialogAccepted"] = True
 proj["hasCompletedProjectOnboarding"] = True
 if json.dumps(d, sort_keys=True) != before:
-    tmp = p + ".tmp"
-    json.dump(d, open(tmp, "w"), indent=2)
-    os.replace(tmp, p)
+    # Write IN-PLACE. ~/.claude.json is a bind-mounted file; os.replace()/rename()
+    # ONTO a mount point fails with EBUSY (the write then silently no-ops, leaving
+    # the donor's trusted paths only -> Claude re-prompts -> crash loop). Truncating
+    # and writing the mounted inode itself is allowed even under --read-only.
+    with open(p, "w") as f:
+        json.dump(d, f, indent=2)
 PY
 
 # Claude + official Telegram plugin channel (no patch), or remote-only if opted out.
