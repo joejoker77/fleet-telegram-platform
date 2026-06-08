@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Launch one tenant's runtime container. Invoked by claude-pod@.service as:
+#   claude-pod-run <username>
+#
+# Hardening (pilot interim): rootful podman + run-as-tenant-uid (--user) so
+# mounted home keeps host ownership, + --init (tini PID1 → signals work & reaping),
+# --cap-drop=ALL, --security-opt=no-new-privileges, --read-only rootfs + tmpfs,
+# and podman-enforced mem/cpu/pids limits (authoritative; the unit's cgroup
+# limits are a backstop). NETWORK is default bridge here — the locked netns +
+# nftables egress default-deny lands in M2.3. Fully-rootless per-user podman
+# (--userns=keep-id, own image store) is the hardening TARGET; deferred to keep
+# this step low-risk (see project_fleet_rearchitecture / ADR notes).
+set -euo pipefail
+
+U="${1:?usage: claude-pod-run <username>}"
+id "$U" >/dev/null 2>&1 || { echo "no such user: $U"; exit 1; }
+UID_N="$(id -u "$U")"
+GID_N="$(id -g "$U")"
+HOME_DIR="/home/$U"
+IMAGE="localhost/claude-user:latest"
+
+podman image exists "$IMAGE" || { echo "image $IMAGE missing (run m2.1-build-image.sh)"; exit 1; }
+[ -d "$HOME_DIR/.claude" ] || { echo "$HOME_DIR/.claude missing"; exit 1; }
+[ -d "$HOME_DIR/work" ] || { echo "$HOME_DIR/work missing"; exit 1; }
+
+exec /usr/bin/podman run --rm --name "claude-$U" \
+  --init \
+  --user "${UID_N}:${GID_N}" \
+  --cap-drop=ALL --security-opt=no-new-privileges \
+  --read-only --tmpfs /tmp --tmpfs /run \
+  --memory=4g --memory-reservation=3g --cpus=2 --pids-limit=2048 \
+  -e HOME="$HOME_DIR" -e XDG_RUNTIME_DIR=/tmp \
+  -v "$HOME_DIR/.claude:$HOME_DIR/.claude" \
+  -v "$HOME_DIR/work:$HOME_DIR/work" \
+  -w "$HOME_DIR/work" \
+  "$IMAGE"

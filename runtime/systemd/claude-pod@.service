@@ -1,0 +1,26 @@
+[Unit]
+Description=Claude tenant runtime container (%i)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+# Clean any stale container from a previous run, then launch via the wrapper
+# (resolves the tenant uid and applies the hardening flags).
+ExecStartPre=-/usr/bin/podman rm -f claude-%i
+ExecStart=/usr/local/sbin/claude-pod-run %i
+ExecStop=/usr/bin/podman stop -t 20 claude-%i
+Restart=always
+RestartSec=20
+TimeoutStopSec=30
+
+# cgroup backstop (authoritative limits are podman --memory/--cpus in the wrapper)
+MemoryAccounting=true
+MemoryHigh=3G
+MemoryMax=4G
+CPUWeight=100
+IOWeight=100
+OOMPolicy=continue
+
+[Install]
+WantedBy=multi-user.target
