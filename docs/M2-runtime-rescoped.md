@@ -51,9 +51,9 @@ virtual-key step.)
 
 ### M2.7 — Acceptance gate (re-scoped)
 - Image builds; container starts rootless with cgroup limits.
-- Egress default-deny verified: model reachable **only** via the
-  `api.anthropic.com` allow; external APIs **only** via OneCLI/whitelist; raw
-  internet blocked.
+- Egress verified: raw internet blocked; the container reaches **only** the
+  audited OneCLI proxy (no strict host whitelist — see
+  [ADR-002](./ADR-002-egress-policy.md)).
 - OneCLI swaps placeholders by host/path; an "env dump" yields only FAKE values.
 - Per-user usage recorded from Claude Code data (not a gateway).
 - All on a **test** tenant; live `claude-tg@*` untouched.
