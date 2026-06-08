@@ -19,35 +19,31 @@ export HOME=/root   # onecli reads its stored API key from \$HOME
 onecli auth status >/dev/null 2>&1 || die "onecli not authenticated (run 'onecli auth login' as root first)"
 podman container exists "claude-$TEST_USER" || die "claude-$TEST_USER not running (run m2.3-egress.sh first)"
 
-# 1) create (or look up) the tenant agent
-log "ensuring OneCLI agent $AGENT_IDENT"
-AID="$(onecli agents list --json 2>/dev/null | python3 -c "
+mkdir -p "$TOKDIR"; chmod 0700 "$TOKDIR"
+
+lookup_aid() {
+  onecli agents list --json 2>/dev/null | python3 -c "
 import json,sys
 d=json.load(sys.stdin); rows=d.get('data',d) if isinstance(d,dict) else d
-print(next((a['id'] for a in rows if a.get('identifier')=='$AGENT_IDENT'),''))" 2>/dev/null || true)"
+print(next((a['id'] for a in rows if a.get('identifier')=='$AGENT_IDENT'),''))" 2>/dev/null || true
+}
 
+# 1) ensure the tenant agent exists (create if missing)
+log "ensuring OneCLI agent $AGENT_IDENT"
+AID="$(lookup_aid)"
 if [ -z "$AID" ]; then
-  CREATE_OUT="$(onecli agents create --name "$AGENT_ID_NAME" --identifier "$AGENT_IDENT")"
-  echo "$CREATE_OUT" | python3 -c "
-import json,sys
-d=json.load(sys.stdin); a=d.get('data',d) if isinstance(d,dict) else d
-open('$TOKDIR/.cptest_agent.json','w').write(json.dumps(a))
-"
-else
-  echo "agent exists ($AID); regenerating token"
-  onecli agents regenerate-token --id "$AID" | python3 -c "
-import json,sys
-d=json.load(sys.stdin); a=d.get('data',d) if isinstance(d,dict) else d
-open('$TOKDIR/.cptest_agent.json','w').write(json.dumps(a))
-"
+  onecli agents create --name "$AGENT_ID_NAME" --identifier "$AGENT_IDENT" >/dev/null
+  AID="$(lookup_aid)"
 fi
-
-mkdir -p "$TOKDIR"; chmod 0700 "$TOKDIR"
-AID="$(python3 -c "import json;print(json.load(open('$TOKDIR/.cptest_agent.json'))['id'])")"
-TOKEN="$(python3 -c "import json;print(json.load(open('$TOKDIR/.cptest_agent.json'))['accessToken'])")"
-[ -n "$AID" ] && [ -n "$TOKEN" ] || die "could not obtain agent id/token"
-rm -f "$TOKDIR/.cptest_agent.json"
+[ -n "$AID" ] || die "could not create/find agent $AGENT_IDENT"
 echo "agent id=$AID"
+
+# 2) get a fresh scoped token (regenerate-token reliably returns accessToken)
+TOKEN="$(onecli agents regenerate-token --id "$AID" | python3 -c "
+import json,sys
+d=json.load(sys.stdin); a=d.get('data',d) if isinstance(d,dict) else d
+print(a.get('accessToken',''))" 2>/dev/null || true)"
+[ -n "$TOKEN" ] || die "could not obtain access token for $AID"
 
 # 2) selective secret mode → tenant isolation (does NOT inherit shared secrets)
 log "setting secretMode=selective (isolation)"
