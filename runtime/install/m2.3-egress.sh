@@ -82,10 +82,12 @@ systemctl is-active cl-egress-forwarder >/dev/null || { journalctl -u cl-egress-
 # 7) verify lockdown from inside the container
 log "VERIFY egress lockdown (from inside claude-$TEST_USER)"
 echo -n "  direct internet (1.1.1.1, no proxy) — expect BLOCKED (000): "
-direct=$(podman exec claude-$TEST_USER curl --noproxy '*' -m 6 -s -o /dev/null -w '%{http_code}' https://1.1.1.1/ 2>/dev/null || echo 000)
+# curl prints the http_code (000 on connection failure); `|| true` only
+# neutralises the non-zero exit under set -e (no extra echo → no '000000').
+direct=$(podman exec claude-$TEST_USER curl --noproxy '*' -m 6 -s -o /dev/null -w '%{http_code}' https://1.1.1.1/ 2>/dev/null || true)
 echo "$direct"
-echo -n "  via proxy to api.anthropic.com — expect REACHABLE (non-000, e.g. 401/407): "
-viaproxy=$(podman exec claude-$TEST_USER curl -m 12 -s -o /dev/null -w '%{http_code}' -x "http://$GW:10255" https://api.anthropic.com/v1/messages 2>/dev/null || echo 000)
+echo -n "  via proxy to api.anthropic.com — expect REACHABLE (non-000, e.g. 401/405/407): "
+viaproxy=$(podman exec claude-$TEST_USER curl -m 12 -s -o /dev/null -w '%{http_code}' -x "http://$GW:10255" https://api.anthropic.com/v1/messages 2>/dev/null || true)
 echo "$viaproxy"
 
 echo
