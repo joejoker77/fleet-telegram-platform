@@ -1,0 +1,25 @@
+#!/usr/sbin/nft -f
+# M2.3 template — egress lockdown for tenant containers on cl-net.
+# __SUBNET__ / __GW__ are substituted at install time with cl-net's
+# podman-assigned values (auto-picked to avoid host subnet collisions).
+#
+# Own table (inet cl_egress) so it NEVER edits existing perimeter rules;
+# rollback = `nft delete table inet cl_egress`. Priority -10 so the explicit
+# drops win; non-tenant traffic falls through (policy accept) untouched.
+
+add table inet cl_egress
+delete table inet cl_egress
+table inet cl_egress {
+  chain forward {
+    type filter hook forward priority -10; policy accept;
+    ip saddr __SUBNET__ ct state established,related accept
+    ip saddr __SUBNET__ ip daddr __GW__ accept
+    ip saddr __SUBNET__ drop
+  }
+  chain input {
+    type filter hook input priority -10; policy accept;
+    ip saddr __SUBNET__ ct state established,related accept
+    ip saddr __SUBNET__ tcp dport 10255 accept
+    ip saddr __SUBNET__ drop
+  }
+}

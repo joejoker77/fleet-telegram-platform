@@ -29,9 +29,15 @@ podman image exists "$IMAGE" || { echo "image $IMAGE missing (run m2.1-build-ima
 PROXY_ARGS=()
 if podman network exists cl-net >/dev/null 2>&1; then
   NETWORK=cl-net
-  # Per-tenant proxy auth token is injected by the provisioner at M2.6; for now
-  # the network path (gateway:10255) is what matters for the egress lockdown.
-  PROXY_ARGS=(-e HTTPS_PROXY="http://10.89.0.1:10255" -e HTTP_PROXY="http://10.89.0.1:10255" -e NO_PROXY="127.0.0.1,localhost,::1")
+  # cl-net's subnet/gateway are podman-assigned (collision-free); read the
+  # gateway so the container points its proxy at it. Per-tenant proxy auth token
+  # is injected by the provisioner at M2.6; the network path is what the egress
+  # lockdown enforces now.
+  GW="$(podman network inspect cl-net --format json 2>/dev/null \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["subnets"][0]["gateway"])' 2>/dev/null || true)"
+  if [ -n "${GW:-}" ]; then
+    PROXY_ARGS=(-e HTTPS_PROXY="http://${GW}:10255" -e HTTP_PROXY="http://${GW}:10255" -e NO_PROXY="127.0.0.1,localhost,::1")
+  fi
 else
   NETWORK=podman
 fi

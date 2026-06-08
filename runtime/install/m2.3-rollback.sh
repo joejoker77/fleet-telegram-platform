@@ -15,7 +15,7 @@ nft delete table inet cl_egress 2>/dev/null && echo "deleted" || echo "(not pres
 
 echo "== stopping + removing forwarder =="
 systemctl disable --now cl-egress-forwarder 2>/dev/null || true
-rm -f "$FWD_UNIT"
+rm -f "$FWD_UNIT" /etc/cl-egress.env /etc/cl-egress.nft
 systemctl daemon-reload
 
 echo "== stopping pod so the network can be removed =="

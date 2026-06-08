@@ -4,10 +4,12 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
-# Listen on the cl-net gateway IP and forward to the host-loopback OneCLI proxy,
-# so tenant containers reach the proxy without the shared OneCLI being
-# reconfigured. Restart=always covers the bridge IP appearing slightly late.
-ExecStart=/usr/bin/socat TCP-LISTEN:10255,bind=10.89.0.1,fork,reuseaddr TCP:127.0.0.1:10255
+# GW is the cl-net gateway IP, written to /etc/cl-egress.env by m2.3-egress.sh
+# (cl-net's subnet is podman-assigned to avoid collisions). Listen on the
+# gateway and forward to the host-loopback OneCLI proxy, so tenant containers
+# reach the proxy without the shared OneCLI being reconfigured.
+EnvironmentFile=/etc/cl-egress.env
+ExecStart=/usr/bin/socat TCP-LISTEN:10255,bind=${GW},fork,reuseaddr TCP:127.0.0.1:10255
 Restart=always
 RestartSec=5
 
