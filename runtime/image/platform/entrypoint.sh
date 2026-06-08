@@ -36,6 +36,31 @@ fi
 command -v code-server >/dev/null 2>&1 && \
   code-server --bind-addr 127.0.0.1:8443 --auth none "$HOME/work" >/tmp/code-server.log 2>&1 &
 
+# Ensure THIS container's workspace is trusted in ~/.claude.json, else Claude Code
+# stops at the per-project trust prompt ("Is this a project you trust?") and hangs
+# the non-interactive pane (no session -> no plugin). Per-project, keyed by path:
+# a seeded .claude.json only trusts the donor's workspace, so a tenant whose path
+# differs (e.g. the m3smoke test tenant) re-prompts. Idempotent: writes only on a
+# real change, so it's a no-op when the path is already trusted (the live cutover).
+CJ="$HOME/.claude.json" WORKDIR="$HOME/work" python3 - <<'PY' 2>/dev/null || true
+import json, os
+p, work = os.environ["CJ"], os.environ["WORKDIR"]
+try:
+    d = json.load(open(p))
+except Exception:
+    d = {}
+before = json.dumps(d, sort_keys=True)
+d.setdefault("hasCompletedOnboarding", True)
+d.setdefault("trustDialogAccepted", True)
+proj = d.setdefault("projects", {}).setdefault(work, {})
+proj["hasTrustDialogAccepted"] = True
+proj["hasCompletedProjectOnboarding"] = True
+if json.dumps(d, sort_keys=True) != before:
+    tmp = p + ".tmp"
+    json.dump(d, open(tmp, "w"), indent=2)
+    os.replace(tmp, p)
+PY
+
 # Claude + official Telegram plugin channel (no patch), or remote-only if opted out.
 REMOTE_CONTROL_NAME="${REMOTE_CONTROL_NAME:-$USER_NAME-main}"
 if [ "${DISABLE_TELEGRAM_CHANNEL:-0}" = "1" ]; then
