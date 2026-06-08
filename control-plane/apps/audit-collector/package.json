@@ -12,6 +12,7 @@
   "dependencies": {
     "@fleet/db": "workspace:*",
     "@fleet/shared": "workspace:*",
+    "drizzle-orm": "0.36.4",
     "pino": "9.5.0"
   },
   "devDependencies": {

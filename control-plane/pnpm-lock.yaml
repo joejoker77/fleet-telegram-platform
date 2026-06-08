@@ -57,6 +57,9 @@ importers:
       '@fleet/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      drizzle-orm:
+        specifier: 0.36.4
+        version: 0.36.4(@types/pg@8.11.10)(pg@8.13.1)
       pino:
         specifier: 9.5.0
         version: 9.5.0

@@ -94,14 +94,41 @@ app.get("/me", async (req, reply) => {
 // Endpoints scheduled for later milestones (fs/build/registry/usage/sessions/
 // approvals/live → M5/M6/M8). Declared so the surface is explicit and callers
 // get a clear 501 rather than a 404.
-for (const route of [
-  "/fs/tree",
-  "/fs/file",
-  "/registry/items",
-  "/usage",
-  "/sessions",
-  "/approvals",
-] as const) {
+// GET /usage — per-tenant token usage (from usage_records, fed by the metering
+// hook → audit-collector). Tokens only (flat subscription = no $).
+app.get("/usage", async (req, reply) => {
+  const auth = req.headers.authorization ?? "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  if (!token) return reply.code(401).send({ error: "missing bearer token" });
+  let sub: string;
+  try {
+    ({ sub } = await verifySession(redis, config.jwtSecret, token));
+  } catch {
+    return reply.code(401).send({ error: "invalid or expired session" });
+  }
+
+  const rows = await db
+    .select({
+      window: schema.usageRecords.window,
+      tokens: schema.usageRecords.tokens,
+      model: schema.usageRecords.model,
+    })
+    .from(schema.usageRecords)
+    .where(eq(schema.usageRecords.userId, sub));
+
+  let totalTokens = 0;
+  const byModel: Record<string, number> = {};
+  const byWindow: Record<string, number> = {};
+  for (const r of rows) {
+    const t = r.tokens ?? 0;
+    totalTokens += t;
+    if (r.model) byModel[r.model] = (byModel[r.model] ?? 0) + t;
+    if (r.window) byWindow[r.window] = (byWindow[r.window] ?? 0) + t;
+  }
+  return reply.send({ records: rows.length, totalTokens, byModel, byWindow });
+});
+
+for (const route of ["/fs/tree", "/fs/file", "/registry/items", "/sessions", "/approvals"] as const) {
   app.get(route, async (_req, reply) =>
     reply.code(501).send({ error: "not implemented in M1", route }),
   );

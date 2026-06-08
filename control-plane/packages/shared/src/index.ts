@@ -80,6 +80,20 @@ function sortKeys(value: unknown): unknown {
   return value;
 }
 
+// ── usage metering (ADR-001: per-tenant token usage from Claude Code + audit) ──
+// The container's Stop hook emits an auditEvent with kind = USAGE_TURN_KIND and a
+// usageTurnPayload; the audit-collector also records it in usage_records. Tokens
+// only (subscription is flat-rate — no $; this is for visibility / fair-use).
+export const USAGE_TURN_KIND = "usage.turn";
+export const usageTurnPayload = z.object({
+  model: z.string().default("unknown"),
+  inputTokens: z.number().int().nonnegative().default(0),
+  outputTokens: z.number().int().nonnegative().default(0),
+  cacheReadTokens: z.number().int().nonnegative().default(0),
+  cacheCreationTokens: z.number().int().nonnegative().default(0),
+});
+export type UsageTurnPayload = z.infer<typeof usageTurnPayload>;
+
 // Chain hash = sha256(prevHash + canonical(core)). The core is the immutable
 // content of the record (everything except prevHash/hash). Pure + dependency-free
 // (node:crypto) so the collector and any verifier compute identical hashes.

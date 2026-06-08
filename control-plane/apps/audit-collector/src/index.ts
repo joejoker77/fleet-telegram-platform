@@ -15,11 +15,14 @@ import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 import { pino } from "pino";
+import { eq } from "drizzle-orm";
 import {
   auditEvent,
   auditRecord,
   chainHash,
   AUDIT_GENESIS_HASH,
+  USAGE_TURN_KIND,
+  usageTurnPayload,
   type AuditRecord,
 } from "@fleet/shared";
 import { getDb, getPool, schema } from "@fleet/db";
@@ -93,6 +96,36 @@ async function commit(raw: unknown): Promise<AuditRecord> {
     });
   } catch (err) {
     log.error({ err, hash: hash.slice(0, 12) }, "audit_index insert failed (record persisted to WORM)");
+  }
+
+  // Usage metering: a usage.turn event also lands in usage_records (tokens only;
+  // flat subscription has no $). Resolve the tenant by actor (os_username) when
+  // the hook didn't supply a user_id.
+  if (event.kind === USAGE_TURN_KIND) {
+    try {
+      const up = usageTurnPayload.parse(event.payload);
+      let userId = event.userId;
+      if (!userId) {
+        const u = await getDb()
+          .select({ id: schema.users.id })
+          .from(schema.users)
+          .where(eq(schema.users.osUsername, event.actor))
+          .limit(1);
+        userId = u[0]?.id ?? null;
+      }
+      if (userId) {
+        await getDb().insert(schema.usageRecords).values({
+          userId,
+          window: ts.slice(0, 10),
+          tokens: up.inputTokens + up.outputTokens,
+          model: up.model,
+        });
+      } else {
+        log.warn({ actor: event.actor }, "usage.turn: no tenant matched actor; usage_records skipped");
+      }
+    } catch (err) {
+      log.error({ err }, "usage_records insert failed");
+    }
   }
   return record;
 }
