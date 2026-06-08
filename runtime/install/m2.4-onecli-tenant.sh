@@ -10,6 +10,8 @@ AGENT_ID_NAME=cptest          # display name
 AGENT_IDENT=cptest-bot        # identifier
 TOKDIR=/etc/cl-egress
 TOKFILE="$TOKDIR/$TEST_USER.token"
+RT=/home/vitaliy/work/fleet-platform/runtime
+CA=/etc/onecli/ca-bundle.pem
 
 log() { printf '\n== %s ==\n' "$*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -58,19 +60,25 @@ try:
   print(f'  visible secrets: {len(rows)}'+('' if rows else '  -> isolated (sees no shared secrets)'))
 except Exception: print('  (could not parse; check manually)')"
 
-# 4) write the token for the wrapper, restart the pod to pick it up
-log "wiring token into the tenant container"
+# 4) write the token, (re)install the latest wrapper (so CA mount + token take
+#    effect), restart the pod to pick it all up
+log "wiring token + installing latest wrapper into the tenant container"
 umask 077; printf '%s' "$TOKEN" > "$TOKFILE"; chmod 0600 "$TOKFILE"
+install -m 0755 "$RT/systemd/claude-pod-run" /usr/local/sbin/claude-pod-run
 systemctl restart "claude-pod@$TEST_USER"
 for _ in $(seq 1 30); do [ "$(podman inspect -f '{{.State.Running}}' claude-$TEST_USER 2>/dev/null)" = "true" ] && break; sleep 1; done
 
 # 5) verify: proxy accepts the tenant token + anthropic reachable; unknown host denied
 GW="$(podman network inspect cl-net --format json | python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["subnets"][0]["gateway"])')"
 log "VERIFY per-tenant proxy auth + allow/deny"
-echo -n "  anthropic via tenant token (expect reached: 401, NOT 407 token-reject): "
-a=$(podman exec claude-$TEST_USER curl -m12 -s -o /dev/null -w '%{http_code}' -x "http://x:$TOKEN@$GW:10255" https://api.anthropic.com/v1/messages 2>/dev/null || true); echo "$a"
+echo -n "  onecli CA mounted in container: "
+podman exec claude-$TEST_USER test -f "$CA" && echo "yes" || echo "NO (mount missing)"
+# --cacert points at the mounted onecli CA (podman exec doesn't reliably inherit
+# the run-time CA env; the live runtime uses NODE_EXTRA_CA_CERTS set at run).
+echo -n "  anthropic via tenant token (expect reached: 401, NOT 407/000): "
+a=$(podman exec claude-$TEST_USER curl -m12 -s -o /dev/null -w '%{http_code}' --cacert "$CA" -x "http://x:$TOKEN@$GW:10255" https://api.anthropic.com/v1/messages 2>/dev/null || true); echo "$a"
 echo -n "  unconfigured host example.com via tenant token (expect denied, NOT 200): "
-u=$(podman exec claude-$TEST_USER curl -m12 -s -o /dev/null -w '%{http_code}' -x "http://x:$TOKEN@$GW:10255" https://example.com/ 2>/dev/null || true); echo "$u"
+u=$(podman exec claude-$TEST_USER curl -m12 -s -o /dev/null -w '%{http_code}' --cacert "$CA" -x "http://x:$TOKEN@$GW:10255" https://example.com/ 2>/dev/null || true); echo "$u"
 
 echo
 if [ "$a" = "401" ] || { [ "$a" != "000" ] && [ "$a" != "407" ]; }; then
