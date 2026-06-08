@@ -92,12 +92,14 @@ bash "$RT/install/provision-tenant.sh" "$U" "$TG_ID"
 
 log "7) wait for the plugin to start polling (with liveness timeline)"
 SDIR="$DST/channels/telegram-$U"
+TMTD="/home/$U/.claude"   # entrypoint sets TMUX_TMPDIR=$HOME/.claude — the socket lives here, NOT /tmp;
+                         # external `tmux has-session` MUST match or it false-reports MISSING.
 ok=""
 {
   echo "=== liveness timeline (container / claude-tmux-session / bot.pid) ==="
   for i in $(seq 1 40); do
     cr=$(podman inspect -f '{{.State.Running}}' "claude-$U" 2>/dev/null || echo "gone")
-    if podman exec "claude-$U" tmux has-session -t claude 2>/dev/null; then ts=alive; else ts=MISSING; fi
+    if podman exec -e TMUX_TMPDIR="$TMTD" "claude-$U" tmux has-session -t claude 2>/dev/null; then ts=alive; else ts=MISSING; fi
     bp=$([ -f "$SDIR/bot.pid" ] && echo yes || echo no)
     printf '  t+%02ds  container=%s  session=%s  bot.pid=%s\n' "$((i*2))" "$cr" "$ts" "$bp"
     if grep -qiE 'polling|getUpdates|my_wordzilla|@.*bot' "$SDIR/logs/plugin_stderr.log" 2>/dev/null || [ -f "$SDIR/bot.pid" ]; then ok=1; break; fi
@@ -109,7 +111,7 @@ log "8) verdict"
 {
   echo "=== verdict ==="
   echo -n "  container running:     "; podman inspect -f '{{.State.Running}}' "claude-$U" 2>/dev/null || echo "?"
-  echo -n "  claude tmux session:   "; podman exec "claude-$U" tmux has-session -t claude 2>/dev/null && echo "alive" || echo "MISSING"
+  echo -n "  claude tmux session:   "; podman exec -e TMUX_TMPDIR="$TMTD" "claude-$U" tmux has-session -t claude 2>/dev/null && echo "alive" || echo "MISSING"
   echo -n "  bot.pid present:       "; [ -f "$SDIR/bot.pid" ] && echo "yes ($(cat "$SDIR/bot.pid"))" || echo "no"
   echo    "  plugin log tail:"; tail -n 8 "$SDIR/logs/plugin_stderr.log" 2>/dev/null | sed 's/^/      /' || echo "      (no log yet)"
   echo -n "  409 conflict in log?   "; grep -qi '409' "$SDIR/logs/plugin_stderr.log" 2>/dev/null && echo "YES (BAD)" || echo "none"
@@ -118,6 +120,19 @@ log "8) verdict"
   echo "=== in-container ~/.claude.json trust state (did the entrypoint injection take?) ==="
   podman exec "claude-$U" python3 -c "import json;d=json.load(open('/home/$U/.claude.json'));p=d.get('projects',{});w='/home/$U/work';print('  trustDialogAccepted        :',d.get('trustDialogAccepted'));print('  hasCompletedOnboarding     :',d.get('hasCompletedOnboarding'));print('  proj[work].hasTrustDialog  :',p.get(w,{}).get('hasTrustDialogAccepted'));print('  proj[work].projOnboarding  :',p.get(w,{}).get('hasCompletedProjectOnboarding'));print('  project keys               :',list(p.keys()))" 2>&1 | sed 's/^/  /' || echo "  (container gone — see host copy)"
   echo "  host-copy project keys:"; python3 -c "import json;d=json.load(open('/home/$U/.claude.json'));print(list(d.get('projects',{}).keys()))" 2>&1 | sed 's/^/    /'
+
+  echo
+  echo "=== POLLER DIAGNOSTICS (why no bot.pid / plugin_stderr.log) — runs while container is up ==="
+  echo "  -- processes inside container (looking for claude/bun/server.ts tree) --"
+  podman exec "claude-$U" sh -c 'ps -eo pid,ppid,comm 2>/dev/null || ls /proc | grep -E "^[0-9]+$" | while read p; do echo "$p $(cat /proc/$p/comm 2>/dev/null)"; done' 2>&1 | sed 's/^/      /' || echo "      (container gone / no ps)"
+  echo "  -- tmux session environment: does TELEGRAM_STATE_DIR / token-name reach the pane? --"
+  podman exec -e TMUX_TMPDIR="$TMTD" "claude-$U" tmux show-environment -t claude 2>&1 | grep -E 'TELEGRAM_STATE_DIR|TELEGRAM_BOT_TOKEN|REMOTE_CONTROL|TMUX_TMPDIR|PATH' | sed 's/=.*/=<set>/' | sed 's/^/      /' || echo "      (no session env)"
+  echo "  -- any bot.pid anywhere under /home/$U (in case STATE_DIR resolved elsewhere) --"
+  find "/home/$U" -name bot.pid 2>/dev/null | sed 's/^/      /' || true
+  echo "  -- claude's own logs inside container (MCP/plugin spawn errors) --"
+  podman exec "claude-$U" sh -c 'for d in "$HOME/.claude/logs" "$HOME/.cache/claude-cli-nodejs"; do [ -d "$d" ] && find "$d" -type f -newermt "-10 min" 2>/dev/null | head -5; done' 2>&1 | sed 's/^/      /' || echo "      (none)"
+  echo "  -- is api.telegram.org reachable from the container egress path? (no token in URL) --"
+  podman exec "claude-$U" sh -c 'curl -s -o /dev/null -w "http=%{http_code} time=%{time_total}s\n" --max-time 8 https://api.telegram.org 2>&1 || echo "curl failed (blocked/no-route?)"' 2>&1 | sed 's/^/      /'
 
   echo
   echo "=== FULL claude pane log (TUI / launch errors) ==="; cat "$SDIR/logs/claude-pane.log" 2>/dev/null | sed 's/^/  /' || echo "  (none)"
