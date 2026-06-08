@@ -70,10 +70,17 @@ podman volume exists cp-audit-run >/dev/null 2>&1 || podman volume create cp-aud
 # ---- pull runtime image ----------------------------------------------------
 podman image exists "$NODE_IMAGE" || { log "pulling $NODE_IMAGE"; podman pull "$NODE_IMAGE" >/dev/null; }
 
+# NOTE on networking: aardvark-dns name resolution on the cp-net bridge proved
+# unreliable on this host (containers couldn't resolve cp-postgres/cp-redis), so
+# the services use host networking and reach the stores via their published
+# loopback ports (127.0.0.1:5433 / :6380). The audit socket is shared via a
+# volume, independent of networking. (Hardening to a DNS-enabled network or a
+# shared pod is a later item.)
+
 # ---- cp-audit-collector ----------------------------------------------------
 log "starting cp-audit-collector"
 podman rm -f cp-audit-collector >/dev/null 2>&1 || true
-podman run -d --name cp-audit-collector --network cp-net \
+podman run -d --name cp-audit-collector --network host \
   --workdir "$REPO" \
   -v "$REPO:$REPO:ro" \
   -v "$SRV_AUDIT:/srv/audit" \
@@ -82,23 +89,22 @@ podman run -d --name cp-audit-collector --network cp-net \
   --restart=unless-stopped \
   "$NODE_IMAGE" \
   sh -c 'set -e; export AUDIT_DIR=/srv/audit AUDIT_SOCKET=/run/audit/collector.sock;
-    export DATABASE_URL="postgres://cplane:$(cat /run/secrets/'"$PG_SECRET"')@cp-postgres:5432/control_plane";
+    export DATABASE_URL="postgres://cplane:$(cat /run/secrets/'"$PG_SECRET"')@127.0.0.1:5433/control_plane";
     exec node_modules/.bin/tsx apps/audit-collector/src/index.ts' >/dev/null
 
 # ---- cp-api ----------------------------------------------------------------
 log "starting cp-api (127.0.0.1:${API_PORT})"
 podman rm -f cp-api >/dev/null 2>&1 || true
-podman run -d --name cp-api --network cp-net \
-  -p 127.0.0.1:${API_PORT}:8080 \
+podman run -d --name cp-api --network host \
   --workdir "$REPO" \
   -v "$REPO:$REPO:ro" \
   -v cp-audit-run:/run/audit \
   --secret "$PG_SECRET" --secret "$BOT_SECRET" --secret "$JWT_SECRET" \
   --restart=unless-stopped \
   "$NODE_IMAGE" \
-  sh -c 'set -e; export HOST=0.0.0.0 PORT=8080 REDIS_URL=redis://cp-redis:6379 AUDIT_SOCKET=/run/audit/collector.sock;
+  sh -c 'set -e; export HOST=127.0.0.1 PORT='"$API_PORT"' REDIS_URL=redis://127.0.0.1:6380 AUDIT_SOCKET=/run/audit/collector.sock;
     export TELEGRAM_BOT_TOKEN_FILE=/run/secrets/'"$BOT_SECRET"' JWT_SECRET_FILE=/run/secrets/'"$JWT_SECRET"';
-    export DATABASE_URL="postgres://cplane:$(cat /run/secrets/'"$PG_SECRET"')@cp-postgres:5432/control_plane";
+    export DATABASE_URL="postgres://cplane:$(cat /run/secrets/'"$PG_SECRET"')@127.0.0.1:5433/control_plane";
     exec node_modules/.bin/tsx apps/api/src/index.ts' >/dev/null
 
 # reboot persistence for all --restart containers
