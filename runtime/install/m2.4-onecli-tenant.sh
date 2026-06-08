@@ -22,7 +22,7 @@ podman container exists "claude-$TEST_USER" || die "claude-$TEST_USER not runnin
 mkdir -p "$TOKDIR"; chmod 0700 "$TOKDIR"
 
 lookup_aid() {
-  onecli agents list --json 2>/dev/null | python3 -c "
+  onecli agents list 2>/dev/null | python3 -c "
 import json,sys
 d=json.load(sys.stdin); rows=d.get('data',d) if isinstance(d,dict) else d
 print(next((a['id'] for a in rows if a.get('identifier')=='$AGENT_IDENT'),''))" 2>/dev/null || true

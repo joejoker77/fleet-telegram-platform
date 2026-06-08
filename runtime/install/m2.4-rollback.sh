@@ -14,7 +14,7 @@ rm -f "$TOKFILE" && echo "removed $TOKFILE" || true
 
 echo "== deleting OneCLI agent $AGENT_IDENT =="
 if command -v onecli >/dev/null 2>&1 && onecli auth status >/dev/null 2>&1; then
-  AID="$(onecli agents list --json 2>/dev/null | python3 -c "
+  AID="$(onecli agents list 2>/dev/null | python3 -c "
 import json,sys
 d=json.load(sys.stdin); rows=d.get('data',d) if isinstance(d,dict) else d
 print(next((a['id'] for a in rows if a.get('identifier')=='$AGENT_IDENT'),''))" 2>/dev/null || true)"
