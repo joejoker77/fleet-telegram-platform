@@ -1,0 +1,15 @@
+[Unit]
+Description=cl-egress forwarder (tenant bridge gateway -> OneCLI proxy)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+# Listen on the cl-net gateway IP and forward to the host-loopback OneCLI proxy,
+# so tenant containers reach the proxy without the shared OneCLI being
+# reconfigured. Restart=always covers the bridge IP appearing slightly late.
+ExecStart=/usr/bin/socat TCP-LISTEN:10255,bind=10.89.0.1,fork,reuseaddr TCP:127.0.0.1:10255
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

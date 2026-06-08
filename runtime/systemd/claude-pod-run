@@ -23,13 +23,27 @@ podman image exists "$IMAGE" || { echo "image $IMAGE missing (run m2.1-build-ima
 [ -d "$HOME_DIR/.claude" ] || { echo "$HOME_DIR/.claude missing"; exit 1; }
 [ -d "$HOME_DIR/work" ] || { echo "$HOME_DIR/work missing"; exit 1; }
 
+# Network: use the locked egress bridge cl-net once M2.3 has provisioned it
+# (egress default-deny via nftables; reach the OneCLI proxy at the gateway).
+# Falls back transparently to the default bridge pre-M2.3 / after rollback.
+PROXY_ARGS=()
+if podman network exists cl-net >/dev/null 2>&1; then
+  NETWORK=cl-net
+  # Per-tenant proxy auth token is injected by the provisioner at M2.6; for now
+  # the network path (gateway:10255) is what matters for the egress lockdown.
+  PROXY_ARGS=(-e HTTPS_PROXY="http://10.89.0.1:10255" -e HTTP_PROXY="http://10.89.0.1:10255" -e NO_PROXY="127.0.0.1,localhost,::1")
+else
+  NETWORK=podman
+fi
+
 exec /usr/bin/podman run --rm --name "claude-$U" \
   --init \
   --user "${UID_N}:${GID_N}" \
+  --network "$NETWORK" \
   --cap-drop=ALL --security-opt=no-new-privileges \
   --read-only --tmpfs /tmp --tmpfs /run \
   --memory=4g --memory-reservation=3g --cpus=2 --pids-limit=2048 \
-  -e HOME="$HOME_DIR" -e XDG_RUNTIME_DIR=/tmp \
+  -e HOME="$HOME_DIR" -e XDG_RUNTIME_DIR=/tmp "${PROXY_ARGS[@]}" \
   -v "$HOME_DIR/.claude:$HOME_DIR/.claude" \
   -v "$HOME_DIR/work:$HOME_DIR/work" \
   -w "$HOME_DIR/work" \
