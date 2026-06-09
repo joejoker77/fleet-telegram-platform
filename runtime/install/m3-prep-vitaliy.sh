@@ -23,15 +23,22 @@ STAMP_FILE=/home/$U/work/.m3-backup-path
 say() { printf '\n== %s ==\n' "$*"; }
 
 say "1) backup live state (rollback point)"
-BK="/home/$U/work/backups/m3-pre-cutover"   # operator may pass an existing timestamp dir
+# IMPORTANT: write the archive OUTSIDE the trees being archived. ~/work is one of
+# the archived trees, so a backup under ~/work/ would self-include (tar 'file
+# changed as we read it' -> inflated, unreliable archive). Use a sibling dir.
+BK="/home/$U/m3-backups"
 mkdir -p "$BK"
-# tar both trees; exclude nothing — this is the integrity anchor.
-OUT="$BK/backup.tar.zst"
-tar --zstd -cf "$OUT" -C "/home/$U" .claude work 2>/dev/null \
-  || tar -czf "${OUT%.zst}.gz" -C "/home/$U" .claude work
-ls -lh "$BK"/backup.* | sed 's/^/  /'
-echo "$BK" > "$STAMP_FILE"; chown "$U:$U" "$STAMP_FILE"
-echo "  backup written under $BK"
+OUT="$BK/backup.tar.gz"
+# Exclude volatile sockets so tar doesn't warn/fail on them.
+tar --warning=no-file-changed \
+    --exclude='.claude/tmux-*' --exclude='*/.git/objects' \
+    -czf "$OUT" -C "/home/$U" .claude work
+rc=$?
+[ "$rc" -le 1 ] || { echo "  ✗ backup tar failed (rc=$rc)"; exit 1; }   # tar rc=1 = harmless warnings
+chown -R "$U:$U" "$BK"
+ls -lh "$OUT" | sed 's/^/  /'
+echo "$OUT" > "$STAMP_FILE"; chown "$U:$U" "$STAMP_FILE"
+echo "  backup written to $OUT (outside archived trees)"
 
 say "2) install runtime unit + wrapper (NO start)"
 install -m 0755 "$RT/systemd/claude-pod-run" /usr/local/sbin/claude-pod-run
