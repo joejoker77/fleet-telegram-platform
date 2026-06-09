@@ -15,6 +15,15 @@ export TMUX_TMPDIR="$HOME/.claude"
 mkdir -p "$TMUX_TMPDIR"
 SESSION="claude"
 
+# Clear any stale bot.pid LEFT BY A PREVIOUS POD. $TELEGRAM_STATE_DIR lives on the
+# mounted ~/.claude volume, so the plugin's pidfile survives a pod restart — its
+# PID is meaningless in this fresh PID namespace and could even collide with an
+# unrelated live process, falsely telling the liveness-watchdog (below) that the
+# channel is already up. The plugin rewrites it the moment it starts polling, so
+# clearing it now (BEFORE launching claude) is safe and gives the watchdog a clean
+# slate. Must happen pre-launch — never delete a pidfile the new plugin just wrote.
+rm -f "$TELEGRAM_STATE_DIR/bot.pid"
+
 # best-effort audit: runtime started
 AUDIT_SOCK="${AUDIT_SOCKET:-/run/audit/collector.sock}"
 [ -S "$AUDIT_SOCK" ] && printf '%s\n' \
@@ -135,6 +144,60 @@ tmux pipe-pane -t "$SESSION" -o "cat >> '$TELEGRAM_STATE_DIR/logs/claude-pane.lo
   tmux send-keys -t "$SESSION" Enter
 ) &
 
-# Supervise: exit (→ unit Restart) when the claude session ends.
-while tmux has-session -t "$SESSION" 2>/dev/null; do sleep 5; done
+# Supervise: exit (→ unit Restart=always) when EITHER the claude tmux session
+# ends, OR the Telegram channel fails to come up / silently dies. The official
+# plugin has NO self-respawn, and the OLD supervisor watched only the tmux
+# session — so `claude` could be alive while the channel was dead (e.g. a lost
+# bot-token handoff race on pod restart), and recovery needed a MANUAL
+# `systemctl restart`. The plugin writes $TELEGRAM_STATE_DIR/bot.pid when it
+# starts polling and removes it on shutdown → that file is our liveness signal.
+# (vitaliy pilot; closes the M0 tg-plugin liveness-watchdog task. No new
+# service/timer, no LLM — just a richer condition on the existing supervise loop;
+# systemd StartLimit on the unit caps the restart rate so a permanently-broken
+# channel — e.g. a bad token — can't hot-loop.)
+BOT_PID_FILE="$TELEGRAM_STATE_DIR/bot.pid"
+# Grace after launch for the channel to acquire the Telegram getUpdates session
+# (and for a prior pod's server-side long-poll to clear — the 409 handoff window).
+CHAN_START_GRACE="${CHANNEL_START_GRACE:-150}"
+# Tolerate brief in-session plugin flaps (we see sub-second shutdown→polling
+# pairs in the wild) before declaring the channel dead.
+CHAN_FLAP_GRACE="${CHANNEL_FLAP_GRACE:-60}"
+
+channel_alive() {
+  # Healthy iff bot.pid exists AND names a live process.
+  local p
+  [ -f "$BOT_PID_FILE" ] || return 1
+  p="$(cat "$BOT_PID_FILE" 2>/dev/null)" || return 1
+  [ -n "$p" ] && kill -0 "$p" 2>/dev/null
+}
+
+# Phase 1 — wait for the channel to come up the first time (skip if disabled).
+if [ "${DISABLE_TELEGRAM_CHANNEL:-0}" != "1" ]; then
+  waited=0
+  until channel_alive; do
+    # If claude itself died while we waited, restart now.
+    tmux has-session -t "$SESSION" 2>/dev/null || { echo "[supervise] claude session gone during startup → exit for restart"; exit 1; }
+    if [ "$waited" -ge "$CHAN_START_GRACE" ]; then
+      echo "[supervise] telegram channel did not come up within ${CHAN_START_GRACE}s → exit for restart"
+      exit 1
+    fi
+    waited=$((waited + 5)); sleep 5
+  done
+fi
+
+# Phase 2 — steady state. Exit (→ Restart) if claude OR the channel drops, the
+# latter only after CHAN_FLAP_GRACE of continuous absence to ride out flaps.
+down=0
+while tmux has-session -t "$SESSION" 2>/dev/null; do
+  if [ "${DISABLE_TELEGRAM_CHANNEL:-0}" != "1" ] && ! channel_alive; then
+    down=$((down + 5))
+    if [ "$down" -ge "$CHAN_FLAP_GRACE" ]; then
+      echo "[supervise] telegram channel down for ${down}s → exit for restart"
+      exit 1
+    fi
+  else
+    down=0
+  fi
+  sleep 5
+done
 exit 1

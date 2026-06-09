@@ -2,6 +2,14 @@
 Description=Claude tenant runtime container (%i)
 Wants=network-online.target
 After=network-online.target
+# Rate-limit restarts so the entrypoint's liveness-watchdog (which exits → Restart
+# when the Telegram channel can't come up) cannot hot-loop on a permanently-broken
+# channel — e.g. a revoked bot token. After StartLimitBurst restart cycles inside
+# StartLimitIntervalSec, systemd holds the unit in 'failed' (manual `systemctl
+# reset-failed && start` to revive). Window is wide enough that the watchdog's
+# normal ~150s startup-grace cycles don't trip it during healthy operation.
+StartLimitIntervalSec=900
+StartLimitBurst=6
 
 [Service]
 Type=simple
