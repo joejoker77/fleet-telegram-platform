@@ -39,11 +39,32 @@ umask 077
 printf 'TELEGRAM_BOT_TOKEN=%s\n' "$TOKEN" > "$STATE/.env"
 chmod 600 "$STATE/.env"
 
+# Network mode. Default = direct internet on the default bridge (isolates "does the
+# poller come up"). PROBE_NET=clnet reproduces the REAL runtime egress: --network cl-net
+# behind the OneCLI TLS-intercepting proxy (10.89.1.1:10255) with the per-tenant token,
+# faithfully mirroring claude-pod-run — to test whether the proxy permits api.telegram.org.
+NETARGS=(--network podman)
+PROBE_NET="${PROBE_NET:-podman}"
+if [ "$PROBE_NET" = "clnet" ]; then
+  GW="$(podman network inspect cl-net --format '{{range .Subnets}}{{.Gateway}}{{end}}' 2>/dev/null)"
+  TOKFILE=/etc/cl-egress/cptest.token
+  [ -n "$GW" ] || { echo "cl-net has no gateway / not found"; exit 1; }
+  [ -f "$TOKFILE" ] || { echo "missing proxy token $TOKFILE"; exit 1; }
+  AUTH="x:$(cat "$TOKFILE")@"
+  NETARGS=(--network cl-net
+    -e HTTPS_PROXY="http://${AUTH}${GW}:10255" -e HTTP_PROXY="http://${AUTH}${GW}:10255"
+    -e NO_PROXY="127.0.0.1,localhost,::1"
+    -v /etc/onecli/ca-bundle.pem:/etc/onecli/ca-bundle.pem:ro
+    -e NODE_EXTRA_CA_CERTS=/etc/onecli/ca-bundle.pem -e SSL_CERT_FILE=/etc/onecli/ca-bundle.pem
+    -e CURL_CA_BUNDLE=/etc/onecli/ca-bundle.pem -e REQUESTS_CA_BUNDLE=/etc/onecli/ca-bundle.pem)
+fi
+
 : > "$DIAG"
 log() { printf '\n== %s ==\n' "$*" | tee -a "$DIAG"; }
 
 log "0) context"
 {
+  echo    "  PROBE_NET mode: $PROBE_NET ($([ "$PROBE_NET" = clnet ] && echo 'cl-net + OneCLI proxy = REAL runtime egress' || echo 'default bridge = direct internet'))"
   echo -n "  cl-net network: "; podman network exists cl-net 2>/dev/null && echo "EXISTS (locked egress)" || echo "ABSENT → default bridge = direct internet (matches the failed smoke)"
   echo -n "  runtime image $IMG: "; podman image exists "$IMG" 2>/dev/null && echo "present" || echo "MISSING — will rebuild"
 } | tee -a "$DIAG"
@@ -61,7 +82,7 @@ log "1) run the plugin poller (bun server.ts) STANDALONE for ~15s — no claude,
 # --entrypoint so our `sh -c` actually runs the poller standalone — otherwise the
 # container launches Claude (no login → hangs) and server.ts never runs.
 podman run -d --name egress-probe --rm \
-  --network podman \
+  "${NETARGS[@]}" \
   --entrypoint /bin/sh \
   -e HOME=/root -e TELEGRAM_STATE_DIR=/state \
   -v "$PLUGDIR:/srv:ro" -v "$STATE:/state" \
@@ -85,7 +106,7 @@ log "2) result"
 log "3) plain egress reachability (no token) — sanity that api.telegram.org is routable"
 # --entrypoint /bin/sh (see step 1) + an outer timeout so a stuck container can never
 # wedge the terminal again, even if curl/--max-time misbehaves.
-timeout 20 podman run --rm --network podman --entrypoint /bin/sh "$IMG" \
+timeout 20 podman run --rm "${NETARGS[@]}" --entrypoint /bin/sh "$IMG" \
   -c 'curl -s -o /dev/null -w "api.telegram.org http=%{http_code} time=%{time_total}s\n" --max-time 8 https://api.telegram.org 2>&1 || echo "curl failed (no route?)"' \
   2>&1 | sed 's/^/  /' | tee -a "$DIAG" || echo "  (step 3 timed out / container error)" | tee -a "$DIAG"
 
