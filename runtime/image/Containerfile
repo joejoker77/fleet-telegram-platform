@@ -48,13 +48,26 @@ RUN install -d /usr/local/share/claude-guard
 COPY platform/claude-guard/block-nested-claude.py /usr/local/share/claude-guard/block-nested-claude.py
 RUN chmod 0755 /usr/local/share/claude-guard/block-nested-claude.py
 
-# Platform layer: locked hooks + settings + entrypoint (full security hooks land
-# at M4; this is the read-only scaffold).
+# M4 #3 — LOCKED platform settings layer. Claude Code reads managed-settings.json
+# from the OS path /etc/claude-code/ at the HIGHEST precedence; it cannot be
+# overridden or weakened by the tenant's writable ~/.claude/settings.json. /etc is
+# a read-only image layer in the pod (uid 1005 can't write it), so the security
+# hooks (shellfirm + block-nested-claude), the deny rules, and the metering Stop
+# hook baked here are tamper-proof. Hooks merge additively with the tenant layer.
+RUN install -d /etc/claude-code
+COPY platform/managed-settings.json /etc/claude-code/managed-settings.json
+RUN chmod 0644 /etc/claude-code/managed-settings.json
+
+# Platform layer: entrypoint + metering hook + scaffold templates (the unused
+# settings.platform.json template predates M4 #3; the live locked layer is the
+# managed-settings.json above).
 COPY platform/ /opt/platform/
 RUN chmod 0755 /opt/platform/entrypoint.sh
 
-# Sanity: fail the build early if a core tool is missing.
+# Sanity: fail the build early if a core tool is missing or the locked managed
+# settings layer is malformed (a bad JSON here would silently disable enforcement).
 RUN claude --version && bun --version && code-server --version && node --version \
- && shellfirm --version && jq --version
+ && shellfirm --version && jq --version \
+ && jq -e . /etc/claude-code/managed-settings.json >/dev/null
 
 ENTRYPOINT ["/opt/platform/entrypoint.sh"]
