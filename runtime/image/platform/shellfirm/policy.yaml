@@ -1,0 +1,282 @@
+# Same as policy.yaml + coarse catch-all rules that fire regardless of
+# quoted content (mitigation for shellfirm quoting-strip behaviour).
+#
+# These rules deliberately have higher false-positive rate. They fire on:
+#   - any `bash -c <anything>` (could hide curl|sh inside quoted subshell)
+#   - any `sh -c <anything>`
+#   - any `eval <anything>`
+# Severity Medium — challenged, not auto-denied — so legitimate uses still
+# work after one challenge response.
+#
+# In agent context (no interactive challenge), Medium passes if
+# `agent.auto_deny_severity: High` (default). Bump to Medium in settings
+# only if you want strict mode.
+
+version: 1
+checks:
+  # ------- Coarse catch-all (mitigation for quoting bypass) -------
+  - from: bypass_guard
+    test: '\bbash\s+-c\b'
+    description: "Invocation of `bash -c` — quoted payload may hide a remote-script execution. Audit the full command."
+    id: bypass_guard:bash_dash_c
+    severity: Medium
+
+  - from: bypass_guard
+    test: '\b(?:sh|zsh|dash|fish|ksh)\s+-c\b'
+    description: "Invocation of `sh -c` (or similar shell) — quoted payload may hide exfiltration."
+    id: bypass_guard:any_shell_dash_c
+    severity: Medium
+
+  - from: bypass_guard
+    test: '\beval\b'
+    description: "`eval` of arbitrary string — common in prompt-injection bypasses."
+    id: bypass_guard:eval
+    severity: High
+
+  - from: bypass_guard
+    test: '\$\([^)]*\b(?:curl|wget|fetch)\b'
+    description: "Command substitution with curl/wget — likely remote-script pattern."
+    id: bypass_guard:subshell_with_curl
+    severity: High
+
+  # ------- All checks from base policy.yaml — copied verbatim below -------
+  # ------- Remote-script execution -------
+  - from: exfil
+    test: '(?:curl|wget|fetch)\b[^|;&]*\|\s*(?:bash|sh|zsh|fish|/bin/(?:bash|sh|zsh))\b'
+    description: "Remote-script execution: piping a downloaded script straight into a shell. Classic RCE vector via prompt injection."
+    id: exfil:remote_script_exec
+    severity: Critical
+    alternative: "curl -o /tmp/script.sh <url> && cat /tmp/script.sh"
+    alternative_info: "Download first, inspect, then run if safe."
+
+  - from: exfil
+    test: '\b(?:bash|sh|zsh)\s+-c\s+["'']?\$\(\s*(?:curl|wget|fetch)\b'
+    description: "Indirect remote-script execution via $(curl ...) inside bash -c."
+    id: exfil:remote_script_subshell
+    severity: Critical
+
+  - from: exfil
+    test: '\beval\s+["'']?\$\(\s*(?:curl|wget|fetch)\b'
+    description: "Remote-script execution via eval $(curl ...)."
+    id: exfil:eval_remote_script
+    severity: Critical
+
+  # ------- Data exfiltration -------
+  - from: exfil
+    test: '\|\s*(?:nc|ncat|netcat)\s+[a-zA-Z0-9._-]+\s+[0-9]+'
+    description: "Piping data into netcat with host+port — classic exfiltration channel."
+    id: exfil:netcat_send
+    severity: Critical
+
+  - from: exfil
+    test: '\bcurl\s+[^|;]*(?:-F\s+\S*=@|--data-binary\s+@|--upload-file\s+@?|-d\s+@)'
+    description: "Uploading a local file via curl — common exfiltration channel."
+    id: exfil:curl_upload_file
+    severity: High
+
+  - from: exfil
+    test: '\bscp\s+(?:-[a-zA-Z]+\s+)*\S+\s+[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}:'
+    description: "scp to a remote host with TLD — possible data exfiltration."
+    id: exfil:scp_to_remote
+    severity: High
+
+  - from: exfil
+    test: '\brsync\s+(?:-[a-zA-Z]+\s+)*\S+\s+[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}:'
+    description: "rsync to a remote host with TLD — possible data exfiltration."
+    id: exfil:rsync_to_remote
+    severity: High
+
+  - from: exfil
+    test: '\b(?:base64|xxd|od)\s+(?:-[a-zA-Z]+\s+)*[^|;]*\|\s*(?:curl|wget|nc|ncat)\b'
+    description: "Encoding output then piping to curl/nc — common stealthy exfiltration pattern."
+    id: exfil:encode_then_send
+    severity: Critical
+
+  # ------- Secret hunting -------
+  - from: secret
+    test: '\bfind\b[^|;]*-name\s+["'']?(?:\*?\.env\*?|\*?\.pem|\*?\.key|id_rsa\*?|id_ed25519\*?|\*?credentials?\*?|\*?\.token|\.netrc|\*?secrets?\*?)["'']?'
+    description: "Scanning filesystem for credentials/keys — common preparation step before exfiltration."
+    id: secret:find_credential_files
+    severity: High
+
+  - from: secret
+    test: '\bgrep\s+(?:-[a-zA-Z]+\s+)*(?:["'']?(?:[A-Z_]*(?:TOKEN|API_KEY|PASSWORD|SECRET|CREDENTIAL)[A-Z_]*|ghp_|ghs_|github_pat_|sk-[a-zA-Z]|xox[bp]-)["'']?)\s+(?:-r\s+)?/(?:home|etc|root)'
+    description: "Recursive grep for secret tokens across /home or /etc — credential-hunting pattern."
+    id: secret:grep_for_tokens
+    severity: High
+
+  - from: secret
+    test: '\bcat\s+\S*/\.ssh/(?:id_[a-z]+|id_[a-z]+_[a-z0-9]+|[a-zA-Z0-9_-]+_rsa|[a-zA-Z0-9_-]+_ed25519)(?:\s|$)'
+    description: "Reading a private SSH key — strong exfiltration indicator."
+    id: secret:read_ssh_private_key
+    severity: Critical
+
+  - from: secret
+    test: '\bcat\s+(?:~|\$HOME|/home/[^/]+|/root)/\.(?:bash|zsh|fish|tcsh)_history\b'
+    description: "Reading shell history — commonly contains accidentally-typed secrets."
+    id: secret:read_shell_history
+    severity: High
+
+  - from: secret
+    test: '\bcat\s+(?:~|\$HOME|/home/[^/]+|/root)/\.aws/credentials\b'
+    description: "Reading AWS credentials file."
+    id: secret:read_aws_credentials
+    severity: Critical
+
+  - from: secret
+    test: '\bcat\s+(?:~|\$HOME|/home/[^/]+|/root)/\.config/composio/credentials\b'
+    description: "Reading Composio credentials file."
+    id: secret:read_composio_credentials
+    severity: Critical
+
+  - from: secret
+    test: '\bcat\s+(?:/proc/\d+/environ|/proc/self/environ)\b'
+    description: "Reading another process's environment variables — Comment-and-Control attack pattern (CVE 2026-04-21)."
+    id: secret:read_proc_environ
+    severity: Critical
+
+  - from: secret
+    test: '\b(?:printenv|env|set)\b(?:\s+(?:[A-Z_]+|grep))?\s*(?:\||;|&&|>)'
+    description: "Dumping environment then piping/redirecting — possible token exfiltration prep."
+    id: secret:env_dump_pipe
+    severity: High
+
+  # ------- Git hijacking -------
+  - from: git_security
+    test: 'git\s+config\b[^|;]*\.insteadOf\b'
+    description: "Hijacking git's URL rewriting — could redirect future pushes to attacker."
+    id: git_security:url_insteadof_hijack
+    severity: Critical
+
+  - from: git_security
+    test: 'git\s+(?:push|commit|merge)\b[^|;]*--no-verify\b'
+    description: "Bypassing pre-commit/pre-push hooks via --no-verify. Hooks include secret scanners."
+    id: git_security:no_verify_bypass
+    severity: High
+
+  - from: git_security
+    test: 'git\s+remote\s+(?:set-url|add)\s+\S+\s+(?:https?://|git@)'
+    description: "Adding/changing git remote — verify destination."
+    id: git_security:set_remote
+    severity: Medium
+
+  # ------- Privilege escalation attempts -------
+  # NOTE: Bots run as their own systemd user (no sudo). Any sudo/su invocation
+  # is suspicious. But we must avoid false-positives on `sudo -u USER COMMAND`
+  # where COMMAND is not a shell — that's "run as another user" which CAN be
+  # legitimate (e.g., system maintenance scripts). We deny only the shell-
+  # spawning forms.
+
+  - from: privesc
+    test: '\bsudo\s+(?:-[ueElLi]\b|--login\b|--shell\b|-s\b|-i\b)'
+    description: "sudo with shell-spawning flag (-i, -s, --login, --shell, -E etc). Bots run unprivileged by design."
+    id: privesc:sudo_shell
+    severity: Critical
+
+  - from: privesc
+    test: '\bsudo\s+(?:-[a-zA-Z]+\s+)*(?:bash|sh|zsh|dash|ash|csh|tcsh|fish)\b'
+    description: "Spawning shell via sudo — privilege escalation."
+    id: privesc:sudo_spawn_shell
+    severity: Critical
+
+  - from: privesc
+    test: '\bsudo\s+-u\s+\S+\s+(?:bash|sh|zsh|dash|ash|csh|tcsh|fish)\b'
+    description: "Running shell as another user via sudo -u USER bash — privilege escalation across bot accounts."
+    id: privesc:sudo_as_user_shell
+    severity: Critical
+
+  - from: privesc
+    test: '\b(?:sudo|doas|pkexec)\s+su\b'
+    description: "Privilege escalation via sudo su / doas su / pkexec su."
+    id: privesc:sudo_su
+    severity: Critical
+
+  - from: privesc
+    test: '\b(?:doas|pkexec)\b'
+    description: "doas or pkexec invocation — alternative privesc tools."
+    id: privesc:doas_pkexec
+    severity: Critical
+
+  - from: privesc
+    test: '\bsu\s+-(?:l|i|s)\b'
+    description: "`su -l` / `su -i` / `su -s` — interactive root or other-user shell."
+    id: privesc:su_login_shell
+    severity: Critical
+
+  - from: privesc
+    test: '\bsu\s+\S+\s+-c\s+(?:["'']?(?:bash|sh|zsh|dash))\b'
+    description: "`su USER -c bash` — spawn shell as another user."
+    id: privesc:su_user_shell
+    severity: Critical
+
+  # ------- Persistence / backdoor installation -------
+  - from: persistence
+    test: '(?:echo|cat|printf)\s+.*>>\s*(?:/etc/(?:cron|crontab|cron\.[a-z]+|systemd|profile|bashrc|sudoers)|/var/spool/cron|~/\.(?:bashrc|zshrc|profile|bash_profile))'
+    description: "Appending to system-level startup/cron files — persistence/backdoor pattern."
+    id: persistence:startup_file_append
+    severity: Critical
+
+  - from: persistence
+    test: 'crontab\s+(?:-[a-zA-Z]+\s+)*-(?:r|i)\b'
+    description: "Replacing or removing crontab — possible persistence-tampering."
+    id: persistence:crontab_replace
+    severity: High
+
+  - from: persistence
+    test: 'systemctl\s+(?:--user\s+)?enable\s+'
+    description: "Enabling any systemd service — verify it's expected; possible persistence."
+    id: persistence:systemd_enable
+    severity: Medium
+
+  # ------- Workspace boundary violations -------
+  - from: boundary
+    test: '\b(?:cat|head|tail|less|more|grep|find)\b[^|;]*\s+/opt/workspace(?:/|$|-)'
+    description: "Reading from off-limits /opt/workspace tree (Dmitrii's main session workspace)."
+    id: boundary:opt_workspace_read
+    severity: Critical
+
+  - from: boundary
+    test: '\b(?:cat|head|tail|less|more|grep|find)\b[^|;]*\s+/etc/composio/proxy\.toml\b'
+    description: "Reading Composio proxy config (contains org api_key + bot tokens)."
+    id: boundary:read_composio_proxy_config
+    severity: Critical
+
+  - from: boundary
+    test: '\b(?:cat|head|tail|less|more|grep|find)\b[^|;]*\s+/etc/bot-registry/dsn\b'
+    description: "Reading shared bot-registry DB DSN (cross-bot credential)."
+    id: boundary:read_bot_registry_dsn
+    severity: Critical
+
+  - from: boundary
+    test: '\brm\s+(?:-[a-zA-Z]+\s+)*-(?:[a-zA-Z]*r[a-zA-Z]*)\b[^|;]*\s+/(?:home|etc|opt|var|usr|root|boot|lib|sys|proc)(?:/|\s|$)'
+    description: "Recursive rm against a system or other-user directory."
+    id: boundary:rm_system_path
+    severity: Critical
+
+deny:
+  # All the strong deny patterns (same as base policy)
+  - exfil:remote_script_exec
+  - exfil:remote_script_subshell
+  - exfil:eval_remote_script
+  - exfil:netcat_send
+  - exfil:encode_then_send
+  - secret:read_ssh_private_key
+  - secret:read_proc_environ
+  - secret:read_aws_credentials
+  - secret:read_composio_credentials
+  - git_security:url_insteadof_hijack
+  - privesc:sudo_shell
+  - privesc:sudo_spawn_shell
+  - privesc:sudo_as_user_shell
+  - privesc:sudo_su
+  - privesc:doas_pkexec
+  - privesc:su_login_shell
+  - privesc:su_user_shell
+  - persistence:startup_file_append
+  - boundary:opt_workspace_read
+  - boundary:read_composio_proxy_config
+  - boundary:read_bot_registry_dsn
+  - boundary:rm_system_path
+  # Plus coarse catch-all that auto-denies
+  - bypass_guard:subshell_with_curl
+  - bypass_guard:eval

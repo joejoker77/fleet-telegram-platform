@@ -7,7 +7,7 @@ FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      curl ca-certificates git tmux python3 unzip xz-utils socat \
+      curl ca-certificates git tmux python3 unzip xz-utils socat jq \
  && rm -rf /var/lib/apt/lists/*
 
 # Node 22 (NodeSource) — Claude Code + the official Telegram plugin's tooling.
@@ -25,12 +25,28 @@ RUN curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash
 # code-server — per-tenant web IDE (authoring; wired at M5).
 RUN curl -fsSL https://code-server.dev/install.sh | sh
 
+# M4.1 — shellfirm: dangerous-shell-command guard (kaplanelad/shellfirm v0.3.10).
+# Native binary pinned to the same version the host fleet runs; the PreToolUse
+# wrapper (which closes shellfirm's quoting-bypass) + the system policy are baked
+# in. Per-user agent-mode config (~/.config/shellfirm) and the cwd-loaded
+# ~/work/.shellfirm.yaml policy are seeded by the entrypoint. The wrapper needs jq.
+RUN curl -fsSL -o /tmp/shellfirm.tar.xz \
+      https://github.com/kaplanelad/shellfirm/releases/download/v0.3.10/shellfirm-v0.3.10-x86_64-linux.tar.xz \
+ && tar -xJf /tmp/shellfirm.tar.xz -C /tmp \
+ && install -m 0755 /tmp/shellfirm /usr/local/bin/shellfirm \
+ && rm -rf /tmp/shellfirm.tar.xz /tmp/shellfirm
+COPY platform/shellfirm/shellfirm-bot-wrapper /usr/local/bin/shellfirm-bot-wrapper
+RUN install -d /etc/shellfirm
+COPY platform/shellfirm/policy.yaml /etc/shellfirm/policy.yaml
+RUN chmod 0755 /usr/local/bin/shellfirm-bot-wrapper && chmod 0644 /etc/shellfirm/policy.yaml
+
 # Platform layer: locked hooks + settings + entrypoint (full security hooks land
 # at M4; this is the read-only scaffold).
 COPY platform/ /opt/platform/
 RUN chmod 0755 /opt/platform/entrypoint.sh
 
 # Sanity: fail the build early if a core tool is missing.
-RUN claude --version && bun --version && code-server --version && node --version
+RUN claude --version && bun --version && code-server --version && node --version \
+ && shellfirm --version && jq --version
 
 ENTRYPOINT ["/opt/platform/entrypoint.sh"]
