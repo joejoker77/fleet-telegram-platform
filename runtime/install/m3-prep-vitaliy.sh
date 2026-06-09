@@ -44,18 +44,25 @@ if [ "${SKIP_TOKEN:-0}" = 1 ]; then
   exit 0
 fi
 
-say "3) OneCLI proxy token for container egress -> $TOKFILE"
-export HOME=/root
-command -v onecli >/dev/null 2>&1 && onecli auth status >/dev/null 2>&1 || { echo "onecli not authenticated — aborting token step"; exit 1; }
+say "3) OneCLI proxy token for container egress -> $TOKFILE  (REUSE host token, NO regenerate)"
+# SAFE default: the live host bot authenticates to the OneCLI proxy with a token
+# embedded in its HTTPS_PROXY (http://<token>@127.0.0.1:10255). Regenerating the
+# vitaliy-bot agent token would rotate THAT out from under the live bot and break
+# its egress. So we REUSE the exact same token for the container (same agent
+# identity, no rotation, rollback-safe). Token is piped straight to the file,
+# never printed.
 mkdir -p "$TOKDIR"; chmod 0700 "$TOKDIR"
-AID="$(onecli agents list 2>/dev/null | python3 -c "
-import json,sys
-d=json.load(sys.stdin); rows=d.get('data',d) if isinstance(d,dict) else d
-print(next((a['id'] for a in rows if a.get('identifier')=='${AGENT_IDENT}'),''))" 2>/dev/null || true)"
-[ -n "$AID" ] || { echo "agent $AGENT_IDENT not found — operator must create it"; exit 1; }
-onecli agents set-secret-mode --id "$AID" --mode selective >/dev/null
-TOKEN="$(onecli agents regenerate-token --id "$AID" | python3 -c "import json,sys;d=json.load(sys.stdin);a=d.get('data',d) if isinstance(d,dict) else d;print(a.get('accessToken',''))")"
-[ -n "$TOKEN" ] || { echo "no token returned"; exit 1; }
-umask 077; printf '%s' "$TOKEN" > "$TOKFILE"; chmod 0600 "$TOKFILE"; unset TOKEN
-echo "  wrote $TOKFILE ($(stat -c%s "$TOKFILE") bytes), agent=$AGENT_IDENT ($AID)"
+HPID="$(cat /home/$U/.claude/channels/telegram-$U/bot.pid 2>/dev/null)"
+[ -n "$HPID" ] && kill -0 "$HPID" 2>/dev/null || { echo "host poller not running — cannot read its proxy token; aborting (start claude-tg@$U first)"; exit 1; }
+umask 077
+# Extract the userinfo between '://' and '@' from the host poller's HTTPS_PROXY,
+# strip the leading 'x:' (OneCLI convention: user 'x', password = token).
+USERINFO="$(tr '\0' '\n' < "/proc/$HPID/environ" 2>/dev/null | sed -n 's#^HTTPS_PROXY=http://\([^@]*\)@.*#\1#p' | head -1)"
+PXTOKEN="${USERINFO#x:}"
+if [ -n "$PXTOKEN" ]; then
+  printf '%s' "$PXTOKEN" > "$TOKFILE"; chmod 0600 "$TOKFILE"; unset PXTOKEN USERINFO
+  echo "  wrote $TOKFILE ($(stat -c%s "$TOKFILE") bytes) — reused host bot's OneCLI token (no regenerate)"
+else
+  echo "  ✗ could not extract host proxy token — leave the token step to operator review"; exit 1
+fi
 say "PREP DONE — pod NOT started. Next: DRYRUN=1 m3-cutover.sh to confirm green, then the real cutover."
