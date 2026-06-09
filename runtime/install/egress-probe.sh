@@ -56,12 +56,17 @@ fi
 log "1) run the plugin poller (bun server.ts) STANDALONE for ~15s — no claude, no login"
 # stdin via a fifo whose write end we hold open, so MCP StdioServerTransport
 # doesn't see EOF and exit; the polling loop runs independently regardless.
+# IMPORTANT: the runtime image sets ENTRYPOINT=/opt/platform/entrypoint.sh (the full
+# Claude launcher, which ignores any passed command). We MUST override it with
+# --entrypoint so our `sh -c` actually runs the poller standalone — otherwise the
+# container launches Claude (no login → hangs) and server.ts never runs.
 podman run -d --name egress-probe --rm \
   --network podman \
+  --entrypoint /bin/sh \
   -e HOME=/root -e TELEGRAM_STATE_DIR=/state \
   -v "$PLUGDIR:/srv:ro" -v "$STATE:/state" \
   "$IMG" \
-  sh -c 'cd /state; mkfifo .kp 2>/dev/null || true; sleep 30 > .kp & exec bun /srv/server.ts < .kp > /state/server.out 2>&1' \
+  -c 'cd /state; mkfifo .kp 2>/dev/null || true; sleep 30 > .kp & exec bun /srv/server.ts < .kp > /state/server.out 2>&1' \
   >/dev/null
 echo "  container started; waiting 15s for poll result..." | tee -a "$DIAG"
 sleep 15
@@ -78,9 +83,11 @@ log "2) result"
 } | tee -a "$DIAG"
 
 log "3) plain egress reachability (no token) — sanity that api.telegram.org is routable"
-podman run --rm --network podman "$IMG" \
-  sh -c 'curl -s -o /dev/null -w "api.telegram.org http=%{http_code} time=%{time_total}s\n" --max-time 8 https://api.telegram.org 2>&1 || echo "curl failed (no route?)"' \
-  2>&1 | sed 's/^/  /' | tee -a "$DIAG"
+# --entrypoint /bin/sh (see step 1) + an outer timeout so a stuck container can never
+# wedge the terminal again, even if curl/--max-time misbehaves.
+timeout 20 podman run --rm --network podman --entrypoint /bin/sh "$IMG" \
+  -c 'curl -s -o /dev/null -w "api.telegram.org http=%{http_code} time=%{time_total}s\n" --max-time 8 https://api.telegram.org 2>&1 || echo "curl failed (no route?)"' \
+  2>&1 | sed 's/^/  /' | tee -a "$DIAG" || echo "  (step 3 timed out / container error)" | tee -a "$DIAG"
 
 chown vitaliy:vitaliy "$DIAG" 2>/dev/null || true
 echo
