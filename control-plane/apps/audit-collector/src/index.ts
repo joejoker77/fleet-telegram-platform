@@ -31,6 +31,15 @@ const log = pino({ name: "audit-collector" });
 
 const SOCKET = process.env.AUDIT_SOCKET ?? "/run/audit/collector.sock";
 const DIR = process.env.AUDIT_DIR ?? "/srv/audit";
+// Group that owns the socket. Tenant containers join this group (--group-add) to
+// get write-only access to the socket (mode 0660) without any read/mutate access
+// to AUDIT_DIR. The installer creates a system group `audit` and passes its gid in
+// AUDIT_GID (resolved by name on the host, so the product is portable across
+// servers regardless of the assigned number). Absent → socket stays owner-only.
+const AUDIT_GID =
+  process.env.AUDIT_GID && /^\d+$/.test(process.env.AUDIT_GID)
+    ? Number(process.env.AUDIT_GID)
+    : null;
 
 // Single-writer model: one process owns the chain head, serialised below.
 let prevHash = AUDIT_GENESIS_HASH;
@@ -163,10 +172,18 @@ async function main(): Promise<void> {
 
   const server = net.createServer(handleConnection);
   server.listen(SOCKET, () => {
-    // 0o660: owner (cplane) + group can write; tenants get the group via the
-    // bind-mounted socket and can only write, never read AUDIT_DIR.
+    // 0o660: owner + the `audit` group can write; tenants join that group
+    // (--group-add) via the bind-mounted socket and can only write, never read
+    // AUDIT_DIR. chgrp to the audit gid so group-write actually reaches tenants.
     fs.chmodSync(SOCKET, 0o660);
-    log.info({ socket: SOCKET, dir: DIR }, "audit-collector listening");
+    if (AUDIT_GID != null) {
+      try {
+        fs.chownSync(SOCKET, process.getuid?.() ?? 0, AUDIT_GID);
+      } catch (err) {
+        log.warn({ err, AUDIT_GID }, "could not set socket group to audit gid (tenants may be unable to write)");
+      }
+    }
+    log.info({ socket: SOCKET, dir: DIR, auditGid: AUDIT_GID }, "audit-collector listening");
   });
 
   const shutdown = () => {

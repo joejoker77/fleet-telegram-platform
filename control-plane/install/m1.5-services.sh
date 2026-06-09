@@ -66,6 +66,14 @@ mkdir -p "$SRV_AUDIT"  # created root-owned by the root-run script; no chown nee
 chattr +a "$SRV_AUDIT" 2>/dev/null || echo "note: chattr +a not supported on this fs — relying on hash-chain"
 podman volume exists cp-audit-run >/dev/null 2>&1 || podman volume create cp-audit-run >/dev/null
 
+# audit group: tenant pods join it (--group-add, see runtime/systemd/claude-pod-run)
+# for WRITE-ONLY access to the collector socket (root:audit 0660); they never get
+# read/mutate access to $SRV_AUDIT. A system group resolved BY NAME everywhere, so
+# the product is portable across servers regardless of the assigned gid.
+getent group audit >/dev/null 2>&1 || groupadd --system audit
+AUDIT_GID="$(getent group audit | cut -d: -f3)"
+echo "audit group: gid=$AUDIT_GID"
+
 # ---- pull runtime image ----------------------------------------------------
 podman image exists "$NODE_IMAGE" || { log "pulling $NODE_IMAGE"; podman pull "$NODE_IMAGE" >/dev/null; }
 
@@ -84,6 +92,7 @@ podman run -d --name cp-audit-collector --network host \
   -v "$REPO:$REPO:ro" \
   -v "$SRV_AUDIT:/srv/audit" \
   -v cp-audit-run:/run/audit \
+  -e AUDIT_GID="$AUDIT_GID" \
   --secret "$PG_SECRET" \
   --restart=unless-stopped \
   "$NODE_IMAGE" \
