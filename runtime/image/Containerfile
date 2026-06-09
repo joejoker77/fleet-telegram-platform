@@ -48,32 +48,24 @@ RUN install -d /usr/local/share/claude-guard
 COPY platform/claude-guard/block-nested-claude.py /usr/local/share/claude-guard/block-nested-claude.py
 RUN chmod 0755 /usr/local/share/claude-guard/block-nested-claude.py
 
-# M4 #3 — LOCKED platform settings layer. Claude Code reads managed-settings.json
-# from the OS path /etc/claude-code/ at the HIGHEST precedence; it cannot be
-# overridden or weakened by the tenant's writable ~/.claude/settings.json. /etc is
-# a read-only image layer in the pod (uid 1005 can't write it), so the security
-# hooks (shellfirm + block-nested-claude), the deny rules, and the metering Stop
-# hook baked here are tamper-proof. Hooks merge additively with the tenant layer.
-RUN install -d /etc/claude-code
-COPY platform/managed-settings.json /etc/claude-code/managed-settings.json
-RUN chmod 0644 /etc/claude-code/managed-settings.json
+# M4 #3 (REVERTED 2026-06-09) — the /etc/claude-code/managed-settings.json layer was
+# removed. Verified in-pod on Claude Code 2.1.169: managed-layer HOOKS do NOT fire,
+# and the managed deny list was a strict subset of the tenant deny (which adds
+# Bash(sudo *) on top), so it added zero coverage while being a foot-gun (one
+# unrecognized key silently voids the WHOLE managed file). Security lives in the
+# tenant ~/.claude/settings.json — git HEAD is the source of truth, healed by
+# agentshield-gate (git restore from HEAD on regression) + prestate-commit + alert.
+# See platform/README.managed-settings.md for the full rationale.
 
-# Platform layer: entrypoint + metering hook + scaffold templates (the unused
-# settings.platform.json template predates M4 #3; the live locked layer is the
-# managed-settings.json above).
+# Platform layer: entrypoint + metering hook + scaffold templates. NOTE: the
+# settings.platform.json template here is unused scaffold (predates M4 #3); the
+# managed-settings.json locked layer was removed 2026-06-09 (see the tombstone
+# README in platform/). Security lives in the tenant ~/.claude/settings.json.
 COPY platform/ /opt/platform/
 RUN chmod 0755 /opt/platform/entrypoint.sh
 
-# Sanity: fail the build early if a core tool is missing or the locked managed
-# settings layer is malformed JSON. NOTE: valid JSON is necessary but NOT
-# sufficient — this Claude Code version silently voids the whole managed file on
-# any unrecognized key, so we keep the file STRICTLY to Claude Code's schema (no
-# _comment/extra keys; rationale lives in platform/README.managed-settings.md) and
-# verify ACCEPTANCE behaviorally from inside the live, logged-in pod after restart
-# (the only context that can actually exercise a managed rule). `claude doctor`
-# is NOT usable as a build-time gate: it needs network/login and hangs hermetically.
+# Sanity: fail the build early if a core tool is missing.
 RUN claude --version && bun --version && code-server --version && node --version \
- && shellfirm --version && jq --version \
- && jq -e . /etc/claude-code/managed-settings.json >/dev/null
+ && shellfirm --version && jq --version
 
 ENTRYPOINT ["/opt/platform/entrypoint.sh"]
