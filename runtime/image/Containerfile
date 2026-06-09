@@ -32,9 +32,9 @@ RUN curl -fsSL https://code-server.dev/install.sh | sh
 # ~/work/.shellfirm.yaml policy are seeded by the entrypoint. The wrapper needs jq.
 RUN curl -fsSL -o /tmp/shellfirm.tar.xz \
       https://github.com/kaplanelad/shellfirm/releases/download/v0.3.10/shellfirm-v0.3.10-x86_64-linux.tar.xz \
- && tar -xJf /tmp/shellfirm.tar.xz -C /tmp \
+ && tar -xJf /tmp/shellfirm.tar.xz --strip-components=1 -C /tmp \
  && install -m 0755 /tmp/shellfirm /usr/local/bin/shellfirm \
- && rm -rf /tmp/shellfirm.tar.xz /tmp/shellfirm
+ && rm -f /tmp/shellfirm.tar.xz /tmp/shellfirm
 COPY platform/shellfirm/shellfirm-bot-wrapper /usr/local/bin/shellfirm-bot-wrapper
 RUN install -d /etc/shellfirm
 COPY platform/shellfirm/policy.yaml /etc/shellfirm/policy.yaml
