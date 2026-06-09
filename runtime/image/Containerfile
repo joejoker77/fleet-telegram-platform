@@ -40,6 +40,14 @@ RUN install -d /etc/shellfirm
 COPY platform/shellfirm/policy.yaml /etc/shellfirm/policy.yaml
 RUN chmod 0755 /usr/local/bin/shellfirm-bot-wrapper && chmod 0644 /etc/shellfirm/policy.yaml
 
+# M4.1 — block-nested-claude PreToolUse guard: blocks any bare `claude` invocation
+# (e.g. `claude mcp list`) that would boot a 2nd telegram plugin and evict this
+# bot's poll lock. Pure-stdlib python3, no deps. Hook already wired in the tenant's
+# mounted ~/.claude/settings.json (/usr/local/share/claude-guard/block-nested-claude.py).
+RUN install -d /usr/local/share/claude-guard
+COPY platform/claude-guard/block-nested-claude.py /usr/local/share/claude-guard/block-nested-claude.py
+RUN chmod 0755 /usr/local/share/claude-guard/block-nested-claude.py
+
 # Platform layer: locked hooks + settings + entrypoint (full security hooks land
 # at M4; this is the read-only scaffold).
 COPY platform/ /opt/platform/
