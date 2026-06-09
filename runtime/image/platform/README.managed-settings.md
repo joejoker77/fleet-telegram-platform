@@ -43,10 +43,18 @@ Bash guards out of the tenant file into this inert layer.
 
 **Rule:** keep this file strictly to Claude Code's settings schema
 (`permissions`, `hooks`, …). Put all human-facing documentation here in this
-README, never in the JSON. The build (`Containerfile`) and the apply script
-(`runtime/install/m4.3-apply-managed-settings.sh`) verify *acceptance* (via
-`claude doctor`), not merely JSON validity — because valid JSON that the
-managed validator rejects is the exact silent-failure mode above.
+README, never in the JSON — because valid JSON that the managed validator
+rejects is the exact silent-failure mode above.
+
+**Verifying acceptance.** Valid JSON (`jq -e .`, checked in the `Containerfile`
+build and the apply pre-test) is *necessary but not sufficient* — it does not
+prove Claude Code honors the file. Acceptance can only be confirmed
+**behaviorally, from a live logged-in session** that actually exercises a rule
+(trigger a managed `deny` + the nested-claude guard). After
+`runtime/install/m4.3-apply-managed-settings.sh` restarts the pod, the in-pod
+bot does exactly this and aborts/rolls back if any managed rule fails to fire.
+`claude doctor` is **not** usable as a hermetic build/CI gate: it needs
+network + login and hangs in a no-login build container (observed 2026-06-09).
 
 See memory `feedback_managed_settings_not_enforced_2_1_169` for the full
 incident.

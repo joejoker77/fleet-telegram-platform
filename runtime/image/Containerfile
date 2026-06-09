@@ -64,26 +64,16 @@ RUN chmod 0644 /etc/claude-code/managed-settings.json
 COPY platform/ /opt/platform/
 RUN chmod 0755 /opt/platform/entrypoint.sh
 
-# Sanity: fail the build early if a core tool is missing OR the locked managed
-# settings layer is not ACCEPTED by Claude Code. Valid JSON is NECESSARY BUT NOT
-# SUFFICIENT: on this Claude Code version the managed-settings validator silently
-# drops the ENTIRE file if any one entry is invalid/unrecognized (e.g. a stray
-# "_comment" key), leaving ZERO enforcement while the file looks perfectly fine.
-# So beyond `jq -e .` we run `claude doctor` (login-free, surfaces managed-settings
-# validation errors since 2.1.33) and FAIL the build if it reports a managed-settings
-# problem. See platform/README.managed-settings.md for the 2026-06-09 incident.
-RUN set -e; \
-    claude --version && bun --version && code-server --version && node --version \
-      && shellfirm --version && jq --version; \
-    jq -e . /etc/claude-code/managed-settings.json >/dev/null; \
-    echo "=== claude doctor (managed-settings acceptance gate) ==="; \
-    claude doctor </dev/null >/tmp/cd.out 2>&1 || true; \
-    cat /tmp/cd.out; \
-    if grep -iE 'managed[- ]?settings' /tmp/cd.out \
-         | grep -iqE 'invalid|error|ignored|fail|could not|unable|malformed|parse|reject'; then \
-      echo "[FATAL] claude doctor reports the managed-settings layer was NOT accepted (see above)"; \
-      exit 1; \
-    fi; \
-    rm -f /tmp/cd.out
+# Sanity: fail the build early if a core tool is missing or the locked managed
+# settings layer is malformed JSON. NOTE: valid JSON is necessary but NOT
+# sufficient — this Claude Code version silently voids the whole managed file on
+# any unrecognized key, so we keep the file STRICTLY to Claude Code's schema (no
+# _comment/extra keys; rationale lives in platform/README.managed-settings.md) and
+# verify ACCEPTANCE behaviorally from inside the live, logged-in pod after restart
+# (the only context that can actually exercise a managed rule). `claude doctor`
+# is NOT usable as a build-time gate: it needs network/login and hangs hermetically.
+RUN claude --version && bun --version && code-server --version && node --version \
+ && shellfirm --version && jq --version \
+ && jq -e . /etc/claude-code/managed-settings.json >/dev/null
 
 ENTRYPOINT ["/opt/platform/entrypoint.sh"]
