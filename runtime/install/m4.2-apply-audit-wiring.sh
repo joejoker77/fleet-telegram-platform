@@ -67,14 +67,26 @@ echo "  socket group gid=$SOCK_GID"
 echo "  ok: collector.sock is group=audit"
 
 log "4/7 PRE-TEST reach path (uid $(id -u "$U") + --group-add $AGID -> root:audit 0660 socket)"
-PROBE="$(podman run --rm --entrypoint /bin/sh \
+# Fire the probe FIRE-AND-FORGET: the collector's ok-ack is gated behind a DB
+# insert that can exceed socat's reply window on a freshly-recreated collector, so
+# we do NOT depend on the ack (neither do the real emitters — the entrypoint socat
+# and the metering hook are both fire-and-forget). commit() appends to the WORM
+# BEFORE that await, so we confirm reach+accept by checking the WORM log host-side
+# (a throwaway container can't read AUDIT_DIR by design).
+DAYLOG="$AUDIT_DIR/audit-$(date -u +%F).log"
+P4_BYTES=0; [ -f "$DAYLOG" ] && P4_BYTES="$(stat -c%s "$DAYLOG")"
+podman run --rm --entrypoint /bin/sh \
   --user "$(id -u "$U"):$(id -g "$U")" --group-add "$AGID" \
   -v "$VOL:/run/audit" "$IMAGE" -c \
-  'printf "%s\n" "{\"userId\":null,\"kind\":\"runtime.start\",\"actor\":\"'"$U"'\",\"payload\":{\"probe\":\"m4.2-apply\"}}" | timeout 3 socat - UNIX-CONNECT:/run/audit/collector.sock' 2>&1 || true)"
-echo "  collector replied: $PROBE"
-echo "$PROBE" | grep -q '"ok":true' \
-  || die "pre-test FAILED via the audit-group path. Aborting before any runtime change. Reply: $PROBE"
-echo "  ok: socket reachable + event accepted + hash-chained (no live-pod change yet)"
+  'printf "%s\n" "{\"userId\":null,\"kind\":\"runtime.start\",\"actor\":\"'"$U"'\",\"payload\":{\"probe\":\"m4.2-apply\"}}" | timeout 6 socat -t5 - UNIX-CONNECT:/run/audit/collector.sock' >/dev/null 2>&1 || true
+ok=""
+for i in $(seq 1 10); do
+  sleep 1
+  [ -f "$DAYLOG" ] || continue
+  if tail -c "+$((P4_BYTES + 1))" "$DAYLOG" 2>/dev/null | grep -q '"probe":"m4.2-apply"'; then ok=1; break; fi
+done
+[ -n "$ok" ] || die "pre-test FAILED — probe did not persist to the WORM via the audit-group path (real reach/permission problem). Aborting before any runtime change."
+echo "  ok: probe reached the collector + persisted to the WORM via the audit group (no live-pod change yet)"
 
 log "5/7 backup current wrapper + settings.json -> $BK"
 mkdir -p "$BK"
