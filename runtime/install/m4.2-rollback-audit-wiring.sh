@@ -5,7 +5,11 @@
 set -euo pipefail
 
 U=vitaliy
-WRAPPER_DST=/usr/local/bin/claude-pod-run
+# Derive the wrapper path from the unit's ExecStart (single source of truth),
+# matching the apply script; fall back to the canonical sbin path.
+WRAPPER_DST="$(systemctl cat claude-pod@.service 2>/dev/null \
+  | sed -n 's#^ExecStart=\(/[^ ]*claude-pod-run\).*#\1#p' | head -n1)"
+[ -n "$WRAPPER_DST" ] || WRAPPER_DST=/usr/local/sbin/claude-pod-run
 SETTINGS="/home/$U/.claude/settings.json"
 BKROOT="/home/$U/m4.2-backups"
 

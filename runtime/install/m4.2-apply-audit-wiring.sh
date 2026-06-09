@@ -32,7 +32,12 @@ IMAGE=localhost/claude-user:latest
 VOL=cp-audit-run
 SETTINGS="/home/$U/.claude/settings.json"
 WRAPPER_SRC="$REPO/runtime/systemd/claude-pod-run"
-WRAPPER_DST=/usr/local/bin/claude-pod-run
+# Derive the wrapper path from the unit's ExecStart so this can never drift
+# across servers (the unit is the single source of truth for what actually
+# launches the pod; ours installs to /usr/local/sbin). Fall back to that canon.
+WRAPPER_DST="$(systemctl cat claude-pod@.service 2>/dev/null \
+  | sed -n 's#^ExecStart=\(/[^ ]*claude-pod-run\).*#\1#p' | head -n1)"
+[ -n "$WRAPPER_DST" ] || WRAPPER_DST=/usr/local/sbin/claude-pod-run
 M15="$REPO/control-plane/install/m1.5-services.sh"
 AUDIT_DIR=/srv/audit
 TS="$(date -u +%Y%m%d-%H%M%S)"
