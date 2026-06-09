@@ -62,6 +62,21 @@ fi
 CFG_ARGS=()
 [ -f "$HOME_DIR/.claude.json" ] && CFG_ARGS+=(-v "$HOME_DIR/.claude.json:$HOME_DIR/.claude.json")
 
+# M4.2 audit wiring: share the control-plane audit-collector socket (named volume
+# cp-audit-run, created by m1.5; the collector + cp-api mount the same volume). The
+# socket is root:root 0660 (write-only-by-group, per the collector's design), so the
+# tenant uid reaches it via supplementary group 0. The metering Stop hook + the
+# entrypoint's runtime.start emit best-effort events to AUDIT_SOCKET=/run/audit/
+# collector.sock. Conditional on the volume existing so the pod still starts pre-audit
+# / after a control-plane teardown (mirrors the cl-net fallback above).
+# NOTE: --group-add 0 is the minimal single-pilot fix; the productized multi-tenant
+# path is a dedicated `audit` gid set by the collector (chgrp socket) + per-tenant
+# --group-add <audit-gid> (control-plane change, deferred — see rearchitecture notes).
+AUDIT_ARGS=()
+if podman volume exists cp-audit-run >/dev/null 2>&1; then
+  AUDIT_ARGS=(-v cp-audit-run:/run/audit --group-add 0)
+fi
+
 exec /usr/bin/podman run --rm --name "claude-$U" \
   --init \
   --user "${UID_N}:${GID_N}" \
@@ -72,6 +87,6 @@ exec /usr/bin/podman run --rm --name "claude-$U" \
   -e HOME="$HOME_DIR" -e XDG_RUNTIME_DIR=/tmp "${PROXY_ARGS[@]}" \
   -v "$HOME_DIR/.claude:$HOME_DIR/.claude" \
   -v "$HOME_DIR/work:$HOME_DIR/work" \
-  "${CFG_ARGS[@]}" \
+  "${CFG_ARGS[@]}" "${AUDIT_ARGS[@]}" \
   -w "$HOME_DIR/work" \
   "$IMAGE"
