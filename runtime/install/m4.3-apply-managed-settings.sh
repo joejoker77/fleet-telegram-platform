@@ -88,6 +88,24 @@ podman run --rm --entrypoint /bin/sh "$IMAGE" -c \
   || die "managed layer missing block-nested-claude hook — aborting"
 echo "  ok: managed layer carries the shellfirm + block-nested-claude PreToolUse hooks"
 
+# ACCEPTANCE (not just presence). Valid JSON is necessary but NOT sufficient: this
+# Claude Code version silently voids the ENTIRE managed file on a single invalid /
+# unrecognized entry (a stray "_comment" is enough), so a perfectly-baked file can
+# enforce nothing. `claude doctor` is the login-free probe (it surfaces managed
+# validation errors since 2.1.33); `/status` can't be used here — it's interactive
+# and needs a logged-in session, impossible in this headless throwaway container.
+# We DUMP the full output (acceptance is OBSERVED, not assumed) and abort on any
+# managed-settings error BEFORE touching the live system. This is the check whose
+# absence let the 2026-06-09 silent-void slip through. See README.managed-settings.md.
+log "4b/7 ACCEPTANCE probe: claude doctor must not report a managed-settings problem"
+DOC="$(podman run --rm --entrypoint /bin/sh "$IMAGE" -c 'claude doctor </dev/null 2>&1' || true)"
+printf '%s\n' "$DOC" | sed 's/^/    | /'
+if printf '%s\n' "$DOC" | grep -iE 'managed[- ]?settings' \
+     | grep -iqE 'invalid|error|ignored|fail|could not|unable|malformed|parse|reject'; then
+  die "claude doctor reports the managed layer was NOT accepted (see output above) — aborting before any live change. Keep managed-settings.json strictly to Claude Code's schema (no _comment / unknown keys)."
+fi
+echo "  ok: claude doctor reports no managed-settings validation error"
+
 log "5/7 de-dup tenant settings.json (security config now lives in the locked layer)"
 SETTINGS="$SETTINGS" python3 - <<'PY'
 import json, os

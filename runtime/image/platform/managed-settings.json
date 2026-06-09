@@ -1,5 +1,4 @@
 {
-  "_comment": "M4 #3 — LOCKED platform settings layer. Baked read-only into the runtime image at the OS managed path /etc/claude-code/managed-settings.json. This is Claude Code's HIGHEST-precedence settings source: it is NOT overridable by the tenant's writable ~/.claude/settings.json, and /etc is a read-only image layer in the pod so uid 1005 (the bot) cannot tamper with it. Holds the un-removable security hooks (shellfirm dangerous-command guard + block-nested-claude poll-lock guard), the deny rules (deny always wins and cannot be allowed back), and the per-turn metering Stop hook. Hooks here MERGE ADDITIVELY with the tenant's own settings; the tenant's per-user operational hooks (telegram track-chat / block-askuser, whose paths are under /home/<user>) intentionally stay tenant-side. allowManagedHooksOnly is intentionally NOT set: the security guarantee comes from presence in this un-removable layer plus deny-always-wins, without caging the authoring agent's own hooks. Paths used here are all image-portable (/usr/local, /opt/platform) so a fresh server reproduces this verbatim.",
   "permissions": {
     "deny": [
       "Bash(*> /dev/*)",
