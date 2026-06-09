@@ -59,8 +59,15 @@ echo "  ok"
 log "2/7 backup tenant settings.json + tag rollback image -> $BK"
 mkdir -p "$BK"
 cp -a "$SETTINGS" "$BK/settings.json" && echo "  backed up $SETTINGS"
-# Anchor rollback to the CURRENT image (before this rebuild). Idempotent: re-tag.
-podman tag "$IMAGE" "$PREV" && echo "  tagged current image -> $PREV"
+# Anchor rollback to the PRE-M4.3 image. Re-run-safe: only tag if :m4.3-prev does
+# not already exist, so a second run (e.g. after fixing a later step) does NOT
+# clobber the anchor with the already-rebuilt :latest (which would point rollback
+# at the managed image and make it a no-op).
+if podman image exists "$PREV"; then
+  echo "  rollback image $PREV already exists — preserved (still points at the pre-M4.3 image)"
+else
+  podman tag "$IMAGE" "$PREV" && echo "  tagged current image -> $PREV (rollback anchor)"
+fi
 
 log "3/7 rebuild image with the managed layer baked in"
 bash "$BUILD" || die "image build failed — old image + :m4.3-prev intact, no live change made"
@@ -70,8 +77,9 @@ log "4/7 PRE-TEST new image carries a valid, locked managed layer"
 PRE="$(podman run --rm --entrypoint /bin/sh "$IMAGE" -c \
   'jq -e . '"$MANAGED_PATH"' >/dev/null 2>&1 && stat -c "%a %U %G" '"$MANAGED_PATH" || true)"
 echo "  managed file in image: ${PRE:-<MISSING/INVALID>}"
+# stat %a yields octal WITHOUT a leading zero (644), so accept both forms.
 case "$PRE" in
-  0644\ root\ root) echo "  ok: $MANAGED_PATH present, valid JSON, 0644 root:root" ;;
+  644\ root\ root|0644\ root\ root) echo "  ok: $MANAGED_PATH present, valid JSON, mode 644 root:root" ;;
   *) die "managed layer not correctly baked into the new image (got '${PRE:-none}') — aborting before any live change. Rollback not needed (live still on prior image until restart)." ;;
 esac
 # Confirm the managed layer actually carries the security hooks we expect.
