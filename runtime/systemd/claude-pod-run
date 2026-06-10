@@ -62,6 +62,14 @@ fi
 CFG_ARGS=()
 [ -f "$HOME_DIR/.claude.json" ] && CFG_ARGS+=(-v "$HOME_DIR/.claude.json:$HOME_DIR/.claude.json")
 
+# ~/.config must be a mounted volume: the pod rootfs is --read-only, and the
+# entrypoint's M4.1 shellfirm seed writes ~/.config/shellfirm/settings.yaml.
+# Without the mount the mkdir hits the RO overlay and the entrypoint dies
+# (2026-06-10 incident: claude-pod@vitaliy failed to start). Pre-create it
+# owned by the tenant — podman would otherwise create a missing host dir as
+# root and the in-container user couldn't write it either.
+install -d -o "$UID_N" -g "$GID_N" -m 0755 "$HOME_DIR/.config"
+
 # Audit wiring: share the control-plane audit-collector socket (named volume
 # cp-audit-run, created by m1.5; the collector + cp-api mount the same volume). The
 # collector owns the socket root:audit 0660, so the tenant joins the `audit` group
@@ -87,6 +95,7 @@ exec /usr/bin/podman run --rm --name "claude-$U" \
   -e HOME="$HOME_DIR" -e XDG_RUNTIME_DIR=/tmp "${PROXY_ARGS[@]}" \
   -v "$HOME_DIR/.claude:$HOME_DIR/.claude" \
   -v "$HOME_DIR/work:$HOME_DIR/work" \
+  -v "$HOME_DIR/.config:$HOME_DIR/.config" \
   "${CFG_ARGS[@]}" "${AUDIT_ARGS[@]}" \
   -w "$HOME_DIR/work" \
   "$IMAGE"

@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""
+agentshield-settings-guard <user>  (M4 / WP7, ADR-003)
+
+Real-time integrity guard for a tenant's ~/.claude/settings.json. Triggered by a
+systemd .path unit on ANY write to the file (so it reacts in ~1s, not on the
+15-min agentshield-gate scan cycle). Enforces that the SECURITY-CRITICAL subset
+matches a ROOT-OWNED golden copy the tenant cannot change:
+
+    PROTECTED = permissions (allow/deny) + hooks
+
+Everything else in settings.json (mcpServers, enabledMcpjsonServers, model, ...)
+is passed through UNTOUCHED, so deploy-mcp and Claude Code's own legitimate writes
+are preserved — this is the locked/unlocked split the 2.1.169 managed layer was
+supposed to provide but doesn't.
+
+Why a root-owned golden and not git HEAD: the tenant owns ~/.claude and CAN
+`git commit` its own tampering to HEAD, defeating a HEAD-based restore. The golden
+lives under /var/lib/agentshield (root-only), so the tenant can neither change it
+nor disable this guard (root-owned systemd units).
+
+On drift: restore the protected keys from golden, log, and alert. Honors
+/etc/agentshield/operator-override.flag (fresh <1h → skip, for operator-authorized
+edits). Idempotent: re-firing on its own write is a no-op once live==golden.
+
+Authorized changes: edit the live file under the override flag, then
+`agentshield-settings-rebaseline <user>` to adopt the new protected subset.
+"""
+import json
+import os
+import pwd
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+PROTECTED = ("permissions", "hooks")
+OVERRIDE_FLAG = Path("/etc/agentshield/operator-override.flag")
+OVERRIDE_TTL = 3600
+ALERTER = "/usr/local/sbin/security-alerter"
+
+
+def now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def main() -> int:
+    if len(sys.argv) != 2:
+        print("usage: agentshield-settings-guard <user>", file=sys.stderr)
+        return 2
+    user = sys.argv[1]
+    live = Path(f"/home/{user}/.claude/settings.json")
+    golden = Path(f"/var/lib/agentshield/golden/{user}.settings.json")
+    log_path = Path(f"/var/log/agentshield/{user}.log")
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def log(msg: str) -> None:
+        with open(log_path, "a") as f:
+            f.write(f"{now()} settings-guard: {msg}\n")
+
+    if not golden.is_file():
+        log(f"no golden baseline ({golden}) — skipping (run agentshield-settings-rebaseline {user})")
+        return 0
+    if not live.is_file():
+        log("live settings.json missing — skipping")
+        return 0
+
+    # Operator-authorized edit window: skip enforcement.
+    if OVERRIDE_FLAG.is_file() and (time.time() - OVERRIDE_FLAG.stat().st_mtime) < OVERRIDE_TTL:
+        log("operator-override flag active — skipping integrity enforcement")
+        return 0
+
+    try:
+        golden_data = json.loads(golden.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        log(f"golden unreadable ({e}) — cannot enforce")
+        return 0
+
+    # If the live file is corrupt JSON, that itself is tampering → full restore.
+    try:
+        live_data = json.loads(live.read_text())
+        corrupt = False
+    except (OSError, json.JSONDecodeError):
+        live_data = {}
+        corrupt = True
+
+    drifted = [k for k in PROTECTED if live_data.get(k) != golden_data.get(k)]
+    if not corrupt and not drifted:
+        return 0  # clean — the common case (incl. our own restore re-fire)
+
+    # Restore the protected keys from golden; keep every other live key as-is.
+    for k in PROTECTED:
+        if k in golden_data:
+            live_data[k] = golden_data[k]
+        elif k in live_data:
+            del live_data[k]
+
+    tmp = live.with_suffix(".json.guard-tmp")
+    tmp.write_text(json.dumps(live_data, indent=2))
+    # Ownership: chown by UID/GID from passwd, NOT by group NAME — on hosts where
+    # the user's primary group is not named after the user, shutil.chown(group=user)
+    # raises LookupError; the old silent `except: pass` left the restored file
+    # root:root 0600, locking the tenant out of its own settings.json (2026-06-10
+    # EACCES incident). A restore that bricks the tenant is worse than one missed
+    # cycle, so chown failure now falls back to the live file's current owner and
+    # any residual failure is logged + alerted, never swallowed.
+    try:
+        pw = pwd.getpwnam(user)
+        os.chown(tmp, pw.pw_uid, pw.pw_gid)
+    except (KeyError, PermissionError, OSError) as e:
+        try:
+            st = os.stat(live)
+            os.chown(tmp, st.st_uid, st.st_gid)
+            log(f"chown by passwd failed ({e}) — kept live file's owner uid={st.st_uid}")
+        except OSError as e2:
+            log(f"CHOWN FAILED ({e}; fallback: {e2}) — restored file may be root-owned, tenant may lose access")
+            if Path(ALERTER).exists():
+                subprocess.run(
+                    [ALERTER, user, "agentshield", "CRITICAL",
+                     "settings-guard restore could not chown to tenant — settings.json may be root-owned (tenant lockout)"],
+                    input="fix ownership manually: chown <user> ~/.claude/settings.json\n",
+                    text=True, timeout=15, check=False,
+                )
+    os.chmod(tmp, 0o600)
+    tmp.replace(live)
+
+    detail = "live JSON was corrupt — fully restored protected subset" if corrupt else f"protected keys drifted: {drifted}"
+    log(f"RESTORED settings.json from golden ({detail})")
+
+    if Path(ALERTER).exists():
+        try:
+            subprocess.run(
+                [ALERTER, user, "agentshield", "CRITICAL",
+                 f"settings.json integrity: {detail} — restored from golden"],
+                input="settings.json protected keys (permissions/hooks) tampered and restored\n",
+                text=True, timeout=15, check=False,
+            )
+        except Exception as e:  # alerting must never break the restore
+            log(f"alerter failed: {e}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

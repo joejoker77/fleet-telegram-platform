@@ -73,16 +73,19 @@ if json.dumps(d, sort_keys=True) != before:
         json.dump(d, f, indent=2)
 PY
 
-# M4.1 — seed shellfirm per-user state. ~/.config is NOT a mounted volume, so the
-# host's per-user config doesn't carry into the container; seed it here (idempotent).
+# M4.1 — seed shellfirm per-user state. ~/.config IS a mounted volume (claude-pod-run
+# mounts it precisely for this block — the rootfs is --read-only, so any $HOME path the
+# entrypoint writes must be a volume; 2026-06-10 incident: missing mount → mkdir died on
+# the RO overlay and the whole pod failed to start). Seed it here (idempotent).
 # The PreToolUse hook (/usr/local/bin/shellfirm-bot-wrapper) is already wired in the
 # tenant's mounted ~/.claude/settings.json; this just makes the binary's config sane:
 #   - agent mode (auto-deny High, no interactive prompt that would hang the pane)
 #   - disable the built-in `fs` group (too aggressive for an AI agent on its own files)
 #   - ensure the cwd-loaded policy exists at ~/work/.shellfirm.yaml (shellfirm reads
 #     .shellfirm.yaml from the working dir; bot cwd is $HOME/work)
-if command -v shellfirm >/dev/null 2>&1; then
-  mkdir -p "$HOME/.config/shellfirm"
+# Degrade, don't die: if the mount is absent the seed is skipped with a loud warning —
+# shellfirm falls back to defaults; a missing nicety must not take the tenant down.
+if command -v shellfirm >/dev/null 2>&1 && mkdir -p "$HOME/.config/shellfirm" 2>/dev/null; then
   if [ ! -f "$HOME/.config/shellfirm/settings.yaml" ]; then
     cat > "$HOME/.config/shellfirm/settings.yaml" <<'SFEOF'
 # shellfirm settings — bot agent mode (seeded by runtime entrypoint)
@@ -96,6 +99,8 @@ SFEOF
   if [ -d "$HOME/work" ] && [ ! -f "$HOME/work/.shellfirm.yaml" ] && [ -f /etc/shellfirm/policy.yaml ]; then
     cp /etc/shellfirm/policy.yaml "$HOME/work/.shellfirm.yaml" 2>/dev/null || true
   fi
+elif command -v shellfirm >/dev/null 2>&1; then
+  echo "WARN: ~/.config not writable (volume missing?) — shellfirm seed skipped, running with defaults" >&2
 fi
 
 # Claude + official Telegram plugin channel (no patch), or remote-only if opted out.
