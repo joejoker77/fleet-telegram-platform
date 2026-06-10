@@ -1,0 +1,189 @@
+/* Telegram theme vars (var(--tg-theme-*)) are injected by the Telegram client;
+   the fallbacks keep the app usable in a plain browser tab during dev. */
+:root {
+  --bg: var(--tg-theme-bg-color, #ffffff);
+  --fg: var(--tg-theme-text-color, #111111);
+  --hint: var(--tg-theme-hint-color, #888888);
+  --accent: var(--tg-theme-button-color, #2481cc);
+  --accent-fg: var(--tg-theme-button-text-color, #ffffff);
+  --surface: var(--tg-theme-secondary-bg-color, #f4f4f5);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  background: var(--surface);
+  position: sticky;
+  top: 0;
+}
+
+.centered {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-height: 100vh;
+  padding: 24px;
+  text-align: center;
+}
+
+.muted {
+  color: var(--hint);
+  padding: 12px;
+}
+
+.error {
+  color: #c0392b;
+  padding: 8px 12px;
+  white-space: pre-wrap;
+}
+
+button {
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 14px;
+  background: var(--surface);
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+}
+
+button.primary {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+button.ghost {
+  background: transparent;
+  font-size: 18px;
+}
+
+/* file tree */
+.tree {
+  padding: 4px 0;
+}
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.tree-row:active {
+  background: var(--surface);
+}
+
+.tree-dir {
+  font-weight: 600;
+}
+
+.tree-caret {
+  color: var(--hint);
+  width: 14px;
+}
+
+.tree-file .tree-name {
+  flex: 1;
+}
+
+.tree-size {
+  color: var(--hint);
+  font-size: 12px;
+}
+
+/* file view */
+.fileview {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+
+.fileview-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+}
+
+.fileview-header .path {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.toolbar {
+  display: flex;
+  gap: 8px;
+  padding: 0 12px 8px;
+  flex-wrap: wrap;
+}
+
+.content,
+.diff {
+  margin: 0 12px 12px;
+  padding: 10px;
+  background: var(--surface);
+  border-radius: 8px;
+  overflow-x: auto;
+  font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre;
+}
+
+.editor {
+  margin: 0 12px 12px;
+  padding: 10px;
+  min-height: 50vh;
+  background: var(--surface);
+  color: var(--fg);
+  border: 1px solid var(--hint);
+  border-radius: 8px;
+  font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  resize: vertical;
+}
+
+.diff-add {
+  background: rgba(46, 204, 113, 0.18);
+}
+
+.diff-del {
+  background: rgba(231, 76, 60, 0.18);
+}
+
+.advisory {
+  margin: 0 12px 8px;
+  padding: 8px 10px;
+  background: rgba(241, 196, 15, 0.15);
+  border-radius: 8px;
+}
+
+.advisory pre {
+  overflow-x: auto;
+  font-size: 12px;
+}
