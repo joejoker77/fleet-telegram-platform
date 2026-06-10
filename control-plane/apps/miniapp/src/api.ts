@@ -81,3 +81,18 @@ export function fsFile(token: string, path: string): Promise<FsFileResponse> {
 export function fsPut(token: string, path: string, content: string): Promise<FsPutResponse> {
   return request("/fs/file", { method: "PUT", body: JSON.stringify({ path, content }) }, token);
 }
+
+/** One audit record as streamed by ws /live (mirrors @fleet/shared AuditRecord). */
+export interface LiveEvent {
+  ts: string;
+  userId?: string | null;
+  kind: string; // e.g. "auth.session", "fs.put", "usage.turn", "live.hello"
+  actor?: string;
+  payload?: unknown;
+}
+
+/** ws URL for GET /live. Browsers can't set headers on ws upgrades → token in query. */
+export function liveWsUrl(token: string): string {
+  const proto = window.location.protocol === "https:" ? "wss" : "ws";
+  return `${proto}://${window.location.host}${BASE}/live?token=${encodeURIComponent(token)}`;
+}

@@ -5,6 +5,7 @@ import { dropSession, ensureSession, type Session } from "./auth";
 import { CommandBuilder } from "./components/CommandBuilder";
 import { FileTree } from "./components/FileTree";
 import { FileView } from "./components/FileView";
+import { LiveActivity } from "./components/LiveActivity";
 import { SubagentBuilder } from "./components/SubagentBuilder";
 
 type State =
@@ -12,7 +13,13 @@ type State =
   | { phase: "error"; message: string }
   | { phase: "ready"; session: Session; profile: MeResponse; entries: FsEntry[] };
 
-type Screen = { kind: "tree" } | { kind: "file"; path: string } | { kind: "new" } | { kind: "subagent" } | { kind: "command" };
+type Screen =
+  | { kind: "tree" }
+  | { kind: "file"; path: string }
+  | { kind: "new" }
+  | { kind: "subagent" }
+  | { kind: "command" }
+  | { kind: "live" };
 
 export function App() {
   const [state, setState] = useState<State>({ phase: "auth" });
@@ -59,6 +66,9 @@ export function App() {
       <header className="app-header">
         <strong>.claude/ — {state.profile.osUsername}</strong>
         <span>
+          <button className="ghost" onClick={() => setScreen({ kind: "live" })} title="Live-активность">
+            📡
+          </button>
           <button className="ghost" onClick={() => setScreen({ kind: "new" })} title="Создать">
             ＋
           </button>
@@ -93,6 +103,7 @@ export function App() {
       {screen.kind === "command" && (
         <CommandBuilder token={state.session.token} existingPaths={existingPaths} onClose={toTree} onSaved={savedToTree} />
       )}
+      {screen.kind === "live" && <LiveActivity token={state.session.token} onClose={toTree} />}
     </div>
   );
 }

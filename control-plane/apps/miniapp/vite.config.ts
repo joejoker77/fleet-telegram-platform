@@ -12,6 +12,7 @@ export default defineConfig({
       "/api": {
         target: process.env.MINIAPP_DEV_API ?? "http://127.0.0.1:8080",
         changeOrigin: true,
+        ws: true, // /api/live (LiveActivity WebSocket)
         rewrite: (p) => p.replace(/^\/api/, ""),
       },
     },

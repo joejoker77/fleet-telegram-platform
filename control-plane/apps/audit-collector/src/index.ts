@@ -15,6 +15,7 @@ import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 import { pino } from "pino";
+import { Redis } from "ioredis";
 import { eq } from "drizzle-orm";
 import {
   auditEvent,
@@ -30,6 +31,10 @@ import { getDb, getPool, schema } from "@fleet/db";
 const log = pino({ name: "audit-collector" });
 
 const SOCKET = process.env.AUDIT_SOCKET ?? "/run/audit/collector.sock";
+// M5.4 LiveActivity: besides the WORM file + PG index, fan each event out to
+// Redis pub/sub (`live:<userId>`) so cp-api's ws /live can stream it to the
+// Mini App. Optional: no REDIS_URL → no publishing, everything else unaffected.
+const REDIS_URL = process.env.REDIS_URL ?? "";
 const DIR = process.env.AUDIT_DIR ?? "/srv/audit";
 // Group that owns the socket. Tenant containers join this group (--group-add) to
 // get write-only access to the socket (mode 0660) without any read/mutate access
@@ -44,6 +49,16 @@ const AUDIT_GID =
 // Single-writer model: one process owns the chain head, serialised below.
 let prevHash = AUDIT_GENESIS_HASH;
 let writeChain: Promise<unknown> = Promise.resolve();
+
+const redisPub = REDIS_URL ? new Redis(REDIS_URL, { maxRetriesPerRequest: 1 }) : null;
+redisPub?.on("error", (err) => log.warn({ err: err.message }, "live publish redis error (non-fatal)"));
+
+function publishLive(record: AuditRecord): void {
+  if (!redisPub || !record.userId) return; // no redis / unattributed event → WORM+index only
+  // Fire-and-forget: live streaming is best-effort by design; the WORM file is
+  // the durable record and has already been appended by the caller.
+  redisPub.publish(`live:${record.userId}`, JSON.stringify(record)).catch(() => {});
+}
 
 function currentFile(): string {
   // One file per UTC day. ts is supplied per-record; the file is chosen at
@@ -106,6 +121,8 @@ async function commit(raw: unknown): Promise<AuditRecord> {
   } catch (err) {
     log.error({ err, hash: hash.slice(0, 12) }, "audit_index insert failed (record persisted to WORM)");
   }
+
+  publishLive(record);
 
   // Usage metering: a usage.turn event also lands in usage_records (tokens only;
   // flat subscription has no $). Resolve the tenant by actor (os_username) when

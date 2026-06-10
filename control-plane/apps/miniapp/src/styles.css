@@ -247,6 +247,63 @@ button.ghost {
   padding: 4px 12px;
 }
 
+/* live activity */
+.live-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-left: auto;
+}
+
+.live-connecting {
+  background: #f1c40f;
+}
+
+.live-open {
+  background: #2ecc71;
+}
+
+.live-closed {
+  background: #e74c3c;
+}
+
+.live-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 12px 12px;
+}
+
+.live-row {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--surface);
+  cursor: pointer;
+}
+
+.live-line {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.live-kind {
+  font-weight: 600;
+}
+
+.live-ts {
+  color: var(--hint);
+  font-size: 12px;
+}
+
+.live-actor {
+  color: var(--hint);
+  font-size: 12px;
+}
+
+.live-payload {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+}
+
 .success {
   padding: 12px;
 }

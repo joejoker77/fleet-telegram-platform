@@ -10,11 +10,15 @@ import { verifyInitData, InitDataError } from "./initdata.js";
 import { issueSession, verifySession } from "./auth.js";
 import { sendAudit } from "./audit.js";
 import { registerFsRoutes } from "./fs-routes.js";
+import { registerLiveRoutes } from "./live-routes.js";
+import websocket from "@fastify/websocket";
 
 const config = loadConfig();
 const app = Fastify({ logger: { name: "api" } });
 const redis = new Redis(config.redisUrl, { maxRetriesPerRequest: 3 });
 const db = getDb();
+
+await app.register(websocket);
 
 app.get("/healthz", async () => ({ ok: true }));
 
@@ -25,6 +29,10 @@ registerFsRoutes(app, {
   auditSocket: config.auditSocket,
   homeRoot: config.tenantHomeRoot,
 });
+
+// M5.4 LiveActivity: ws /live streams the tenant's audit events (Redis pub/sub
+// fed by audit-collector).
+registerLiveRoutes(app, { redis, redisUrl: config.redisUrl, jwtSecret: config.jwtSecret });
 
 // POST /auth/session — verify Telegram initData, resolve the tenant, issue a JWT.
 app.post("/auth/session", async (req, reply) => {
