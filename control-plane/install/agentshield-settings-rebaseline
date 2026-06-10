@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# agentshield-settings-rebaseline <user>  (M4 / WP7, ADR-003)
+# Adopt the current live settings.json as the root-owned golden baseline that the
+# integrity guard enforces. Run as root AFTER an operator-authorized change to the
+# protected subset (permissions / hooks). Typical authorized-edit flow:
+#   touch /etc/agentshield/operator-override.flag   # pause the guard (1h)
+#   <edit /home/<user>/.claude/settings.json>
+#   agentshield-settings-rebaseline <user>          # adopt new baseline
+#   rm -f /etc/agentshield/operator-override.flag    # re-arm the guard
+set -euo pipefail
+u="${1:?usage: agentshield-settings-rebaseline USER}"
+[ "$(id -u)" -eq 0 ] || { echo "run as root" >&2; exit 1; }
+LIVE="/home/${u}/.claude/settings.json"
+GOLDEN_DIR=/var/lib/agentshield/golden
+GOLDEN="${GOLDEN_DIR}/${u}.settings.json"
+[ -f "$LIVE" ] || { echo "no live settings.json for ${u}" >&2; exit 1; }
+python3 -c "import json,sys; json.load(open('${LIVE}'))" || { echo "live settings.json is not valid JSON — refusing" >&2; exit 1; }
+install -d -m 0700 "$GOLDEN_DIR"
+install -m 0600 "$LIVE" "$GOLDEN"
+echo "rebaselined golden for ${u}: ${GOLDEN} (guard enforces its permissions + hooks)"

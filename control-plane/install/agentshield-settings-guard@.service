@@ -1,0 +1,8 @@
+[Unit]
+Description=Restore %i ~/.claude/settings.json protected keys from golden (M4/WP7)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/agentshield-settings-guard %i
+Nice=5
+IOSchedulingClass=best-effort

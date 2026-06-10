@@ -1,0 +1,11 @@
+[Unit]
+Description=Watch %i ~/.claude/settings.json for tampering (M4/WP7 integrity guard)
+
+[Path]
+# Fire the guard on any modification — real-time (~1s), unlike the 15-min
+# agentshield-gate scan. PathChanged covers create/replace (atomic writes).
+PathChanged=/home/%i/.claude/settings.json
+Unit=agentshield-settings-guard@%i.service
+
+[Install]
+WantedBy=multi-user.target
