@@ -1,0 +1,487 @@
+#!/usr/bin/env python3
+"""
+DEPRECATED 2026-06-10 (ADR-004, decision a): the deploy-time MCP judge gate was
+removed as redundant (deploy reconciles CI-vetted content). The judge/scanner
+gate moves to the publish/import boundary (M5). Do NOT re-deploy this over the
+canonical deploy-mcp. Kept for reference only.
+
+deploy-mcp v2.4 — per-bot reconciliation of shared MCP servers.
+
+CHANGED in v2.4 (M4 / WP4 — L4 MCP install gate, PILOT-SCOPED to GATE_USERS):
+Before a resolved MCP stanza is applied to a bot's settings.json, it is scanned
+through the fleet L4 gate (deterministic rules + the Judge Orchestrator,
+cp-judge). Three-way result so a judge hiccup never breaks working MCPs:
+  pass   → apply as normal.
+  block  → confirmed bad: NOT applied; if it was previously managed the existing
+           removal path uninstalls it.
+  unavail (cp-judge down / gate error / timeout) → STATUS QUO: keep the installed
+           version unchanged; defer new installs to a later reconcile.
+This is a NO-OP for every bot not in GATE_USERS (their behaviour is byte-identical
+to v2.3). See control-plane/install/m4.2-mcp-gate.sh for the gate itself.
+
+CHANGED in v2.3: `onecli agents secrets --id <uuid>` returns just a
+flat list of secret IDs ({"data": ["uuid1", "uuid2"]}), not full
+secret records. To resolve those IDs to bare secret names (matching
+the template's `secrets.<name>` keys), we now cross-reference with
+`onecli secrets list`. We also need to strip the
+"<user>-<slug>-" prefix that mcp-set-secret prepends. New helper
+`get_bound_secret_names_for_slug(user, slug, ...)` does this per-slug.
+
+CHANGED in v2.1: agents secrets --id expects internal UUID, not identifier.
+Added resolve_agent_uuid() helper that maps identifier "<user>-bot" to UUID
+via `onecli agents list`, and threads UUID through get_agent_secrets().
+The previous v2.0 silently treated all bots as "no secrets bound" because
+"--id <user>-bot" returned NOT_FOUND, which the code swallowed.
+
+(Comments below are unchanged from v2.0.)
+
+Resolves two kinds of placeholders in mcp/<slug>/template.json:
+
+  ${USER_CONFIG:key}   — non-secret per-user config (file paths, IDs, etc.)
+                         Sourced from users.yaml under
+                         mcp.<slug>.user_config.<bot-user>.<key>
+                         in the repo. Never a secret.
+
+  ${SECRET:name}       — a real API token / credential. Substituted in
+                         settings.json env block with the LITERAL marker
+                         '${ONECLI:<name>}'. The actual value lives ONLY in
+                         OneCLI vault, bound to that bot's agent, and is
+                         injected at the HTTP-proxy layer by OneCLI's gateway
+                         when the MCP's outbound request matches the
+                         secret's host-pattern. The bot never holds the
+                         real value.
+
+If a USER_CONFIG value is missing → MCP is SKIPPED for that bot.
+If a SECRET is not bound to that bot's agent → MCP is SKIPPED for that bot.
+
+Managed entries tracked in /var/lib/mcp-deploy/<user>.managed.json; non-
+managed entries (e.g. shellfirm) are left untouched. Triggers
+graceful-restart-bot when the managed set changes.
+
+Exit code always 0 (passive).
+"""
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+LOG_DIR = Path("/var/log/mcp-deploy")
+STATE_DIR = Path("/var/lib/mcp-deploy")
+ONECLI = "/usr/local/bin/onecli"
+USER_CONFIG_RE = re.compile(r"\$\{USER_CONFIG:([a-z0-9_]+)\}")
+SECRET_RE = re.compile(r"\$\{SECRET:([a-z0-9_-]+)\}")
+PER_ITEM_TIMEOUT = 30
+
+# ── M4 / WP4 — L4 MCP install gate (pilot-scoped, self-contained) ──────────
+# Only these bots run the gate; every other bot behaves exactly as in v2.3.
+# The gate is pure-stdlib (deterministic regex + a direct HTTP call to cp-judge)
+# so it runs INSIDE deploy-mcp's hardened systemd sandbox. The earlier
+# podman+tempfile+external-script approach tripped the sandbox (no writable /tmp,
+# noexec on /home) — this needs neither.
+GATE_USERS = {"vitaliy"}
+JUDGE_URL = "http://127.0.0.1:8090/judge"
+JUDGE_TIMEOUT = 120
+# Conclusive-malware signatures → block WITHOUT calling the judge (and still work
+# if cp-judge is down). Mirrors the critical built-in rules in @fleet/scanners.
+GATE_CRITICAL_RES = [
+    re.compile(r"\.credentials\.json|\.claude\.json|id_rsa|\.aws/credentials|\.netrc", re.I),
+    re.compile(r"\b(curl|wget|fetch)\b[^\n|]*\|\s*(bash|sh|zsh|python|node)\b", re.I),
+    re.compile(r"\bnc\b[^\n]*-e\b|/dev/tcp/|bash\s+-i\s*>&", re.I),
+]
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def log(user: str, msg: str) -> None:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    p = LOG_DIR / f"{user}.log"
+    with open(p, "a") as f:
+        f.write(f"{now_iso()} {msg}\n")
+
+
+def gate_alert(user: str, slug: str, reason: str) -> None:
+    """Lightweight alert sink until the WP6 notifier exists. The block is also in
+    the tamper-resistant audit chain (scan.result event from the scanner)."""
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(LOG_DIR / "gate-alerts.log", "a") as f:
+            f.write(f"{now_iso()} {user} MCP {slug} {reason}\n")
+    except OSError:
+        pass
+
+
+def gate_verdict(user: str, slug: str, stanza) -> str:
+    """Gate one resolved stanza. Returns 'pass' | 'block' | 'unavail'. Pure stdlib
+    (no tempfile/podman/external script) so it runs inside the hardened sandbox.
+    'unavail' means leave state untouched — a cp-judge outage must never uninstall
+    a working MCP. No-op ('pass') for users outside GATE_USERS."""
+    if user not in GATE_USERS:
+        return "pass"
+    text = json.dumps(stanza, sort_keys=True, ensure_ascii=False)
+    # 1) deterministic fast path — conclusive malware, no judge call needed.
+    for rx in GATE_CRITICAL_RES:
+        if rx.search(text):
+            log(user, f"  GATE {slug}: deterministic critical match → block")
+            return "block"
+    # 2) Judge Orchestrator (the single LLM-as-judge); fail-soft to 'unavail'.
+    payload = json.dumps({
+        "artifactHash": hashlib.sha256(text.encode()).hexdigest(),
+        "kind": "mcp",
+        "contentRef": "inline:" + text,
+        "rulesetVersion": "r1",
+        "actor": user,
+        "userId": None,
+    }).encode()
+    req = urllib.request.Request(
+        JUDGE_URL, data=payload, headers={"content-type": "application/json"}, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=JUDGE_TIMEOUT) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception as e:  # network/timeout/parse — never crash the reconciler
+        log(user, f"  GATE {slug}: judge call failed ({e}) → unavail")
+        return "unavail"
+    verdict = data.get("verdict")
+    if verdict == "pass":
+        log(user, f"  GATE {slug}: judge verdict=pass (cacheHit={data.get('cacheHit')}) → allow")
+        return "pass"
+    if verdict == "fail":
+        log(user, f"  GATE {slug}: judge verdict=fail (sev={data.get('severity')}) → block")
+        return "block"
+    log(user, f"  GATE {slug}: judge verdict={verdict} → unavail")
+    return "unavail"
+
+
+def list_available_mcps(repo_dir: Path):
+    mcp_root = repo_dir / "mcp"
+    if not mcp_root.is_dir():
+        return []
+    return sorted(
+        d.name for d in mcp_root.iterdir()
+        if d.is_dir() and (d / "template.json").is_file()
+    )
+
+
+def read_mcp_yaml(repo_dir: Path):
+    yaml_path = repo_dir / "users.yaml"
+    if not yaml_path.is_file():
+        return {}
+    try:
+        import yaml
+    except ImportError:
+        return {}
+    with open(yaml_path) as f:
+        data = yaml.safe_load(f) or {}
+    return data.get("mcp") or {}
+
+
+def get_user_config(mcp_yaml: dict, slug: str, user: str) -> dict:
+    spec = (mcp_yaml.get(slug) or {})
+    return ((spec.get("user_config") or {}).get(user) or {})
+
+
+def allowed_for_user(user: str, all_slugs: list, mcp_yaml: dict) -> list:
+    allowed = []
+    for slug in all_slugs:
+        spec = mcp_yaml.get(slug)
+        if not spec:
+            allowed.append(slug)
+            continue
+        users = spec.get("users")
+        if not isinstance(users, list):
+            allowed.append(slug)
+            continue
+        if user in users:
+            allowed.append(slug)
+    return allowed
+
+
+def resolve_agent_uuid(user: str) -> str | None:
+    """Look up internal UUID for the bot's OneCLI agent.
+
+    Agent identifier convention: '<user>-bot'.
+    Returns the agent's UUID (.id) or None if not found / lookup fails.
+    """
+    agent_identifier = f"{user}-bot"
+    try:
+        r = subprocess.run(
+            [ONECLI, "agents", "list"],
+            capture_output=True, text=True, timeout=PER_ITEM_TIMEOUT, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        payload = json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return None
+    # OneCLI list can return either {"data": [...]} or a bare list.
+    items = payload.get("data") if isinstance(payload, dict) else payload
+    if not isinstance(items, list):
+        return None
+    for agent in items:
+        if isinstance(agent, dict) and agent.get("identifier") == agent_identifier:
+            return agent.get("id")
+    return None
+
+
+def get_bound_secret_ids(agent_uuid: str | None) -> set:
+    """IDs of secrets currently bound to the agent (no metadata)."""
+    if not agent_uuid:
+        return set()
+    try:
+        r = subprocess.run(
+            [ONECLI, "agents", "secrets", "--id", agent_uuid],
+            capture_output=True, text=True, timeout=PER_ITEM_TIMEOUT, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return set()
+    if r.returncode != 0:
+        return set()
+    try:
+        payload = json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return set()
+    out = set()
+    for item in (payload.get("data") or []):
+        if isinstance(item, str):
+            out.add(item)
+        elif isinstance(item, dict) and item.get("id"):
+            out.add(item["id"])
+    return out
+
+
+def get_all_secrets_indexed() -> dict:
+    """All secrets visible to admin onecli, indexed by id → name."""
+    try:
+        r = subprocess.run(
+            [ONECLI, "secrets", "list"],
+            capture_output=True, text=True, timeout=PER_ITEM_TIMEOUT, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {}
+    if r.returncode != 0:
+        return {}
+    try:
+        payload = json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return {}
+    out = {}
+    for s in (payload.get("data") or []):
+        if isinstance(s, dict) and s.get("id") and s.get("name"):
+            out[s["id"]] = s["name"]
+    return out
+
+
+def bound_bare_names_for_slug(
+    user: str, slug: str, bound_ids: set, secrets_by_id: dict
+) -> set:
+    """For the given mcp slug, return the set of bare secret names that
+    are currently bound to this bot's agent.
+
+    Naming convention written by mcp-set-secret:
+      OneCLI secret name = "<user>-<slug>-<secret_name>"
+    Reverse-map: strip "<user>-<slug>-" prefix; the remainder is the
+    bare name that the template's `secrets.<name>` block refers to.
+    """
+    prefix = f"{user}-{slug}-"
+    out = set()
+    for sid in bound_ids:
+        full = secrets_by_id.get(sid)
+        if not full or not full.startswith(prefix):
+            continue
+        out.add(full[len(prefix):])
+    return out
+
+
+def resolve_placeholders(template, user_config: dict, agent_secrets: set):
+    """Walk template, substitute placeholders.
+    Returns (resolved, missing_config, missing_secrets)."""
+    missing_cfg = []
+    missing_sec = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            return {k: walk(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [walk(x) for x in node]
+        if isinstance(node, str):
+            def sub_cfg(m):
+                key = m.group(1)
+                if key not in user_config:
+                    if key not in missing_cfg:
+                        missing_cfg.append(key)
+                    return m.group(0)
+                return str(user_config[key])
+            s = USER_CONFIG_RE.sub(sub_cfg, node)
+
+            def sub_sec(m):
+                name = m.group(1)
+                if name not in agent_secrets:
+                    if name not in missing_sec:
+                        missing_sec.append(name)
+                # Replace with marker — actual value is injected at HTTP layer by OneCLI
+                return f"${{ONECLI:{name}}}"
+            s = SECRET_RE.sub(sub_sec, s)
+            return s
+        return node
+
+    resolved = walk(template)
+    return resolved, missing_cfg, missing_sec
+
+
+def trigger_graceful_restart(user: str) -> None:
+    bin_ = Path("/usr/local/sbin/graceful-restart-bot")
+    if not bin_.is_file():
+        log(user, "WARN: graceful-restart-bot not installed")
+        return
+    try:
+        r = subprocess.run([str(bin_), user], capture_output=True, text=True, timeout=20)
+        log(user, f"graceful-restart-bot {user} → rc={r.returncode}")
+    except subprocess.TimeoutExpired:
+        log(user, "WARN: graceful-restart-bot timed out")
+
+
+def main() -> None:
+    if len(sys.argv) != 2:
+        print("usage: deploy-mcp <user>", file=sys.stderr); sys.exit(2)
+    user = sys.argv[1]
+
+    home = Path(f"/home/{user}")
+    if not home.is_dir():
+        log(user, "SKIP: home missing"); return
+
+    repo_dir = home / ".claude" / "skills-repo"
+    settings_path = home / ".claude" / "settings.json"
+
+    if not repo_dir.is_dir() or not settings_path.is_file():
+        log(user, "SKIP: skills-repo or settings.json missing"); return
+
+    all_slugs = list_available_mcps(repo_dir)
+    mcp_yaml = read_mcp_yaml(repo_dir)
+    allowed = allowed_for_user(user, all_slugs, mcp_yaml)
+    agent_uuid = resolve_agent_uuid(user)
+    bound_ids = get_bound_secret_ids(agent_uuid)
+    secrets_by_id = get_all_secrets_indexed() if bound_ids else {}
+
+    resolved_mcps = {}
+    skipped = {}
+    for slug in allowed:
+        tpl_path = repo_dir / "mcp" / slug / "template.json"
+        try:
+            with open(tpl_path) as f:
+                tpl = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            log(user, f"WARN: bad template {slug}: {e}")
+            continue
+        # New schema: template.json has top-level "mcp_stanza"; older flat
+        # templates are taken as-is.
+        stanza = tpl.get("mcp_stanza", tpl)
+        ucfg = get_user_config(mcp_yaml, slug, user)
+        bare_secrets = bound_bare_names_for_slug(
+            user, slug, bound_ids, secrets_by_id
+        )
+        resolved, mcfg, msec = resolve_placeholders(stanza, ucfg, bare_secrets)
+        if mcfg or msec:
+            skipped[slug] = {"missing_config": mcfg, "missing_secrets": msec}
+            continue
+        resolved_mcps[slug] = resolved
+
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    state_path = STATE_DIR / f"{user}.managed.json"
+    try:
+        with open(state_path) as f:
+            previously_managed = set(json.load(f).get("managed", []))
+    except (OSError, json.JSONDecodeError):
+        previously_managed = set()
+
+    with open(settings_path) as f:
+        settings = json.load(f)
+    mcp_servers = settings.get("mcpServers") or {}
+
+    # ── M4 / WP4: L4 MCP gate (pilot-scoped to GATE_USERS) ────────────────────
+    # Scan every resolved stanza through cp-judge BEFORE it can be applied.
+    #   pass    → keep (apply).
+    #   block   → drop; the removal pass below uninstalls it if previously managed.
+    #   unavail → status quo: keep the installed version unchanged / defer new ones
+    #             (a cp-judge outage must never rip out a working MCP).
+    # No-op for non-pilot users (gate_verdict returns "pass").
+    if user in GATE_USERS and resolved_mcps:
+        gated = {}
+        for slug, stanza in resolved_mcps.items():
+            v = gate_verdict(user, slug, stanza)
+            if v == "pass":
+                gated[slug] = stanza
+            elif v == "block":
+                skipped[slug] = {"missing_config": [], "missing_secrets": [], "gate": "blocked"}
+                log(user, f"  GATE BLOCK {slug} (scanner verdict=fail) — not applied")
+                gate_alert(user, slug, "blocked")
+            else:  # unavail
+                if slug in mcp_servers:
+                    gated[slug] = mcp_servers[slug]  # keep the installed version unchanged
+                    log(user, f"  GATE UNAVAIL {slug} — cp-judge unreachable, keeping installed version")
+                else:
+                    log(user, f"  GATE UNAVAIL {slug} — cp-judge unreachable, deferring install")
+        resolved_mcps = gated
+
+    removed, added, updated = [], [], []
+    for slug in list(mcp_servers.keys()):
+        if slug in previously_managed and slug not in resolved_mcps:
+            del mcp_servers[slug]; removed.append(slug)
+    for slug, stanza in resolved_mcps.items():
+        if slug not in mcp_servers:
+            mcp_servers[slug] = stanza; added.append(slug)
+        elif mcp_servers[slug] != stanza:
+            mcp_servers[slug] = stanza; updated.append(slug)
+
+    settings["mcpServers"] = mcp_servers
+    new_managed = set(resolved_mcps.keys())
+
+    changed = bool(added or updated or removed)
+    if changed:
+        tmp = settings_path.with_suffix(".json.mcp-tmp")
+        with open(tmp, "w") as f:
+            json.dump(settings, f, indent=2, sort_keys=False)
+        import shutil
+        shutil.chown(tmp, user=user, group=user)
+        os.chmod(tmp, 0o600)
+        tmp.replace(settings_path)
+
+    with open(state_path, "w") as f:
+        json.dump({"managed": sorted(new_managed), "updated_at": now_iso()}, f, indent=2)
+    os.chmod(state_path, 0o600)
+
+    if changed or skipped:
+        log(user, f"DIFF: added={added} updated={updated} removed={removed} skipped={list(skipped.keys())}")
+        for slug, info in skipped.items():
+            parts = []
+            if info.get("missing_config"):
+                parts.append(f"config={info['missing_config']}")
+            if info.get("missing_secrets"):
+                parts.append(f"secrets={info['missing_secrets']}")
+            if info.get("gate"):
+                parts.append(f"gate={info['gate']}")
+            log(user, f"  SKIP {slug}: " + ", ".join(parts))
+    else:
+        log(user, f"NO CHANGES (managed={sorted(new_managed)})")
+
+    if changed:
+        trigger_graceful_restart(user)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        try:
+            log(sys.argv[1] if len(sys.argv) > 1 else "unknown", f"FATAL: {e}")
+        except Exception:
+            pass
