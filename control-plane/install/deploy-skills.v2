@@ -1,0 +1,167 @@
+#!/bin/bash
+# DEPRECATED 2026-06-10 (ADR-004, decision a): the deploy-time skill judge gate was
+# removed as redundant (deploy reconciles CI-vetted skills). Gate moves to the
+# publish/import boundary (M5). Reverted to deploy-skills v1. Reference only.
+# deploy-skills USER  (v2 — M4/WP4 L5 skill install gate added)
+#
+# Pulls latest from the claude-bot-skills repo for the given user,
+# filters skills by users.yaml whitelist, and rsyncs allowed skills
+# into ~USER/.claude/skills/.
+#
+# v2 CHANGE (PILOT-SCOPED to GATE_USERS): before each allowed skill is rsynced in,
+# it is scanned through the L5 gate (/usr/local/sbin/fleet-skill-gate → cp-judge).
+#   pass    → deploy as normal.
+#   block   → do NOT deploy; remove any installed copy (confirmed bad).
+#   unavail (cp-judge down) → keep status quo (skip this cycle; never rip out a
+#            working skill because the judge blinked).
+# No-op for every other bot (gate only runs when u==vitaliy and the binary exists),
+# so their behaviour is identical to v1.
+#
+# Designed to be called by a systemd timer as root. Drops to USER for
+# the git operations (uses USER's deploy key) and for rsync ownership.
+#
+# Log: /var/log/skill-deploy/USER.log
+
+set -euo pipefail
+
+u="${1:?usage: deploy-skills USER}"
+
+if ! id "$u" >/dev/null 2>&1; then
+  echo "$(date -Is) unknown user $u" >&2
+  exit 2
+fi
+
+LOG_DIR=/var/log/skill-deploy
+mkdir -p "$LOG_DIR"
+LOG="$LOG_DIR/${u}.log"
+exec >> "$LOG" 2>&1
+
+HOME_DIR="/home/$u"
+REPO_DIR="$HOME_DIR/.claude/skills-repo"
+SKILLS_DIR="$HOME_DIR/.claude/skills"
+SSH_ALIAS="claude-bot-skills.github"
+GATE_BIN="/usr/local/sbin/fleet-skill-gate"   # M4/WP4 L5 gate
+GATE_USERS=" vitaliy "                          # pilot scope (space-delimited)
+
+# Read repo URL from /root/.github-pat (which holds GITHUB_OWNER + GITHUB_REPO)
+# The deploy key is configured to alias `claude-bot-skills.github` to the
+# real GitHub via ~/.ssh/config — so we just need owner/repo names here.
+# shellcheck disable=SC1091
+if [ -r /root/.github-pat ]; then
+  set -a
+  . /root/.github-pat
+  set +a
+fi
+: "${GITHUB_OWNER:=joejoker77}"
+: "${GITHUB_REPO:=claude-bot-skills}"
+REMOTE="git@${SSH_ALIAS}:${GITHUB_OWNER}/${GITHUB_REPO}.git"
+
+echo "=== $(date -Is) deploy-skills $u ==="
+echo "remote: $REMOTE"
+
+# Pull or clone as the user (uses the user's per-bot deploy key)
+if [ -d "$REPO_DIR/.git" ]; then
+  runuser -u "$u" -- git -C "$REPO_DIR" fetch --quiet origin main
+  runuser -u "$u" -- git -C "$REPO_DIR" reset --hard --quiet origin/main
+  HEAD_SHA=$(runuser -u "$u" -- git -C "$REPO_DIR" rev-parse --short HEAD)
+  echo "pulled, HEAD=$HEAD_SHA"
+else
+  install -d -o "$u" -g "$u" -m 755 "$REPO_DIR"
+  runuser -u "$u" -- git clone --quiet "$REMOTE" "$REPO_DIR"
+  HEAD_SHA=$(runuser -u "$u" -- git -C "$REPO_DIR" rev-parse --short HEAD)
+  echo "cloned, HEAD=$HEAD_SHA"
+fi
+
+# Compute allowed skills via Python YAML parse
+ALLOWED=$(python3 - "$REPO_DIR" "$u" <<'PYEOF'
+import os
+import sys
+
+repo, user = sys.argv[1], sys.argv[2]
+skills_root = os.path.join(repo, "skills")
+users_yaml = os.path.join(repo, "users.yaml")
+
+try:
+    import yaml
+    yaml_ok = True
+except ImportError:
+    yaml_ok = False
+
+all_skills = sorted(
+    d for d in os.listdir(skills_root)
+    if os.path.isdir(os.path.join(skills_root, d))
+) if os.path.isdir(skills_root) else []
+
+restrictions = {}
+if yaml_ok and os.path.isfile(users_yaml):
+    with open(users_yaml) as f:
+        data = yaml.safe_load(f) or {}
+    for slug, spec in (data.get("skills") or {}).items():
+        if isinstance(spec, dict):
+            users = spec.get("users")
+            if isinstance(users, list):
+                restrictions[slug] = users
+
+allowed = [
+    s for s in all_skills
+    if s not in restrictions or user in restrictions[s]
+]
+print(" ".join(allowed))
+PYEOF
+)
+echo "allowed: ${ALLOWED:-(none)}"
+
+# Ensure skills target exists with right owner
+install -d -o "$u" -g "$u" -m 755 "$SKILLS_DIR"
+
+# Remove any skills currently in target that aren't allowed (or no longer exist
+# in the repo).
+CURRENT=$(find "$SKILLS_DIR" -maxdepth 1 -mindepth 1 -type d -printf "%f\n" 2>/dev/null | sort)
+for c in $CURRENT; do
+  keep=0
+  for a in $ALLOWED; do
+    if [ "$a" = "$c" ]; then keep=1; break; fi
+  done
+  if [ $keep -eq 0 ]; then
+    echo "remove (not allowed for $u): $SKILLS_DIR/$c"
+    rm -rf "${SKILLS_DIR:?}/$c"
+  fi
+done
+
+# Rsync each allowed skill from repo into target
+for s in $ALLOWED; do
+  src="$REPO_DIR/skills/$s"
+  dst="$SKILLS_DIR/$s"
+  if [ ! -d "$src" ]; then
+    echo "WARN: $s in allowed list but missing from repo"
+    continue
+  fi
+  # ── M4/WP4 L5 gate (pilot-scoped) ──────────────────────────────────────────
+  # Operator-vetted exemptions: skills the operator has reviewed and approved
+  # despite a conservative judge verdict (e.g. dev tools that legitimately handle
+  # a PAT). The list is ROOT-OWNED (/etc/agentshield/skill-gate-exempt, one slug
+  # per line) so the bot cannot self-exempt.
+  gate_this=1
+  if [ -f /etc/agentshield/skill-gate-exempt ] && grep -qxF "$s" /etc/agentshield/skill-gate-exempt; then
+    echo "GATE EXEMPT skill $s (operator-vetted)"
+    gate_this=0
+  fi
+  # set -e safe: capture the gate exit without aborting the script.
+  if [ "$gate_this" -eq 1 ] && [[ "$GATE_USERS" == *" $u "* ]] && [ -x "$GATE_BIN" ]; then
+    gv=0; "$GATE_BIN" "$src" "$u" || gv=$?
+    if [ "$gv" -eq 2 ]; then
+      echo "GATE BLOCK skill $s — not deploying; removing any installed copy"
+      rm -rf "${dst:?}"
+      continue
+    elif [ "$gv" -eq 3 ]; then
+      echo "GATE UNAVAIL skill $s — cp-judge unreachable; keeping status quo (skip)"
+      continue
+    fi
+    echo "GATE PASS skill $s"
+  fi
+  rsync -a --delete "$src/" "$dst/"
+  chown -R "$u:$u" "$dst"
+  echo "deployed: $s"
+done
+
+echo "done"
