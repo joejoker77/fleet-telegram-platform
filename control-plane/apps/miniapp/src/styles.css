@@ -187,3 +187,66 @@ button.ghost {
   overflow-x: auto;
   font-size: 12px;
 }
+
+/* builders */
+.builder-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 12px 8px;
+}
+
+.builder-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--hint);
+}
+
+.builder-form input,
+.builder-form textarea,
+.builder-form select {
+  padding: 8px 10px;
+  border: 1px solid var(--hint);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+
+.builder-form textarea {
+  font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  resize: vertical;
+}
+
+.builder-form fieldset {
+  border: 1px solid var(--hint);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--hint);
+}
+
+.tool-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  gap: 6px;
+}
+
+.tool-toggle {
+  flex-direction: row !important;
+  align-items: center;
+  color: var(--fg);
+}
+
+.warn {
+  color: #b9770e;
+  padding: 4px 12px;
+}
+
+.success {
+  padding: 12px;
+}
