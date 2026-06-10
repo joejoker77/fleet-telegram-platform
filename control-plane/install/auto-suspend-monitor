@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""
+auto-suspend-monitor <user>   (M4 / WP6)
+
+Deterministic abuse detector (NOT an LLM — honours the zero-recurring-LLM rule).
+Counts repeated-malicious signals for a tenant over a sliding window from the
+agentshield log, and on threshold auto-suspends the container + alerts the admin.
+
+Signals (per-user, from /var/log/agentshield/<user>.log):
+  - "settings-guard: RESTORED"  → a tamper attempt on the protected settings (WP7)
+  - "REGRESSION"                → a new high/critical malicious-content finding
+
+Action on threshold:
+  - ALWAYS: alert the admin via /usr/local/sbin/security-alerter.
+  - If ENFORCE=1: `podman pause claude-<user>` + set users.status='suspended'.
+    Default ENFORCE=0 (alert-only) so testing can't freeze the PILOT bot's own
+    pod; flip to 1 (per non-pilot tenant) once validated. Resume: tenant-resume.
+  - Honours /etc/agentshield/operator-override.flag (fresh <1h → skip, so operator
+    tamper-tests don't trip a suspend).
+
+Config via EnvironmentFile /etc/agentshield/autosuspend.conf:
+  WINDOW_MIN (default 60), THRESHOLD (default 3), ENFORCE (default 0).
+Idempotent: never re-suspends an already-paused container.
+"""
+import os
+import re
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+
+OVERRIDE_FLAG = Path("/etc/agentshield/operator-override.flag")
+OVERRIDE_TTL = 3600
+# Overridable so the acceptance test can stub it (avoid real admin alerts).
+ALERTER = os.environ.get("SECURITY_ALERTER", "/usr/local/sbin/security-alerter")
+
+TS_RE = re.compile(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2}))")
+SIGNAL_RE = re.compile(r"settings-guard: RESTORED|REGRESSION")
+
+
+def now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def main() -> int:
+    if len(sys.argv) != 2:
+        print("usage: auto-suspend-monitor <user>", file=sys.stderr)
+        return 2
+    user = sys.argv[1]
+    window_min = int(os.environ.get("WINDOW_MIN", "60"))
+    threshold = int(os.environ.get("THRESHOLD", "3"))
+    enforce = os.environ.get("ENFORCE", "0") == "1"
+
+    log_dir = os.environ.get("AGENTSHIELD_LOG_DIR", "/var/log/agentshield")
+    log_path = Path(log_dir) / f"{user}.log"
+
+    def log(msg: str) -> None:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a") as f:
+            f.write(f"{now().strftime('%Y-%m-%dT%H:%M:%SZ')} auto-suspend: {msg}\n")
+
+    if not log_path.is_file():
+        return 0
+
+    # Operator-present window → don't suspend on test-generated signals.
+    if OVERRIDE_FLAG.is_file() and (time.time() - OVERRIDE_FLAG.stat().st_mtime) < OVERRIDE_TTL:
+        return 0
+
+    cutoff = now() - timedelta(minutes=window_min)
+    count = 0
+    for line in log_path.read_text(errors="replace").splitlines():
+        if not SIGNAL_RE.search(line):
+            continue
+        m = TS_RE.search(line)
+        if not m:
+            continue
+        try:
+            ts = datetime.fromisoformat(m.group(1).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if ts >= cutoff:
+            count += 1
+
+    if count < threshold:
+        return 0
+
+    # Already paused? (idempotent). Tolerate podman being absent (e.g. offline test).
+    try:
+        state = subprocess.run(
+            ["podman", "inspect", "-f", "{{.State.Status}}", f"claude-{user}"],
+            capture_output=True, text=True, check=False,
+        ).stdout.strip()
+    except FileNotFoundError:
+        state = ""
+    if state == "paused":
+        log(f"threshold hit ({count}≥{threshold}/{window_min}m) but claude-{user} already paused — no-op")
+        return 0
+
+    sev = "CRITICAL"
+    msg = f"{count} abuse signals (tamper/regression) in {window_min}m ≥ threshold {threshold}"
+    if Path(ALERTER).exists():
+        subprocess.run([ALERTER, user, "auto-suspend", sev, msg],
+                       input=msg + "\n", text=True, timeout=15, check=False)
+
+    if not enforce:
+        log(f"WOULD SUSPEND claude-{user}: {msg} (ENFORCE=0, alert-only)")
+        return 0
+
+    # ENFORCE: pause the pod + mark suspended in the control plane.
+    try:
+        subprocess.run(["podman", "pause", f"claude-{user}"], check=False)
+        subprocess.run(
+            ["podman", "exec", "cp-postgres", "psql", "-U", "cplane", "-d", "control_plane",
+             "-c", f"update users set status='suspended' where os_username='{user}';"],
+            check=False,
+        )
+    except FileNotFoundError:
+        log("podman not found — cannot enforce pause (alerted only)")
+        return 0
+    log(f"AUTO-SUSPENDED claude-{user}: {msg}. Resume with: tenant-resume {user}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

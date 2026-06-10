@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodic auto-suspend abuse check for %i (M4/WP6)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+RandomizedDelaySec=30
+Persistent=true
+
+[Install]
+WantedBy=timers.target

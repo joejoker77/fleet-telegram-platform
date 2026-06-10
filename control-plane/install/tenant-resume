@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# tenant-resume <user>  (M4 / WP6) — reverse an auto-suspend: unpause the pod and
+# mark the tenant active again. Run as root (operator). Idempotent.
+set -euo pipefail
+u="${1:?usage: tenant-resume USER}"
+[ "$(id -u)" -eq 0 ] || { echo "run as root" >&2; exit 1; }
+
+state="$(podman inspect -f '{{.State.Status}}' "claude-${u}" 2>/dev/null || echo absent)"
+case "$state" in
+  paused)  podman unpause "claude-${u}" && echo "unpaused claude-${u}" ;;
+  running) echo "claude-${u} already running" ;;
+  absent)  echo "claude-${u} not found (nothing to unpause)" ;;
+  *)       podman start "claude-${u}" 2>/dev/null && echo "started claude-${u}" || echo "claude-${u} state=$state" ;;
+esac
+
+podman exec cp-postgres psql -U cplane -d control_plane \
+  -c "update users set status='active' where os_username='${u}';" >/dev/null 2>&1 \
+  && echo "control-plane: ${u} → active" || echo "WARN: could not update status (cp-postgres?)"
+
+LOG="/var/log/agentshield/${u}.log"
+echo "$(date -Is) tenant-resume: ${u} resumed by operator" >> "$LOG" 2>/dev/null || true
+[ -x /usr/local/sbin/security-alerter ] && \
+  printf 'resumed\n' | /usr/local/sbin/security-alerter "${u}" auto-suspend INFO "tenant resumed by operator" || true
+echo "done"

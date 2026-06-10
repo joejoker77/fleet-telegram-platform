@@ -1,0 +1,9 @@
+[Unit]
+Description=Auto-suspend abuse monitor for %i (M4/WP6)
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/agentshield/autosuspend.conf
+ExecStart=/usr/local/sbin/auto-suspend-monitor %i
+Nice=10
+IOSchedulingClass=best-effort
