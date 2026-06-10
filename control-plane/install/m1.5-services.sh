@@ -93,6 +93,7 @@ podman run -d --name cp-audit-collector --network host \
   -v "$SRV_AUDIT:/srv/audit" \
   -v cp-audit-run:/run/audit \
   -e AUDIT_GID="$AUDIT_GID" \
+  -e REDIS_URL=redis://127.0.0.1:6380 \
   --secret "$PG_SECRET" \
   --restart=unless-stopped \
   "$NODE_IMAGE" \
