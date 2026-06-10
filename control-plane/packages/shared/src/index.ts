@@ -103,3 +103,49 @@ export function chainHash(
 ): string {
   return createHash("sha256").update(prevHash).update(canonicalize(core)).digest("hex");
 }
+
+// ── Judge Orchestrator (M4 / docs 09-security-stack.md) ──
+// The SINGLE LLM-as-judge entry point for the artifact scanners (L4 MCP, L5
+// Skill, L6 AgentShield/Promptfoo). It is called ONLY on save/publish/import
+// events — never on a schedule (hard rule: zero recurring LLM calls, see
+// feedback_no_recurring_llm_calls — the $360/day incident). Content-hash dedup +
+// a verdict cache guarantee the same artifact is never judged twice.
+export const judgeKind = z.enum(["mcp", "skill", "agentshield", "promptfoo"]);
+export type JudgeKind = z.infer<typeof judgeKind>;
+export const judgeVerdict = z.enum(["pass", "fail", "error"]);
+export type JudgeVerdict = z.infer<typeof judgeVerdict>;
+
+// POST /judge request. `artifactHash` is the sha256 of the canonical artifact
+// content (the dedup key, together with rulesetVersion + the judge model
+// version). `contentRef` points the judge at the artifact + the scanner's
+// deterministic (YARA/AST) pre-report; the judge only adjudicates the ambiguous
+// remainder. `userId`/`actor` attribute the verdict in the audit chain.
+export const judgeRequest = z.object({
+  artifactHash: z.string().regex(/^[a-f0-9]{64}$/, "must be a sha256 hex digest"),
+  kind: judgeKind,
+  contentRef: z.string().min(1),
+  rulesetVersion: z.string().min(1),
+  actor: z.string().min(1),
+  userId: z.string().uuid().nullable().default(null),
+});
+export type JudgeRequest = z.infer<typeof judgeRequest>;
+
+export const judgeResponse = z.object({
+  verdict: judgeVerdict,
+  severity: z.string().nullable(),
+  cacheHit: z.boolean(),
+  reportRef: z.string().nullable(),
+});
+export type JudgeResponse = z.infer<typeof judgeResponse>;
+
+// sha256 of an artifact's canonical content — the dedup key callers compute and
+// pass as judgeRequest.artifactHash. Same helper both sides → identical hashes.
+export function contentHash(content: string): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+// Audit kinds emitted by the judge-orchestrator (every request + every verdict
+// lands in the tamper-resistant chain — the "all scanner verdicts → audit"
+// requirement of docs 09).
+export const JUDGE_REQUEST_KIND = "judge.request";
+export const JUDGE_VERDICT_KIND = "judge.verdict";

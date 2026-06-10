@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@fleet/db": "workspace:*",
+    "@fleet/scanners": "workspace:*",
     "@fleet/shared": "workspace:*",
     "drizzle-orm": "0.36.4",
     "fastify": "5.1.0",

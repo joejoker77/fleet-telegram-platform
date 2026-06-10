@@ -9,6 +9,7 @@ import { loadConfig } from "./config.js";
 import { verifyInitData, InitDataError } from "./initdata.js";
 import { issueSession, verifySession } from "./auth.js";
 import { sendAudit } from "./audit.js";
+import { registerFsRoutes } from "./fs-routes.js";
 
 const config = loadConfig();
 const app = Fastify({ logger: { name: "api" } });
@@ -16,6 +17,14 @@ const redis = new Redis(config.redisUrl, { maxRetriesPerRequest: 3 });
 const db = getDb();
 
 app.get("/healthz", async () => ({ ok: true }));
+
+// M5.1 authoring file API (boundary-1 — own .claude sandbox, audited, no judge).
+registerFsRoutes(app, {
+  redis,
+  jwtSecret: config.jwtSecret,
+  auditSocket: config.auditSocket,
+  homeRoot: config.tenantHomeRoot,
+});
 
 // POST /auth/session — verify Telegram initData, resolve the tenant, issue a JWT.
 app.post("/auth/session", async (req, reply) => {
@@ -128,9 +137,10 @@ app.get("/usage", async (req, reply) => {
   return reply.send({ records: rows.length, totalTokens, byModel, byWindow });
 });
 
-for (const route of ["/fs/tree", "/fs/file", "/registry/items", "/sessions", "/approvals"] as const) {
+// Still-stubbed surface (later M5/M5.5 increments). /fs/* is now implemented above.
+for (const route of ["/registry/items", "/sessions", "/approvals"] as const) {
   app.get(route, async (_req, reply) =>
-    reply.code(501).send({ error: "not implemented in M1", route }),
+    reply.code(501).send({ error: "not implemented yet", route }),
   );
 }
 

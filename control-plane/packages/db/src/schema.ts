@@ -16,6 +16,7 @@ import {
   jsonb,
   bigserial,
   primaryKey,
+  uniqueIndex,
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 
@@ -148,6 +149,28 @@ export const secretBindings = pgTable("secret_bindings", {
   path: text("path"),
   injection: jsonb("injection"), // metadata only; real values live in onecli vault
 });
+
+// Durable verdict cache for the Judge Orchestrator (M4). The dedup key is
+// (artifact_hash, ruleset_version, model_version): the same artifact under the
+// same ruleset + judge model is NEVER re-judged — a cache hit returns instantly
+// with no LLM call. Survives a Redis flush (Redis is the hot tier in front of
+// this). scan_results links an artifact_version to its scan; this table is the
+// content-addressed judge cache that backs the dedup guarantee.
+export const judgeVerdicts = pgTable(
+  "judge_verdicts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    artifactHash: text("artifact_hash").notNull(),
+    kind: scannerKind("kind").notNull(),
+    rulesetVersion: text("ruleset_version").notNull(),
+    modelVersion: text("model_version").notNull(),
+    verdict: verdictKind("verdict").notNull(),
+    severity: text("severity"),
+    reportRef: text("report_ref"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("judge_verdicts_key").on(t.artifactHash, t.rulesetVersion, t.modelVersion)],
+);
 
 // Only an index of audit records; the records themselves live in the WORM store.
 export const auditIndex = pgTable("audit_index", {

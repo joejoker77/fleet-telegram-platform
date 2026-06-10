@@ -27,6 +27,9 @@ export interface Config {
   jwtSecret: Uint8Array;
   jwtTtlSeconds: number;
   initDataMaxAgeSeconds: number;
+  // Root under which tenant homes live; the authoring sandbox for a tenant is
+  // <tenantHomeRoot>/<osUsername>/.claude (bind-mounted into cp-api).
+  tenantHomeRoot: string;
 }
 
 export function loadConfig(): Config {
@@ -39,5 +42,6 @@ export function loadConfig(): Config {
     jwtSecret: new TextEncoder().encode(fileOrEnv("JWT_SECRET")),
     jwtTtlSeconds: Number(process.env.JWT_TTL_SECONDS ?? 3600),
     initDataMaxAgeSeconds: Number(process.env.INITDATA_MAX_AGE_SECONDS ?? 86400),
+    tenantHomeRoot: process.env.TENANT_HOME_ROOT ?? "/home",
   };
 }
