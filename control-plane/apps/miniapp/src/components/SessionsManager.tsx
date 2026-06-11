@@ -1,6 +1,9 @@
 // M5.7 SessionsManager — named project sessions: list (active badge), create,
 // switch. A switch respawns the bot's claude pane in the project dir, so it
-// interrupts whatever the bot is doing — the confirm() warning is mandatory.
+// interrupts whatever the bot is doing — a confirmation step is mandatory.
+// NOT window.confirm(): Telegram's WebView renders the dialog but always
+// returns false (blocking dialogs are suppressed), so OK silently no-ops.
+// Instead: two-tap inline confirm — first tap arms the button, second fires.
 // The switch call is synchronous (≤90s): the pod supervisor confirms via the
 // result file before the API returns.
 
@@ -16,6 +19,7 @@ export function SessionsManager({ token, onClose }: { token: string; onClose: ()
   const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
   const [switching, setSwitching] = useState<string | null>(null); // session id mid-switch
+  const [armed, setArmed] = useState<string | null>(null); // session id awaiting 2nd tap
 
   const refetch = useCallback(async () => {
     try {
@@ -51,12 +55,13 @@ export function SessionsManager({ token, onClose }: { token: string; onClose: ()
   }
 
   async function doSwitch(s: SessionInfo) {
-    const ok = window.confirm(
-      `Переключиться на «${s.name}»?\n\nТекущая задача бота будет ПРЕРВАНА: ` +
-        "его сессия Claude перезапустится в папке проекта. Разговор в текущей " +
-        "сессии сохраняется и продолжится при переключении обратно.",
-    );
-    if (!ok) return;
+    if (armed !== s.id) {
+      // first tap: arm and show the warning inline; auto-disarm after 8s
+      setArmed(s.id);
+      setTimeout(() => setArmed((cur) => (cur === s.id ? null : cur)), 8000);
+      return;
+    }
+    setArmed(null);
     setSwitching(s.id);
     setError(null);
     try {
@@ -95,11 +100,26 @@ export function SessionsManager({ token, onClose }: { token: string; onClose: ()
                 {s.active ? (
                   <span className="live-ts">активна</span>
                 ) : (
-                  <button disabled={switching !== null} onClick={() => void doSwitch(s)}>
-                    {switching === s.id ? "переключение…" : "переключить"}
+                  <button
+                    disabled={switching !== null}
+                    className={armed === s.id ? "primary" : undefined}
+                    onClick={() => void doSwitch(s)}
+                  >
+                    {switching === s.id
+                      ? "переключение…"
+                      : armed === s.id
+                        ? "⚠️ точно переключить"
+                        : "переключить"}
                   </button>
                 )}
               </div>
+              {armed === s.id && switching === null && (
+                <p className="muted">
+                  Текущая задача бота будет прервана: его Claude перезапустится в папке проекта.
+                  Разговор сохранится и продолжится при переключении обратно. Нажмите ещё раз для
+                  подтверждения.
+                </p>
+              )}
             </li>
           ))}
         </ul>
