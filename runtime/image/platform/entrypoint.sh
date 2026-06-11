@@ -41,9 +41,23 @@ if [ -n "$_HP" ]; then
   export NODE_EXTRA_CA_CERTS="$_CA" SSL_CERT_FILE="$_CA" REQUESTS_CA_BUNDLE="$_CA" CURL_CA_BUNDLE="$_CA"
 fi
 
-# code-server (web IDE; reverse-proxied by Caddy at M5)
-command -v code-server >/dev/null 2>&1 && \
-  code-server --bind-addr 127.0.0.1:8443 --auth none "$HOME/work" >/tmp/code-server.log 2>&1 &
+# code-server (web IDE). M5.6: when the pod wrapper provides CP_IDE_SOCKET
+# (claude-pod-run, conditional on host /run/cp-ide), bind a unix socket in the
+# bind-mounted dir — zero network exposure; nginx reaches it on the host side
+# behind auth_request (deploy/nginx-ide.conf). --auth none stays sound because
+# the ONLY path to the socket is nginx and every request passes forward-auth.
+# Without the env: legacy loopback tcp inside the pod netns (pre-M5.6 behavior).
+if command -v code-server >/dev/null 2>&1; then
+  if [ -n "${CP_IDE_SOCKET:-}" ]; then
+    # the socket dir is host tmpfs that SURVIVES a pod restart — a stale socket
+    # file would make the new code-server fail to bind. We own it; clear it.
+    rm -f "$CP_IDE_SOCKET" 2>/dev/null || true
+    code-server --socket "$CP_IDE_SOCKET" --socket-mode 0660 --auth none \
+      "$HOME/work" >/tmp/code-server.log 2>&1 &
+  else
+    code-server --bind-addr 127.0.0.1:8443 --auth none "$HOME/work" >/tmp/code-server.log 2>&1 &
+  fi
+fi
 
 # Ensure THIS container's workspace is trusted in ~/.claude.json, else Claude Code
 # stops at the per-project trust prompt ("Is this a project you trust?") and hangs

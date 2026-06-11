@@ -42,6 +42,9 @@ export interface Config {
   // cp-secretd unix socket (M5.5b secret intake). The helper may be absent —
   // secret-less connects are unaffected; secretSpec ones fail with a clear error.
   secretdSocket: string;
+  // Public web-IDE origin (M5.6) — where the nginx forward-auth vhost lives;
+  // /ide/ticket builds its login URL against this.
+  ideUrl: string;
 }
 
 export function loadConfig(): Config {
@@ -59,5 +62,6 @@ export function loadConfig(): Config {
     tenantHomeRoot: process.env.TENANT_HOME_ROOT ?? "/home",
     judgeUrl: process.env.JUDGE_URL ?? "http://127.0.0.1:8090",
     secretdSocket: process.env.SECRETD_SOCKET ?? "/run/cp-secretd/secretd.sock",
+    ideUrl: (process.env.IDE_URL ?? "https://ide.ai-assistant.gg").replace(/\/$/, ""),
   };
 }

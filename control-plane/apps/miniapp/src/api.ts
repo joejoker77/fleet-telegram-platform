@@ -209,3 +209,15 @@ export async function mcpConnectRaw(
 export function mcpDisconnect(token: string, name: string): Promise<{ ok: boolean; name: string }> {
   return request("/mcp/disconnect", { method: "POST", body: JSON.stringify({ name }) }, token);
 }
+
+// M5.6 web-IDE: one-time login ticket → URL to open in the EXTERNAL browser
+// (the IDE is unusable inside the Telegram webview).
+export interface IdeTicketResponse {
+  url: string;
+  ttlSeconds: number;
+}
+
+export function ideTicket(token: string): Promise<IdeTicketResponse> {
+  // explicit empty JSON body: fastify 400s an empty body with a json content-type
+  return request("/ide/ticket", { method: "POST", body: "{}" }, token);
+}

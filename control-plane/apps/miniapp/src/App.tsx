@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 
-import { fsTree, me, type FsEntry, type MeResponse } from "./api";
+import { openLink } from "@telegram-apps/sdk";
+
+import { fsTree, ideTicket, me, type FsEntry, type MeResponse } from "./api";
 import { dropSession, ensureSession, startParam, type Session } from "./auth";
 import { ApprovalsQueue } from "./components/ApprovalsQueue";
 import { CommandBuilder } from "./components/CommandBuilder";
@@ -63,6 +65,21 @@ export function App() {
 
   const existingPaths = new Set(state.entries.map((e) => e.path));
   const toTree = () => setScreen({ kind: "tree" });
+  // M5.6: one-time ticket → IDE login URL, opened in the EXTERNAL browser
+  // (code-server is unusable inside the Telegram webview). openLink may be
+  // unsupported outside Telegram — window.open is the dev/browser fallback.
+  const openIde = async () => {
+    try {
+      const { url } = await ideTicket(state.session.token);
+      try {
+        openLink(url);
+      } catch {
+        window.open(url, "_blank");
+      }
+    } catch (e) {
+      window.alert(`IDE: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
   const savedToTree = () => {
     setScreen({ kind: "tree" });
     void boot(); // refresh the tree so the new artifact shows up
@@ -73,6 +90,9 @@ export function App() {
       <header className="app-header">
         <strong>.claude/ — {state.profile.osUsername}</strong>
         <span>
+          <button className="ghost" onClick={() => void openIde()} title="Открыть web-IDE">
+            🖥
+          </button>
           <button className="ghost" onClick={() => setScreen({ kind: "approvals" })} title="Аппрувы">
             🛂
           </button>

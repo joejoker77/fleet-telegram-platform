@@ -13,6 +13,7 @@ import { registerFsRoutes } from "./fs-routes.js";
 import { registerLiveRoutes } from "./live-routes.js";
 import { registerApprovalRoutes } from "./approval-routes.js";
 import { registerMcpRoutes } from "./mcp-routes.js";
+import { registerIdeRoutes } from "./ide-routes.js";
 import {
   applyMcpConnect,
   deleteStagedSecret,
@@ -101,6 +102,15 @@ registerMcpRoutes(app, {
   jwtSecret: config.jwtSecret,
   gate: mcpGateDeps,
   approvals: approvalsDeps,
+});
+
+// M5.6 web-IDE: ticket → cookie auth for the nginx auth_request vhost
+// (ide.ai-assistant.gg). cp-api only authenticates; it never sees the socket.
+registerIdeRoutes(app, {
+  redis,
+  jwtSecret: config.jwtSecret,
+  auditSocket: config.auditSocket,
+  ideUrl: config.ideUrl,
 });
 
 // POST /auth/session — verify Telegram initData, resolve the tenant, issue a JWT.
