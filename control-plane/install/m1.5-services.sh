@@ -23,6 +23,10 @@ BOT_SECRET=cp_bot_token
 JWT_SECRET=cp_jwt_secret
 API_PORT=8080
 SRV_AUDIT=/srv/audit
+# M5.1: tenant whose sandbox the authoring fs API serves (GET /fs/tree, PUT
+# /fs/file). The home is bind-mounted into cp-api; fs-safety.ts confines paths.
+# Pilot: vitaliy only.
+TENANT=vitaliy
 # M5.4b: bot username (no @) for Mini App deep links in approval notifications.
 # Optional — empty means notifications go out without the url-button.
 BOT_USERNAME="${TELEGRAM_BOT_USERNAME:-}"
@@ -37,6 +41,7 @@ podman container exists cp-postgres || die "cp-postgres not found (run m1.2-stor
 podman container exists cp-redis    || die "cp-redis not found (run m1.2-stores.sh first)"
 podman secret inspect "$PG_SECRET" >/dev/null 2>&1 || die "$PG_SECRET secret missing (m1.2)"
 [ -d "$REPO/node_modules" ] || die "node_modules missing in $REPO — run 'corepack pnpm install' as vitaliy"
+[ -e "$REPO/apps/api/node_modules/@fleet/scanners" ] || die "@fleet/scanners not linked into apps/api — run 'corepack pnpm install' as vitaliy (m5.1 dep)"
 
 # ---- secrets ---------------------------------------------------------------
 # Bot token: prompt silently, store as podman secret. Used for LOCAL initData
@@ -105,16 +110,21 @@ podman run -d --name cp-audit-collector --network host \
     exec node_modules/.bin/tsx apps/audit-collector/src/index.ts' >/dev/null
 
 # ---- cp-api ----------------------------------------------------------------
+# This is the CANONICAL cp-api stanza — m5.1-authoring-api.sh used to recreate
+# the container with extra mounts and the 2026-06-11 m1.5 re-run silently
+# dropped them (FileTree/PUT /fs broke). Every later increment lands HERE.
 log "starting cp-api (127.0.0.1:${API_PORT})"
+[ -d "/home/${TENANT}/.claude" ] || die "tenant sandbox /home/${TENANT}/.claude missing"
 podman rm -f cp-api >/dev/null 2>&1 || true
 podman run -d --name cp-api --network host \
   --workdir "$REPO" \
   -v "$REPO:$REPO:ro" \
   -v cp-audit-run:/run/audit \
+  -v "/home/${TENANT}:/home/${TENANT}" \
   --secret "$PG_SECRET" --secret "$BOT_SECRET" --secret "$JWT_SECRET" \
   --restart=unless-stopped \
   "$NODE_IMAGE" \
-  sh -c 'set -e; export HOST=127.0.0.1 PORT='"$API_PORT"' REDIS_URL=redis://127.0.0.1:6380 AUDIT_SOCKET=/run/audit/collector.sock;
+  sh -c 'set -e; export HOST=127.0.0.1 PORT='"$API_PORT"' REDIS_URL=redis://127.0.0.1:6380 AUDIT_SOCKET=/run/audit/collector.sock TENANT_HOME_ROOT=/home;
     export TELEGRAM_BOT_TOKEN_FILE=/run/secrets/'"$BOT_SECRET"' JWT_SECRET_FILE=/run/secrets/'"$JWT_SECRET"';
     export TELEGRAM_BOT_USERNAME='"$BOT_USERNAME"';
     export DATABASE_URL="postgres://cplane:$(cat /run/secrets/'"$PG_SECRET"')@127.0.0.1:5433/control_plane";
