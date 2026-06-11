@@ -14,6 +14,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { scanArtifact, httpJudgeClient, type ScanResult } from "@fleet/scanners";
 import { sendAudit } from "./audit.js";
+import { callSecretd } from "./secretd.js";
 
 const execFileP = promisify(execFile);
 
@@ -38,9 +39,135 @@ export interface McpGateDeps {
   homeRoot: string; // tenant home = <homeRoot>/<osUsername>
   judgeUrl: string;
   auditSocket: string;
+  secretdSocket: string; // cp-secretd unix socket (M5.5b); helper may be absent
 }
 
 export type McpStanza = Record<string, unknown>;
+
+// ── M5.5b: secret intake (value → OneCLI vault via cp-secretd) ───────────────
+
+// What the user submits alongside the stanza. The VALUE never goes anywhere
+// except the cp-secretd socket (→ vault): not into the approval payload, not
+// into Redis, not into audit, not into any tenant file.
+export interface SecretSpec {
+  value: string;
+  hostPattern: string;
+  headerName: string;
+  valueFormat: string; // e.g. "Bearer {value}" — must contain {value}
+}
+
+// Vault-side meta that DOES travel in the approval payload (no value).
+export interface SecretMeta {
+  name: string; // <osUsername>-mcp-<mcpName> (helper enforces the convention)
+  hostPattern: string;
+  headerName: string;
+  valueFormat: string;
+}
+
+export function secretNameFor(osUsername: string, mcpName: string): string {
+  return `${osUsername}-mcp-${mcpName}`;
+}
+
+// Mirrors cp-secretd's own validation (defense in depth + friendlier errors
+// before a socket round-trip). The helper's name regex is lowercase-only, so
+// an MCP carrying a secret gets the stricter name rule.
+const SECRET_MCP_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,48}$/;
+const HOST_PATTERN_RE = /^(\*\.)?[A-Za-z0-9][A-Za-z0-9.-]{1,200}\.[A-Za-z]{2,}$/;
+const HEADER_NAME_RE = /^[A-Za-z0-9-]{1,64}$/;
+const MAX_SECRET_VALUE = 4096;
+
+export function validateSecretSpec(mcpName: string, spec: unknown): string | null {
+  if (typeof spec !== "object" || spec === null || Array.isArray(spec)) {
+    return "secretSpec: должен быть объектом { value, hostPattern, headerName, valueFormat }";
+  }
+  const s = spec as Record<string, unknown>;
+  if (!SECRET_MCP_NAME_RE.test(mcpName)) {
+    return "имя MCP с секретом: строчные латиница/цифры/._-, до 49 символов (имя секрета строится из него)";
+  }
+  if (typeof s.value !== "string" || s.value.trim() === "" || s.value.length > MAX_SECRET_VALUE) {
+    return `секрет: непустая строка до ${MAX_SECRET_VALUE} символов`;
+  }
+  if (/[\n\r\0]/.test(s.value)) return "секрет: без переводов строк";
+  if (typeof s.hostPattern !== "string" || !HOST_PATTERN_RE.test(s.hostPattern)) {
+    return "hostPattern: домен вида api.example.com или *.example.com";
+  }
+  if (typeof s.headerName !== "string" || !HEADER_NAME_RE.test(s.headerName)) {
+    return "headerName: 1–64 символа [A-Za-z0-9-]";
+  }
+  if (typeof s.valueFormat !== "string" || !s.valueFormat.includes("{value}") || s.valueFormat.length > 64) {
+    return 'valueFormat: до 64 символов, обязан содержать "{value}"';
+  }
+  return null;
+}
+
+// Stage = create the secret in the vault UNBOUND (inert: no agent can use it).
+// Runs after scan-pass, before the approval. Rotation (same name exists) is
+// unbind+delete+recreate — approved M5.5b decision Q4.
+export async function stageSecret(
+  deps: McpGateDeps,
+  args: { userId: string; osUsername: string; mcpName: string; spec: SecretSpec },
+): Promise<{ ok: boolean; meta?: SecretMeta; rotated?: boolean; error?: string }> {
+  const name = secretNameFor(args.osUsername, args.mcpName);
+  const res = await callSecretd(deps.secretdSocket, {
+    verb: "stage_secret",
+    name,
+    value: args.spec.value,
+    hostPattern: args.spec.hostPattern,
+    headerName: args.spec.headerName,
+    valueFormat: args.spec.valueFormat,
+  });
+  if (!res.ok) return { ok: false, error: res.error ?? "stage_secret failed" };
+  await sendAudit(deps.auditSocket, {
+    userId: args.userId,
+    kind: "mcp.secret.staged",
+    actor: "cp-api",
+    payload: { name, hostPattern: args.spec.hostPattern, headerName: args.spec.headerName, rotated: res.rotated === true },
+  }).catch(() => {});
+  return {
+    ok: true,
+    rotated: res.rotated === true,
+    meta: {
+      name,
+      hostPattern: args.spec.hostPattern,
+      headerName: args.spec.headerName,
+      valueFormat: args.spec.valueFormat,
+    },
+  };
+}
+
+// Best-effort cleanup of a staged secret (deny path; unbound = inert, so a
+// failed delete is logged, never fatal). Expired approvals are not swept:
+// the orphan is unbound, and a same-name reconnect rotates it away.
+export async function deleteStagedSecret(
+  deps: McpGateDeps,
+  userId: string | null,
+  secretName: string,
+  opts: { onlyIfUnbound?: boolean } = {},
+): Promise<void> {
+  // onlyIfUnbound (deny/onReject path): if the same-name secret is already
+  // BOUND, a parallel same-name approval was allowed first — deleting here
+  // would yank a live secret from under an applied stanza. Skip instead;
+  // disconnect remains the authoritative cleanup for bound secrets.
+  if (opts.onlyIfUnbound) {
+    const st = await callSecretd(deps.secretdSocket, { verb: "secret_exists", name: secretName }).catch(() => null);
+    if (st?.ok && st.bound === true) {
+      await sendAudit(deps.auditSocket, {
+        userId,
+        kind: "mcp.secret.deleted",
+        actor: "cp-api",
+        payload: { name: secretName, ok: true, skipped: "bound" },
+      }).catch(() => {});
+      return;
+    }
+  }
+  const res = await callSecretd(deps.secretdSocket, { verb: "delete_secret", name: secretName });
+  await sendAudit(deps.auditSocket, {
+    userId,
+    kind: "mcp.secret.deleted",
+    actor: "cp-api",
+    payload: { name: secretName, ok: res.ok, ...(res.ok ? {} : { error: res.error }) },
+  }).catch(() => {});
+}
 
 function tenantHome(deps: McpGateDeps, osUsername: string): string {
   return path.resolve(path.join(deps.homeRoot, osUsername));
@@ -231,9 +358,11 @@ export interface McpApplyResult {
 
 // Called from the approval-answer handler (status already "allowed"). Re-validates
 // the payload before touching files — the approval row is data, not trust.
+// M5.5b: when the approval carries a staged secret, BIND it first; a stanza
+// whose secret can't bind is never written (the MCP would just fail opaquely).
 export async function applyMcpConnect(
   deps: McpGateDeps,
-  args: { userId: string; osUsername: string; name: string; stanza: McpStanza },
+  args: { userId: string; osUsername: string; name: string; stanza: McpStanza; secret?: SecretMeta },
 ): Promise<McpApplyResult> {
   const fail = async (error: string): Promise<McpApplyResult> => {
     await sendAudit(deps.auditSocket, {
@@ -248,6 +377,20 @@ export async function applyMcpConnect(
   const invalid = validateStanza(args.name, args.stanza);
   if (invalid) return fail(`re-validation: ${invalid}`);
   if (!fs.existsSync(tenantHome(deps, args.osUsername))) return fail("tenant home not found");
+
+  if (args.secret) {
+    if (args.secret.name !== secretNameFor(args.osUsername, args.name)) {
+      return fail("secret name does not match the convention for this MCP"); // payload is data, not trust
+    }
+    const bind = await callSecretd(deps.secretdSocket, { verb: "bind_secret", name: args.secret.name });
+    if (!bind.ok) return fail(`bind_secret: ${bind.error ?? "failed"}`);
+    await sendAudit(deps.auditSocket, {
+      userId: args.userId,
+      kind: "mcp.secret.bound",
+      actor: "cp-api",
+      payload: { name: args.secret.name, hostPattern: args.secret.hostPattern },
+    }).catch(() => {});
+  }
 
   try {
     const owner = homeOwner(deps, args.osUsername);
@@ -284,7 +427,8 @@ export async function applyMcpConnect(
 }
 
 // Remove a server from both files. No approval: capability removal is safe and
-// is exactly the rollback of a connect.
+// is exactly the rollback of a connect. M5.5b: the MCP's convention-named
+// vault secret (if any) is unbound+deleted too — best-effort, after the files.
 export async function disconnectMcp(
   deps: McpGateDeps,
   args: { userId: string; osUsername: string; name: string },
@@ -320,11 +464,23 @@ export async function disconnectMcp(
 
     if (!removed) return { ok: false, name: args.name, committed: false, error: "нет такого MCP" };
     const committed = await commitSettings(deps, args.osUsername, `mcp-gate: disconnect ${args.name}`);
+
+    // M5.5b: drop the paired vault secret. Idempotent (deleted:false when none);
+    // helper absent (pre-M5.5b deploys) degrades silently — deleted stays false.
+    let secretDeleted = false;
+    if (SECRET_MCP_NAME_RE.test(args.name)) {
+      const del = await callSecretd(deps.secretdSocket, {
+        verb: "delete_secret",
+        name: secretNameFor(args.osUsername, args.name),
+      });
+      secretDeleted = del.ok && del.deleted === true;
+    }
+
     await sendAudit(deps.auditSocket, {
       userId: args.userId,
       kind: "mcp.disconnect",
       actor: "cp-api",
-      payload: { name: args.name, committed },
+      payload: { name: args.name, committed, secretDeleted },
     }).catch(() => {});
     return { ok: true, name: args.name, committed };
   } catch (err) {

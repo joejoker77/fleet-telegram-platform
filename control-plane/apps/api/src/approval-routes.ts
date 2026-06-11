@@ -19,16 +19,21 @@ import {
   type ApprovalsDeps,
 } from "./approvals.js";
 
-// M5.5+: per-kind side effect executed SYNCHRONOUSLY in the answer handler when
-// the decision is "allow" (no background waiter → survives cp-api restarts; the
-// answer request itself carries the apply result back to the Mini App). The
-// applier audits its own success/failure and must never throw.
+// M5.5+: per-kind side effects executed SYNCHRONOUSLY in the answer handler
+// (no background waiter → survives cp-api restarts; the answer request itself
+// carries the apply result back to the Mini App). apply runs on "allow";
+// onReject (M5.5b: drop a staged vault secret) runs on "deny" — best-effort,
+// its outcome doesn't gate the response. Both audit themselves, never throw.
 export type ApprovalApplier = (row: ApprovalRow) => Promise<{ ok: boolean; error?: string }>;
+export interface ApprovalHandlers {
+  apply: ApprovalApplier;
+  onReject?: (row: ApprovalRow) => Promise<void>;
+}
 
 export function registerApprovalRoutes(
   app: FastifyInstance,
   deps: ApprovalsDeps,
-  appliers: Record<string, ApprovalApplier> = {},
+  appliers: Record<string, ApprovalHandlers> = {},
 ): void {
   const auth = (req: Parameters<typeof requireAuth>[0]) =>
     requireAuth(req, deps.redis, deps.jwtSecret);
@@ -61,16 +66,18 @@ export function registerApprovalRoutes(
     const row = await answerApproval(deps, { id, userId: ctx.userId, allow: decision === "allow" });
     if (!row) return reply.code(404).send({ error: "approval not found or no longer pending" });
 
-    // answerApproval settles a row exactly once (pending-guard) → the applier
-    // runs at most once per approval.
+    // answerApproval settles a row exactly once (pending-guard) → the handlers
+    // run at most once per approval.
     let applied: { ok: boolean; error?: string } | undefined;
-    const applier = appliers[row.kind];
-    if (row.status === "allowed" && applier) {
+    const handlers = appliers[row.kind];
+    if (row.status === "allowed" && handlers) {
       try {
-        applied = await applier(row);
+        applied = await handlers.apply(row);
       } catch (e) {
         applied = { ok: false, error: e instanceof Error ? e.message.slice(0, 200) : String(e) };
       }
+    } else if (row.status === "denied" && handlers?.onReject) {
+      await handlers.onReject(row).catch(() => {});
     }
     return reply.send({ ok: true, approval: row, ...(applied !== undefined ? { applied } : {}) });
   });

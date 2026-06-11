@@ -144,6 +144,18 @@ export interface McpConnectResponse {
   verdict: "pass";
   severity: string | null;
   findings: McpFinding[];
+  /** M5.5b: present when a secret was staged in the vault (unbound until allow). */
+  secret?: { name: string; hostPattern: string; rotated: boolean };
+}
+
+/** M5.5b secret intake (mirrors apps/api mcp-gate.ts SecretSpec). The value goes
+ *  straight to the vault via cp-secretd; it never lands in the stanza, the scan,
+ *  the approval payload or any file. */
+export interface McpSecretSpec {
+  value: string;
+  hostPattern: string; // api.example.com | *.example.com
+  headerName: string; // e.g. Authorization, X-API-Key
+  valueFormat: string; // must contain {value}, e.g. "Bearer {value}"
 }
 
 /** 422 body when the scanner blocks (ApiError carries only the message — use mcpConnectRaw for details). */
@@ -151,8 +163,17 @@ export function mcpList(token: string): Promise<{ servers: McpServerInfo[] }> {
   return request("/mcp/list", {}, token);
 }
 
-export function mcpConnect(token: string, name: string, stanza: unknown): Promise<McpConnectResponse> {
-  return request("/mcp/connect", { method: "POST", body: JSON.stringify({ name, stanza }) }, token);
+export function mcpConnect(
+  token: string,
+  name: string,
+  stanza: unknown,
+  secretSpec?: McpSecretSpec,
+): Promise<McpConnectResponse> {
+  return request(
+    "/mcp/connect",
+    { method: "POST", body: JSON.stringify({ name, stanza, ...(secretSpec ? { secretSpec } : {}) }) },
+    token,
+  );
 }
 
 /** Like mcpConnect but surfaces the full 422 scanner verdict instead of a bare error string. */
@@ -160,6 +181,7 @@ export async function mcpConnectRaw(
   token: string,
   name: string,
   stanza: unknown,
+  secretSpec?: McpSecretSpec,
 ): Promise<
   | { kind: "approval"; res: McpConnectResponse }
   | { kind: "blocked"; verdict: string; severity: string | null; findings: McpFinding[]; reportRef: string | null; error: string }
@@ -167,7 +189,7 @@ export async function mcpConnectRaw(
   const res = await fetch(`${BASE}/mcp/connect`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-    body: JSON.stringify({ name, stanza }),
+    body: JSON.stringify({ name, stanza, ...(secretSpec ? { secretSpec } : {}) }),
   });
   const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   if (res.ok) return { kind: "approval", res: body as unknown as McpConnectResponse };

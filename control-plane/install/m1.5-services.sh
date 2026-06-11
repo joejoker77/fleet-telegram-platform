@@ -116,10 +116,15 @@ podman run -d --name cp-audit-collector --network host \
 log "starting cp-api (127.0.0.1:${API_PORT})"
 [ -d "/home/${TENANT}/.claude" ] || die "tenant sandbox /home/${TENANT}/.claude missing"
 podman rm -f cp-api >/dev/null 2>&1 || true
+# /run/cp-secretd: cp-secretd activation socket (M5.5b, runtime/install/
+# m5.5b-secretd.sh). Dir-bind: the socket appears when the helper is installed;
+# absent helper only degrades secretSpec connects (clear error), nothing else.
+mkdir -p /run/cp-secretd
 podman run -d --name cp-api --network host \
   --workdir "$REPO" \
   -v "$REPO:$REPO:ro" \
   -v cp-audit-run:/run/audit \
+  -v /run/cp-secretd:/run/cp-secretd \
   -v "/home/${TENANT}:/home/${TENANT}" \
   --secret "$PG_SECRET" --secret "$BOT_SECRET" --secret "$JWT_SECRET" \
   --restart=unless-stopped \

@@ -39,6 +39,9 @@ export interface Config {
   tenantHomeRoot: string;
   // Judge Orchestrator (WP3) for the M5.5 MCP gate — host network, same box.
   judgeUrl: string;
+  // cp-secretd unix socket (M5.5b secret intake). The helper may be absent —
+  // secret-less connects are unaffected; secretSpec ones fail with a clear error.
+  secretdSocket: string;
 }
 
 export function loadConfig(): Config {
@@ -55,5 +58,6 @@ export function loadConfig(): Config {
     initDataMaxAgeSeconds: Number(process.env.INITDATA_MAX_AGE_SECONDS ?? 86400),
     tenantHomeRoot: process.env.TENANT_HOME_ROOT ?? "/home",
     judgeUrl: process.env.JUDGE_URL ?? "http://127.0.0.1:8090",
+    secretdSocket: process.env.SECRETD_SOCKET ?? "/run/cp-secretd/secretd.sock",
   };
 }

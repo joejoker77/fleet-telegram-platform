@@ -13,7 +13,13 @@ import { registerFsRoutes } from "./fs-routes.js";
 import { registerLiveRoutes } from "./live-routes.js";
 import { registerApprovalRoutes } from "./approval-routes.js";
 import { registerMcpRoutes } from "./mcp-routes.js";
-import { applyMcpConnect, MCP_APPROVAL_KIND, type McpStanza } from "./mcp-gate.js";
+import {
+  applyMcpConnect,
+  deleteStagedSecret,
+  MCP_APPROVAL_KIND,
+  type McpStanza,
+  type SecretMeta,
+} from "./mcp-gate.js";
 import websocket from "@fastify/websocket";
 
 const config = loadConfig();
@@ -52,29 +58,40 @@ const mcpGateDeps = {
   homeRoot: config.tenantHomeRoot,
   judgeUrl: config.judgeUrl,
   auditSocket: config.auditSocket,
+  secretdSocket: config.secretdSocket,
 };
+type McpApprovalPayload = { name?: string; stanza?: McpStanza; osUsername?: string; secret?: SecretMeta };
 registerApprovalRoutes(app, approvalsDeps, {
   // M5.5: an allowed mcp.connect approval is applied synchronously in the
   // answer handler. The payload was authored by POST /mcp/connect; apply
-  // re-validates it before touching tenant files.
-  [MCP_APPROVAL_KIND]: async (row) => {
-    const p = (row.payload ?? {}) as { name?: string; stanza?: McpStanza; osUsername?: string };
-    if (typeof p.name !== "string" || typeof p.osUsername !== "string" || p.stanza === undefined) {
-      return { ok: false, error: "malformed approval payload" };
-    }
-    // userId is enforced by answerApproval's owner check; resolve it from the DB row.
-    const owner = await db
-      .select({ id: schema.users.id })
-      .from(schema.users)
-      .where(eq(schema.users.osUsername, p.osUsername))
-      .limit(1);
-    if (!owner[0]) return { ok: false, error: "tenant not found" };
-    return applyMcpConnect(mcpGateDeps, {
-      userId: owner[0].id,
-      osUsername: p.osUsername,
-      name: p.name,
-      stanza: p.stanza,
-    });
+  // re-validates it before touching tenant files. M5.5b: a staged secret is
+  // bound on allow (inside applyMcpConnect) and deleted on deny (onReject).
+  [MCP_APPROVAL_KIND]: {
+    apply: async (row) => {
+      const p = (row.payload ?? {}) as McpApprovalPayload;
+      if (typeof p.name !== "string" || typeof p.osUsername !== "string" || p.stanza === undefined) {
+        return { ok: false, error: "malformed approval payload" };
+      }
+      // userId is enforced by answerApproval's owner check; resolve it from the DB row.
+      const owner = await db
+        .select({ id: schema.users.id })
+        .from(schema.users)
+        .where(eq(schema.users.osUsername, p.osUsername))
+        .limit(1);
+      if (!owner[0]) return { ok: false, error: "tenant not found" };
+      return applyMcpConnect(mcpGateDeps, {
+        userId: owner[0].id,
+        osUsername: p.osUsername,
+        name: p.name,
+        stanza: p.stanza,
+        ...(p.secret ? { secret: p.secret } : {}),
+      });
+    },
+    onReject: async (row) => {
+      const p = (row.payload ?? {}) as McpApprovalPayload;
+      // onlyIfUnbound: a parallel same-name approval may already have bound it.
+      if (p.secret?.name) await deleteStagedSecret(mcpGateDeps, null, p.secret.name, { onlyIfUnbound: true });
+    },
   },
 });
 

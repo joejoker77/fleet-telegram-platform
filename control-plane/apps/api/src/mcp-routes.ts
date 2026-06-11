@@ -16,9 +16,13 @@ import {
   listMcp,
   mcpNameExists,
   scanMcpStanza,
+  stageSecret,
+  validateSecretSpec,
   validateStanza,
   type McpGateDeps,
   type McpStanza,
+  type SecretMeta,
+  type SecretSpec,
 } from "./mcp-gate.js";
 import { sendAudit } from "./audit.js";
 
@@ -52,12 +56,18 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRoutesDeps): vo
       const err = e as AuthError;
       return reply.code(err.code ?? 401).send({ error: err.message });
     }
-    const body = (req.body ?? {}) as { name?: unknown; stanza?: unknown };
+    const body = (req.body ?? {}) as { name?: unknown; stanza?: unknown; secretSpec?: unknown };
     if (typeof body.name !== "string" || body.stanza === undefined) {
-      return reply.code(400).send({ error: "expected { name, stanza }" });
+      return reply.code(400).send({ error: "expected { name, stanza, secretSpec? }" });
     }
     const invalid = validateStanza(body.name, body.stanza);
     if (invalid) return reply.code(400).send({ error: invalid });
+    // M5.5b: optional secret. Validated BEFORE the scan (cheap, deterministic);
+    // the value itself never reaches the scanner, the approval, or any file.
+    if (body.secretSpec !== undefined) {
+      const badSecret = validateSecretSpec(body.name, body.secretSpec);
+      if (badSecret) return reply.code(400).send({ error: badSecret });
+    }
     const name = body.name;
     const stanza = body.stanza as McpStanza;
     const overwrite = mcpNameExists(deps.gate, ctx.osUsername, name);
@@ -86,17 +96,34 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRoutesDeps): vo
       });
     }
 
+    // M5.5b: stage the secret in the vault UNBOUND (inert) only after the scan
+    // passed. The approval payload carries META only; binding happens on allow.
+    let secretMeta: SecretMeta | undefined;
+    let secretRotated = false;
+    if (body.secretSpec !== undefined) {
+      const staged = await stageSecret(deps.gate, {
+        userId: ctx.userId,
+        osUsername: ctx.osUsername,
+        mcpName: name,
+        spec: body.secretSpec as SecretSpec,
+      });
+      if (!staged.ok) return reply.code(502).send({ error: staged.error });
+      secretMeta = staged.meta;
+      secretRotated = staged.rotated === true;
+    }
+
     // The scan verdict travels INSIDE the approval payload — the human decides
     // looking at what the gate saw, not blindly.
     const approval = await createApproval(deps.approvals, {
       userId: ctx.userId,
       kind: MCP_APPROVAL_KIND,
-      title: `${overwrite ? "⚠️ Перезаписать" : "Подключить"} MCP «${name}»`,
+      title: `${overwrite ? "⚠️ Перезаписать" : "Подключить"} MCP «${name}»${secretMeta ? " 🔑" : ""}`,
       payload: {
         name,
         stanza,
         osUsername: ctx.osUsername,
         overwrite,
+        ...(secretMeta ? { secret: secretMeta } : {}),
         scan: {
           verdict: scan.verdict,
           severity: scan.severity,
@@ -115,6 +142,9 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRoutesDeps): vo
       verdict: scan.verdict,
       severity: scan.severity,
       findings: scan.findings,
+      ...(secretMeta
+        ? { secret: { name: secretMeta.name, hostPattern: secretMeta.hostPattern, rotated: secretRotated } }
+        : {}),
     });
   });
 
