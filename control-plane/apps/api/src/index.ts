@@ -11,6 +11,7 @@ import { issueSession, verifySession } from "./auth.js";
 import { sendAudit } from "./audit.js";
 import { registerFsRoutes } from "./fs-routes.js";
 import { registerLiveRoutes } from "./live-routes.js";
+import { registerApprovalRoutes } from "./approval-routes.js";
 import websocket from "@fastify/websocket";
 
 const config = loadConfig();
@@ -33,6 +34,17 @@ registerFsRoutes(app, {
 // M5.4 LiveActivity: ws /live streams the tenant's audit events (Redis pub/sub
 // fed by audit-collector).
 registerLiveRoutes(app, { redis, redisUrl: config.redisUrl, jwtSecret: config.jwtSecret });
+
+// M5.4b platform approvals: queue + answer from the Mini App; notify via main
+// bot sendMessage (send-only, no second getUpdates consumer).
+registerApprovalRoutes(app, {
+  redis,
+  redisUrl: config.redisUrl,
+  jwtSecret: config.jwtSecret,
+  auditSocket: config.auditSocket,
+  botToken: config.botToken,
+  botUsername: config.botUsername,
+});
 
 // POST /auth/session — verify Telegram initData, resolve the tenant, issue a JWT.
 app.post("/auth/session", async (req, reply) => {
@@ -145,8 +157,9 @@ app.get("/usage", async (req, reply) => {
   return reply.send({ records: rows.length, totalTokens, byModel, byWindow });
 });
 
-// Still-stubbed surface (later M5/M5.5 increments). /fs/* is now implemented above.
-for (const route of ["/registry/items", "/sessions", "/approvals"] as const) {
+// Still-stubbed surface (later M5/M5.5 increments). /fs/*, /approvals, /live
+// are implemented above.
+for (const route of ["/registry/items", "/sessions"] as const) {
   app.get(route, async (_req, reply) =>
     reply.code(501).send({ error: "not implemented yet", route }),
   );

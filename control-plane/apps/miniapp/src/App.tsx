@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 
 import { fsTree, me, type FsEntry, type MeResponse } from "./api";
-import { dropSession, ensureSession, type Session } from "./auth";
+import { dropSession, ensureSession, startParam, type Session } from "./auth";
+import { ApprovalsQueue } from "./components/ApprovalsQueue";
 import { CommandBuilder } from "./components/CommandBuilder";
 import { FileTree } from "./components/FileTree";
 import { FileView } from "./components/FileView";
@@ -19,11 +20,15 @@ type Screen =
   | { kind: "new" }
   | { kind: "subagent" }
   | { kind: "command" }
-  | { kind: "live" };
+  | { kind: "live" }
+  | { kind: "approvals" };
 
 export function App() {
   const [state, setState] = useState<State>({ phase: "auth" });
-  const [screen, setScreen] = useState<Screen>({ kind: "tree" });
+  // Deep link: approval notifications open the app with startapp=approvals.
+  const [screen, setScreen] = useState<Screen>(() =>
+    startParam() === "approvals" ? { kind: "approvals" } : { kind: "tree" },
+  );
 
   async function boot() {
     setState({ phase: "auth" });
@@ -66,6 +71,9 @@ export function App() {
       <header className="app-header">
         <strong>.claude/ — {state.profile.osUsername}</strong>
         <span>
+          <button className="ghost" onClick={() => setScreen({ kind: "approvals" })} title="Аппрувы">
+            🛂
+          </button>
           <button className="ghost" onClick={() => setScreen({ kind: "live" })} title="Live-активность">
             📡
           </button>
@@ -104,6 +112,7 @@ export function App() {
         <CommandBuilder token={state.session.token} existingPaths={existingPaths} onClose={toTree} onSaved={savedToTree} />
       )}
       {screen.kind === "live" && <LiveActivity token={state.session.token} onClose={toTree} />}
+      {screen.kind === "approvals" && <ApprovalsQueue token={state.session.token} onClose={toTree} />}
     </div>
   );
 }

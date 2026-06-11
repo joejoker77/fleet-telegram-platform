@@ -62,3 +62,17 @@ export function dropSession(): void {
     /* ignore */
   }
 }
+
+/**
+ * start_param from a t.me/<bot>?startapp=<value> deep link (e.g. approval
+ * notifications link to startapp=approvals). null outside Telegram / no param.
+ */
+export function startParam(): string | null {
+  try {
+    const raw = retrieveRawInitData();
+    if (!raw) return null;
+    return new URLSearchParams(raw).get("start_param");
+  } catch {
+    return null;
+  }
+}

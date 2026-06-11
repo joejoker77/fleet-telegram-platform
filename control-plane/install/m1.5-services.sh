@@ -23,6 +23,9 @@ BOT_SECRET=cp_bot_token
 JWT_SECRET=cp_jwt_secret
 API_PORT=8080
 SRV_AUDIT=/srv/audit
+# M5.4b: bot username (no @) for Mini App deep links in approval notifications.
+# Optional — empty means notifications go out without the url-button.
+BOT_USERNAME="${TELEGRAM_BOT_USERNAME:-}"
 
 log() { printf '\n== %s ==\n' "$*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -113,6 +116,7 @@ podman run -d --name cp-api --network host \
   "$NODE_IMAGE" \
   sh -c 'set -e; export HOST=127.0.0.1 PORT='"$API_PORT"' REDIS_URL=redis://127.0.0.1:6380 AUDIT_SOCKET=/run/audit/collector.sock;
     export TELEGRAM_BOT_TOKEN_FILE=/run/secrets/'"$BOT_SECRET"' JWT_SECRET_FILE=/run/secrets/'"$JWT_SECRET"';
+    export TELEGRAM_BOT_USERNAME='"$BOT_USERNAME"';
     export DATABASE_URL="postgres://cplane:$(cat /run/secrets/'"$PG_SECRET"')@127.0.0.1:5433/control_plane";
     exec node_modules/.bin/tsx apps/api/src/index.ts' >/dev/null
 

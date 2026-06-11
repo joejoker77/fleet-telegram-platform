@@ -44,6 +44,12 @@ export const scannerKind = pgEnum("scanner_kind", [
   "promptfoo",
 ]);
 export const verdictKind = pgEnum("verdict_kind", ["pass", "fail", "error"]);
+export const approvalStatus = pgEnum("approval_status", [
+  "pending",
+  "allowed",
+  "denied",
+  "expired",
+]);
 
 // ───────────────────────── tables ─────────────────────────
 export const users = pgTable("users", {
@@ -171,6 +177,25 @@ export const judgeVerdicts = pgTable(
   },
   (t) => [uniqueIndex("judge_verdicts_key").on(t.artifactHash, t.rulesetVersion, t.modelVersion)],
 );
+
+// M5.4b platform approvals — questions asked by the CONTROL PLANE (not by a
+// Claude Code session; in-session tool approvals stay with the telegram plugin).
+// First client: M5.5 MCP-connect gate. Answered from the Mini App over HTTPS;
+// expiry is lazy (evaluated on read/wait) — no cron. See docs/M5.4b-approvals-design.md.
+export const approvals = pgTable("approvals", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: uuid("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  kind: text("kind").notNull(), // mcp.connect | artifact.import | test | …
+  title: text("title").notNull(),
+  payload: jsonb("payload"),
+  status: approvalStatus("status").notNull().default("pending"),
+  answeredVia: text("answered_via"), // miniapp | timeout
+  ttlSeconds: integer("ttl_seconds").notNull().default(120),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  answeredAt: timestamp("answered_at", { withTimezone: true }),
+});
 
 // Only an index of audit records; the records themselves live in the WORM store.
 export const auditIndex = pgTable("audit_index", {

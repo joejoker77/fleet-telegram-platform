@@ -24,6 +24,9 @@ export interface Config {
   redisUrl: string;
   auditSocket: string;
   botToken: string;
+  // Bot username (no @) for Mini App deep links (t.me/<bot>?startapp=…).
+  // Optional: empty → approval notifications go out without the url-button.
+  botUsername: string;
   jwtSecret: Uint8Array;
   jwtTtlSeconds: number;
   initDataMaxAgeSeconds: number;
@@ -39,6 +42,7 @@ export function loadConfig(): Config {
     redisUrl: process.env.REDIS_URL ?? "redis://127.0.0.1:6380",
     auditSocket: process.env.AUDIT_SOCKET ?? "/run/audit/collector.sock",
     botToken: fileOrEnv("TELEGRAM_BOT_TOKEN"),
+    botUsername: (process.env.TELEGRAM_BOT_USERNAME ?? "").replace(/^@/, ""),
     jwtSecret: new TextEncoder().encode(fileOrEnv("JWT_SECRET")),
     jwtTtlSeconds: Number(process.env.JWT_TTL_SECONDS ?? 3600),
     initDataMaxAgeSeconds: Number(process.env.INITDATA_MAX_AGE_SECONDS ?? 86400),

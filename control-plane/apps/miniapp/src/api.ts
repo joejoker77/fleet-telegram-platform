@@ -96,3 +96,28 @@ export function liveWsUrl(token: string): string {
   const proto = window.location.protocol === "https:" ? "wss" : "ws";
   return `${proto}://${window.location.host}${BASE}/live?token=${encodeURIComponent(token)}`;
 }
+
+/** Platform approval (mirrors apps/api approvals.ts ApprovalRow; dates are ISO strings). */
+export interface Approval {
+  id: string;
+  kind: string;
+  title: string;
+  payload: unknown;
+  status: "pending" | "allowed" | "denied" | "expired";
+  answeredVia: string | null;
+  ttlSeconds: number;
+  createdAt: string;
+  answeredAt: string | null;
+}
+
+export function approvalsList(token: string): Promise<{ approvals: Approval[] }> {
+  return request("/approvals", {}, token);
+}
+
+export function approvalAnswer(
+  token: string,
+  id: string,
+  decision: "allow" | "deny",
+): Promise<{ ok: boolean; approval: Approval }> {
+  return request(`/approvals/${id}/answer`, { method: "POST", body: JSON.stringify({ decision }) }, token);
+}

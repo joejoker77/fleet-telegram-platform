@@ -130,6 +130,23 @@ CREATE TABLE audit_index (   -- только индекс; сами записи
   id        bigserial PRIMARY KEY,
   user_id   uuid, kind text, ref text, ts timestamptz NOT NULL DEFAULT now()
 );
+
+-- M5.4b: платформенные аппрувы (вопросы от control-plane, НЕ от сессии;
+-- сессионные аппрувы остаются у telegram-плагина). Ответ — из Mini App.
+-- Истечение ленивое (на чтении/ожидании), без cron. docs/M5.4b-approvals-design.md
+CREATE TYPE approval_status AS ENUM ('pending','allowed','denied','expired');
+CREATE TABLE approvals (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id      uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind         text NOT NULL,            -- mcp.connect | artifact.import | test | …
+  title        text NOT NULL,
+  payload      jsonb,
+  status       approval_status NOT NULL DEFAULT 'pending',
+  answered_via text,                     -- miniapp | timeout
+  ttl_seconds  integer NOT NULL DEFAULT 120,
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  answered_at  timestamptz
+);
 ```
 
 ## Redis — назначение

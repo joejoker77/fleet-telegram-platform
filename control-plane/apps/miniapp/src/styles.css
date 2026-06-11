@@ -304,6 +304,18 @@ button.ghost {
   white-space: pre-wrap;
 }
 
+/* approvals */
+.approval-card {
+  padding: 10px;
+  margin-bottom: 10px;
+  background: var(--surface);
+  border-radius: 8px;
+}
+
+.approval-actions {
+  padding: 8px 0 0;
+}
+
 .success {
   padding: 12px;
 }
