@@ -37,3 +37,13 @@ Serve `dist/` as static files on `miniapp.ai-assistant.gg` and reverse-proxy
 `/api/` to cp-api — vhost template: `deploy/nginx-miniapp.conf`. The domain is
 Cloudflare-proxied; until the vhost exists the origin's default server (n8n)
 answers — deploy the vhost before pointing the bot's menu button at it.
+
+The vhost root is `/var/www/miniapp/dist` — a COPY, not the working tree, so
+building alone deploys nothing (bit us 2026-06-11: prod kept serving a stale
+bundle). After every build, publish it (as root on the host):
+
+```sh
+cp -a apps/miniapp/dist/. /var/www/miniapp/dist/
+```
+
+Hashed asset names make this safe with Cloudflare caching; no reloads needed.
