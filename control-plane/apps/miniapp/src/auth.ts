@@ -55,6 +55,13 @@ export async function ensureSession(): Promise<Session> {
   return session;
 }
 
+/** Force a fresh JWT (drop cache + re-exchange initData). Used by the api.ts
+ *  401-retry path when the 1h token outlives a backgrounded webview. */
+export async function refreshSession(): Promise<Session> {
+  dropSession();
+  return ensureSession();
+}
+
 export function dropSession(): void {
   try {
     sessionStorage.removeItem(STORAGE_KEY);

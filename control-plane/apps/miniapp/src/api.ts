@@ -47,13 +47,42 @@ export class ApiError extends Error {
 
 const BASE = "/api";
 
+// ── Transparent re-auth on 401 ──
+// The JWT lives 1h, but Telegram keeps the webview alive in the background far
+// longer — components then hold a stale token prop and every call dies with
+// "invalid or expired session" (2026-06-11 incident). Single-user app → one
+// module-level live token; App registers a refresher (re-exchange initData,
+// valid 24h server-side) and request() retries the call once with the fresh
+// token. Components keep their old prop — request() prefers the live token.
+let liveToken: string | null = null;
+let authRefresher: (() => Promise<string>) | null = null;
+
+export function setLiveToken(token: string): void {
+  liveToken = token;
+}
+
+export function setAuthRefresher(fn: () => Promise<string>): void {
+  authRefresher = fn;
+}
+
 async function request<T>(path: string, init: RequestInit = {}, token?: string): Promise<T> {
-  const headers: Record<string, string> = {
-    "content-type": "application/json",
-    ...(init.headers as Record<string, string> | undefined),
+  const doFetch = (tok?: string) => {
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      ...(init.headers as Record<string, string> | undefined),
+    };
+    if (tok) headers.authorization = `Bearer ${tok}`;
+    return fetch(`${BASE}${path}`, { ...init, headers });
   };
-  if (token) headers.authorization = `Bearer ${token}`;
-  const res = await fetch(`${BASE}${path}`, { ...init, headers });
+  let res = await doFetch(token ? (liveToken ?? token) : undefined);
+  if (res.status === 401 && token && authRefresher) {
+    try {
+      liveToken = await authRefresher();
+      res = await doFetch(liveToken);
+    } catch {
+      /* refresher failed (outside Telegram / initData >24h) — surface the original 401 */
+    }
+  }
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
     const msg = typeof (body as { error?: string }).error === "string" ? (body as { error: string }).error : res.statusText;
@@ -251,4 +280,11 @@ export function sessionCreate(token: string, name: string): Promise<{ ok: boolea
  *  the claude pane in the project dir. The bot's current task IS interrupted. */
 export function sessionSwitch(token: string, id: string): Promise<{ ok: boolean; name: string }> {
   return request(`/sessions/${id}/switch`, { method: "POST", body: "{}" }, token);
+}
+
+/** Delete a non-active session: the project dir is moved to ~/work/.trash/
+ *  (recoverable, nothing is destroyed), the row is closed. 409 for the active
+ *  session or "default". */
+export function sessionDelete(token: string, id: string): Promise<{ ok: boolean; name: string }> {
+  return request(`/sessions/${id}`, { method: "DELETE" }, token);
 }

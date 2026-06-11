@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 
 import { openLink } from "@telegram-apps/sdk";
 
-import { fsTree, ideTicket, me, type FsEntry, type MeResponse } from "./api";
-import { dropSession, ensureSession, startParam, type Session } from "./auth";
+import { fsTree, ideTicket, me, setAuthRefresher, setLiveToken, type FsEntry, type MeResponse } from "./api";
+import { dropSession, ensureSession, refreshSession, startParam, type Session } from "./auth";
 import { ApprovalsQueue } from "./components/ApprovalsQueue";
 import { CommandBuilder } from "./components/CommandBuilder";
 import { FileTree } from "./components/FileTree";
@@ -40,6 +40,15 @@ export function App() {
     setState({ phase: "auth" });
     try {
       const session = await ensureSession();
+      // Transparent 401-recovery: a backgrounded webview outlives the 1h JWT;
+      // api.ts re-auths via initData (24h) and retries instead of surfacing
+      // "invalid or expired session" to the user.
+      setLiveToken(session.token);
+      setAuthRefresher(async () => {
+        const fresh = await refreshSession();
+        setLiveToken(fresh.token);
+        return fresh.token;
+      });
       const [profile, tree] = await Promise.all([me(session.token), fsTree(session.token)]);
       setState({ phase: "ready", session, profile, entries: tree.entries });
     } catch (e) {

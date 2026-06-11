@@ -12,7 +12,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { sessionCreate, sessionsList, sessionSwitch, type SessionInfo } from "../api";
+import { sessionCreate, sessionDelete, sessionsList, sessionSwitch, type SessionInfo } from "../api";
 
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
@@ -23,6 +23,8 @@ export function SessionsManager({ token, onClose }: { token: string; onClose: ()
   const [creating, setCreating] = useState(false);
   const [switching, setSwitching] = useState<string | null>(null); // session id mid-switch
   const [armed, setArmed] = useState<string | null>(null); // session id awaiting 2nd tap
+  const [armedDel, setArmedDel] = useState<string | null>(null); // session id awaiting delete confirm
+  const [deleting, setDeleting] = useState<string | null>(null); // session id mid-delete
 
   const refetch = useCallback(async () => {
     try {
@@ -80,6 +82,7 @@ export function SessionsManager({ token, onClose }: { token: string; onClose: ()
     if (armed !== s.id) {
       // first tap: arm and show the warning inline; auto-disarm after 8s
       setArmed(s.id);
+      setArmedDel(null);
       setTimeout(() => setArmed((cur) => (cur === s.id ? null : cur)), 8000);
       return;
     }
@@ -92,6 +95,28 @@ export function SessionsManager({ token, onClose }: { token: string; onClose: ()
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setSwitching(null);
+      void refetch();
+    }
+  }
+
+  // Same two-tap pattern as doSwitch (window.confirm is a no-op in the
+  // Telegram webview). The server moves the dir to ~/work/.trash — recoverable.
+  async function doDelete(s: SessionInfo) {
+    if (armedDel !== s.id) {
+      setArmedDel(s.id);
+      setArmed(null);
+      setTimeout(() => setArmedDel((cur) => (cur === s.id ? null : cur)), 8000);
+      return;
+    }
+    setArmedDel(null);
+    setDeleting(s.id);
+    setError(null);
+    try {
+      await sessionDelete(token, s.id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDeleting(null);
       void refetch();
     }
   }
@@ -122,17 +147,29 @@ export function SessionsManager({ token, onClose }: { token: string; onClose: ()
                 {s.active ? (
                   <span className="live-ts">{s.ready === false ? "запускается…" : "активна"}</span>
                 ) : (
-                  <button
-                    disabled={switching !== null}
-                    className={armed === s.id ? "primary" : undefined}
-                    onClick={() => void doSwitch(s)}
-                  >
-                    {switching === s.id
-                      ? "переключение…"
-                      : armed === s.id
-                        ? "⚠️ точно переключить"
-                        : "переключить"}
-                  </button>
+                  <span>
+                    <button
+                      disabled={switching !== null || deleting !== null}
+                      className={armed === s.id ? "primary" : undefined}
+                      onClick={() => void doSwitch(s)}
+                    >
+                      {switching === s.id
+                        ? "переключение…"
+                        : armed === s.id
+                          ? "⚠️ точно переключить"
+                          : "переключить"}
+                    </button>{" "}
+                    {s.name !== "default" && (
+                      <button
+                        disabled={switching !== null || deleting !== null}
+                        className={armedDel === s.id ? "primary" : "ghost"}
+                        title="Удалить сессию"
+                        onClick={() => void doDelete(s)}
+                      >
+                        {deleting === s.id ? "…" : armedDel === s.id ? "⚠️ удалить?" : "🗑"}
+                      </button>
+                    )}
+                  </span>
                 )}
               </div>
               {armed === s.id && switching === null && (
@@ -140,6 +177,13 @@ export function SessionsManager({ token, onClose }: { token: string; onClose: ()
                   Текущая задача бота будет прервана: его Claude перезапустится в папке проекта.
                   Разговор сохранится и продолжится при переключении обратно. Нажмите ещё раз для
                   подтверждения.
+                </p>
+              )}
+              {armedDel === s.id && deleting === null && (
+                <p className="muted">
+                  Сессия исчезнет из списка, папка проекта переедет в ~/work/.trash (данные не
+                  уничтожаются — бот сможет восстановить или вычистить по запросу). Нажмите ещё раз
+                  для подтверждения.
                 </p>
               )}
             </li>

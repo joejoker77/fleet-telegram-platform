@@ -358,4 +358,61 @@ export function registerSessionRoutes(app: FastifyInstance, deps: SessionDeps): 
       error: "switch not confirmed in 90s (pod down or pre-M5.7 image?)",
     });
   });
+
+  // DELETE /sessions/:id — remove a NON-active session from the list. Nothing
+  // is destroyed: the project dir is moved to ~/work/.trash/<name>-<ts> (the
+  // tenant can recover it or ask the bot to purge it), the row goes to
+  // state=closed. The active session and "default" are refused — switch away
+  // first; no supervisor involvement needed since no pane respawn happens.
+  app.delete("/sessions/:id", async (req, reply) => {
+    let ctx;
+    try {
+      ctx = await auth(req);
+    } catch (e) {
+      const err = e as AuthError;
+      return reply.code(err.code ?? 401).send({ error: err.message });
+    }
+    const id = (req.params as { id?: string })?.id ?? "";
+    const rows = await db
+      .select()
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.id, id), eq(schema.sessions.userId, ctx.userId)))
+      .limit(1);
+    const row = rows[0];
+    if (!row || row.state === "closed") return reply.code(404).send({ error: "сессия не найдена" });
+    const name = row.sessionName;
+    if (name === "default") return reply.code(409).send({ error: "default нельзя удалить" });
+    const p = tenantPaths(deps.homeRoot, ctx.osUsername);
+    if (name === activeName(p)) {
+      return reply.code(409).send({ error: "сессия активна — сначала переключитесь на другую" });
+    }
+
+    const dir = path.join(p.projects, name);
+    if (fs.existsSync(dir)) {
+      try {
+        const trash = path.join(p.home, "work", ".trash");
+        fs.mkdirSync(trash, { recursive: true });
+        try {
+          const { uid, gid } = tenantOwner(p);
+          fs.chownSync(trash, uid, gid);
+        } catch {
+          /* api not root in dev */
+        }
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+        fs.renameSync(dir, path.join(trash, `${name}-${stamp}`));
+      } catch (err) {
+        app.log.error({ err }, "session dir trash failed");
+        return reply.code(500).send({ error: "не удалось переместить папку сессии в .trash" });
+      }
+    }
+
+    await db.update(schema.sessions).set({ state: "closed" }).where(eq(schema.sessions.id, row.id));
+    await sendAudit(deps.auditSocket, {
+      userId: ctx.userId,
+      kind: "session.delete",
+      actor: ctx.osUsername,
+      payload: { name },
+    });
+    return reply.send({ ok: true, name });
+  });
 }
