@@ -70,6 +70,13 @@ CFG_ARGS=()
 # root and the in-container user couldn't write it either.
 install -d -o "$UID_N" -g "$GID_N" -m 0755 "$HOME_DIR/.config"
 
+# ~/.local — same RO-rootfs class of bug (2026-06-11, M5.6): code-server keeps
+# its user state in ~/.local/share/code-server (extensions.json, User settings,
+# workspaceStorage, caches). Without the mount every write EROFSes: built-in
+# extensions (git, emmet, merge-conflict…) fail to activate and nothing the
+# user configures in the IDE persists.
+install -d -o "$UID_N" -g "$GID_N" -m 0755 "$HOME_DIR/.local"
+
 # Audit wiring: share the control-plane audit-collector socket (named volume
 # cp-audit-run, created by m1.5; the collector + cp-api mount the same volume). The
 # collector owns the socket root:audit 0660, so the tenant joins the `audit` group
@@ -113,6 +120,7 @@ exec /usr/bin/podman run --rm --name "claude-$U" \
   -v "$HOME_DIR/.claude:$HOME_DIR/.claude" \
   -v "$HOME_DIR/work:$HOME_DIR/work" \
   -v "$HOME_DIR/.config:$HOME_DIR/.config" \
+  -v "$HOME_DIR/.local:$HOME_DIR/.local" \
   "${CFG_ARGS[@]}" "${AUDIT_ARGS[@]}" "${IDE_ARGS[@]}" \
   -w "$HOME_DIR/work" \
   "$IMAGE"
