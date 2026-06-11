@@ -15,10 +15,21 @@ import {
   createApproval,
   listApprovals,
   waitForAnswer,
+  type ApprovalRow,
   type ApprovalsDeps,
 } from "./approvals.js";
 
-export function registerApprovalRoutes(app: FastifyInstance, deps: ApprovalsDeps): void {
+// M5.5+: per-kind side effect executed SYNCHRONOUSLY in the answer handler when
+// the decision is "allow" (no background waiter → survives cp-api restarts; the
+// answer request itself carries the apply result back to the Mini App). The
+// applier audits its own success/failure and must never throw.
+export type ApprovalApplier = (row: ApprovalRow) => Promise<{ ok: boolean; error?: string }>;
+
+export function registerApprovalRoutes(
+  app: FastifyInstance,
+  deps: ApprovalsDeps,
+  appliers: Record<string, ApprovalApplier> = {},
+): void {
   const auth = (req: Parameters<typeof requireAuth>[0]) =>
     requireAuth(req, deps.redis, deps.jwtSecret);
 
@@ -49,7 +60,19 @@ export function registerApprovalRoutes(app: FastifyInstance, deps: ApprovalsDeps
     }
     const row = await answerApproval(deps, { id, userId: ctx.userId, allow: decision === "allow" });
     if (!row) return reply.code(404).send({ error: "approval not found or no longer pending" });
-    return reply.send({ ok: true, approval: row });
+
+    // answerApproval settles a row exactly once (pending-guard) → the applier
+    // runs at most once per approval.
+    let applied: { ok: boolean; error?: string } | undefined;
+    const applier = appliers[row.kind];
+    if (row.status === "allowed" && applier) {
+      try {
+        applied = await applier(row);
+      } catch (e) {
+        applied = { ok: false, error: e instanceof Error ? e.message.slice(0, 200) : String(e) };
+      }
+    }
+    return reply.send({ ok: true, approval: row, ...(applied !== undefined ? { applied } : {}) });
   });
 
   // Acceptance/test hook (admin only): create a synthetic approval and block

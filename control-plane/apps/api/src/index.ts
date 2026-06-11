@@ -12,6 +12,8 @@ import { sendAudit } from "./audit.js";
 import { registerFsRoutes } from "./fs-routes.js";
 import { registerLiveRoutes } from "./live-routes.js";
 import { registerApprovalRoutes } from "./approval-routes.js";
+import { registerMcpRoutes } from "./mcp-routes.js";
+import { applyMcpConnect, MCP_APPROVAL_KIND, type McpStanza } from "./mcp-gate.js";
 import websocket from "@fastify/websocket";
 
 const config = loadConfig();
@@ -37,13 +39,50 @@ registerLiveRoutes(app, { redis, redisUrl: config.redisUrl, jwtSecret: config.jw
 
 // M5.4b platform approvals: queue + answer from the Mini App; notify via main
 // bot sendMessage (send-only, no second getUpdates consumer).
-registerApprovalRoutes(app, {
+const approvalsDeps = {
   redis,
   redisUrl: config.redisUrl,
   jwtSecret: config.jwtSecret,
   auditSocket: config.auditSocket,
   botToken: config.botToken,
   botUsername: config.botUsername,
+};
+const mcpGateDeps = {
+  homeRoot: config.tenantHomeRoot,
+  judgeUrl: config.judgeUrl,
+  auditSocket: config.auditSocket,
+};
+registerApprovalRoutes(app, approvalsDeps, {
+  // M5.5: an allowed mcp.connect approval is applied synchronously in the
+  // answer handler. The payload was authored by POST /mcp/connect; apply
+  // re-validates it before touching tenant files.
+  [MCP_APPROVAL_KIND]: async (row) => {
+    const p = (row.payload ?? {}) as { name?: string; stanza?: McpStanza; osUsername?: string };
+    if (typeof p.name !== "string" || typeof p.osUsername !== "string" || p.stanza === undefined) {
+      return { ok: false, error: "malformed approval payload" };
+    }
+    // userId is enforced by answerApproval's owner check; resolve it from the DB row.
+    const owner = await db
+      .select({ id: schema.users.id })
+      .from(schema.users)
+      .where(eq(schema.users.osUsername, p.osUsername))
+      .limit(1);
+    if (!owner[0]) return { ok: false, error: "tenant not found" };
+    return applyMcpConnect(mcpGateDeps, {
+      userId: owner[0].id,
+      osUsername: p.osUsername,
+      name: p.name,
+      stanza: p.stanza,
+    });
+  },
+});
+
+// M5.5 gated MCP connect: list / connect (validate → scan → approval) / disconnect.
+registerMcpRoutes(app, {
+  redis,
+  jwtSecret: config.jwtSecret,
+  gate: mcpGateDeps,
+  approvals: approvalsDeps,
 });
 
 // POST /auth/session — verify Telegram initData, resolve the tenant, issue a JWT.

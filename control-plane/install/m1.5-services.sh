@@ -124,7 +124,12 @@ podman run -d --name cp-api --network host \
   --secret "$PG_SECRET" --secret "$BOT_SECRET" --secret "$JWT_SECRET" \
   --restart=unless-stopped \
   "$NODE_IMAGE" \
-  sh -c 'set -e; export HOST=127.0.0.1 PORT='"$API_PORT"' REDIS_URL=redis://127.0.0.1:6380 AUDIT_SOCKET=/run/audit/collector.sock TENANT_HOME_ROOT=/home;
+  sh -c 'set -e;
+    # M5.5: best-effort git for committing settings.json to the tenant git HEAD
+    # after an approved MCP connect (node:alpine has no git). Survives restarts
+    # (container fs persists); failure is tolerated — apply degrades to committed=false.
+    command -v git >/dev/null 2>&1 || apk add --no-cache git >/dev/null 2>&1 || true;
+    export HOST=127.0.0.1 PORT='"$API_PORT"' REDIS_URL=redis://127.0.0.1:6380 AUDIT_SOCKET=/run/audit/collector.sock TENANT_HOME_ROOT=/home;
     export TELEGRAM_BOT_TOKEN_FILE=/run/secrets/'"$BOT_SECRET"' JWT_SECRET_FILE=/run/secrets/'"$JWT_SECRET"';
     export TELEGRAM_BOT_USERNAME='"$BOT_USERNAME"';
     export DATABASE_URL="postgres://cplane:$(cat /run/secrets/'"$PG_SECRET"')@127.0.0.1:5433/control_plane";

@@ -7,6 +7,7 @@ import { CommandBuilder } from "./components/CommandBuilder";
 import { FileTree } from "./components/FileTree";
 import { FileView } from "./components/FileView";
 import { LiveActivity } from "./components/LiveActivity";
+import { McpBuilder } from "./components/McpBuilder";
 import { SubagentBuilder } from "./components/SubagentBuilder";
 
 type State =
@@ -20,6 +21,7 @@ type Screen =
   | { kind: "new" }
   | { kind: "subagent" }
   | { kind: "command" }
+  | { kind: "mcp" }
   | { kind: "live" }
   | { kind: "approvals" };
 
@@ -101,8 +103,11 @@ export function App() {
           <button className="primary" onClick={() => setScreen({ kind: "command" })}>
             ⚡ Новая slash-команда
           </button>
+          <button className="primary" onClick={() => setScreen({ kind: "mcp" })}>
+            🔌 Подключить MCP
+          </button>
           <button onClick={toTree}>Отмена</button>
-          <p className="muted">MCP-серверы подключаются через бота (гейт с подтверждением), не отсюда.</p>
+          <p className="muted">MCP проходит сканер и подтверждение в аппрувах (M5.5).</p>
         </div>
       )}
       {screen.kind === "subagent" && (
@@ -110,6 +115,13 @@ export function App() {
       )}
       {screen.kind === "command" && (
         <CommandBuilder token={state.session.token} existingPaths={existingPaths} onClose={toTree} onSaved={savedToTree} />
+      )}
+      {screen.kind === "mcp" && (
+        <McpBuilder
+          token={state.session.token}
+          onClose={toTree}
+          onGoApprovals={() => setScreen({ kind: "approvals" })}
+        />
       )}
       {screen.kind === "live" && <LiveActivity token={state.session.token} onClose={toTree} />}
       {screen.kind === "approvals" && <ApprovalsQueue token={state.session.token} onClose={toTree} />}

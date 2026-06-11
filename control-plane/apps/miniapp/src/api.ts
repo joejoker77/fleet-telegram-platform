@@ -118,6 +118,72 @@ export function approvalAnswer(
   token: string,
   id: string,
   decision: "allow" | "deny",
-): Promise<{ ok: boolean; approval: Approval }> {
+): Promise<{ ok: boolean; approval: Approval; applied?: { ok: boolean; error?: string; committed?: boolean } }> {
   return request(`/approvals/${id}/answer`, { method: "POST", body: JSON.stringify({ decision }) }, token);
+}
+
+// ── M5.5 gated MCP connect (mirrors apps/api mcp-routes.ts) ──
+
+export interface McpServerInfo {
+  name: string;
+  kind: "stdio" | "remote";
+  enabled: boolean;
+}
+
+export interface McpFinding {
+  ruleId: string;
+  severity: "low" | "medium" | "high" | "critical";
+  message: string;
+  source: string;
+}
+
+export interface McpConnectResponse {
+  approvalId: string;
+  ttlSeconds: number;
+  overwrite: boolean;
+  verdict: "pass";
+  severity: string | null;
+  findings: McpFinding[];
+}
+
+/** 422 body when the scanner blocks (ApiError carries only the message — use mcpConnectRaw for details). */
+export function mcpList(token: string): Promise<{ servers: McpServerInfo[] }> {
+  return request("/mcp/list", {}, token);
+}
+
+export function mcpConnect(token: string, name: string, stanza: unknown): Promise<McpConnectResponse> {
+  return request("/mcp/connect", { method: "POST", body: JSON.stringify({ name, stanza }) }, token);
+}
+
+/** Like mcpConnect but surfaces the full 422 scanner verdict instead of a bare error string. */
+export async function mcpConnectRaw(
+  token: string,
+  name: string,
+  stanza: unknown,
+): Promise<
+  | { kind: "approval"; res: McpConnectResponse }
+  | { kind: "blocked"; verdict: string; severity: string | null; findings: McpFinding[]; reportRef: string | null; error: string }
+> {
+  const res = await fetch(`${BASE}/mcp/connect`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify({ name, stanza }),
+  });
+  const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  if (res.ok) return { kind: "approval", res: body as unknown as McpConnectResponse };
+  if (res.status === 422) {
+    return {
+      kind: "blocked",
+      verdict: String(body.verdict ?? "fail"),
+      severity: (body.severity as string | null) ?? null,
+      findings: (body.findings as McpFinding[] | undefined) ?? [],
+      reportRef: (body.reportRef as string | null) ?? null,
+      error: String(body.error ?? "станса не прошла сканер"),
+    };
+  }
+  throw new ApiError(res.status, typeof body.error === "string" ? body.error : res.statusText);
+}
+
+export function mcpDisconnect(token: string, name: string): Promise<{ ok: boolean; name: string }> {
+  return request("/mcp/disconnect", { method: "POST", body: JSON.stringify({ name }) }, token);
 }
