@@ -169,7 +169,15 @@ CHAN_START_GRACE="${CHANNEL_START_GRACE:-150}"
 CHAN_FLAP_GRACE="${CHANNEL_FLAP_GRACE:-60}"
 
 channel_alive() {
-  # Healthy iff bot.pid exists AND names a live process.
+  # Healthy iff the plugin PROCESS is alive in THIS pid namespace. The naive
+  # check (bot.pid exists + kill -0) false-positives: bot.pid lives on the
+  # shared ~/.claude volume, so a plugin running OUTSIDE this container (the
+  # 2026-06-11 incident: the old claude-tg@ host unit ran in parallel with the
+  # pod for 16h) writes a pid that is dead/foreign in our namespace → the
+  # watchdog restart-loops a healthy pod. pgrep for the plugin process is the
+  # in-namespace ground truth; bot.pid stays as a secondary signal only (the
+  # plugin writes it at process start, so its semantics are identical).
+  pgrep -f 'bun server\.ts' >/dev/null 2>&1 && return 0
   local p
   [ -f "$BOT_PID_FILE" ] || return 1
   p="$(cat "$BOT_PID_FILE" 2>/dev/null)" || return 1
