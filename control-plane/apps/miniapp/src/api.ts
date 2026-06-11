@@ -68,7 +68,9 @@ export function setAuthRefresher(fn: () => Promise<string>): void {
 async function request<T>(path: string, init: RequestInit = {}, token?: string): Promise<T> {
   const doFetch = (tok?: string) => {
     const headers: Record<string, string> = {
-      "content-type": "application/json",
+      // content-type only when there IS a body: fastify 400s a bodyless
+      // request (e.g. DELETE) that carries a json content-type.
+      ...(init.body !== undefined ? { "content-type": "application/json" } : {}),
       ...(init.headers as Record<string, string> | undefined),
     };
     if (tok) headers.authorization = `Bearer ${tok}`;
