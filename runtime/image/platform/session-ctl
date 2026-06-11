@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# M5.7 — in-pod session CLI (docs/M5.7-sessions-design.md). The bot (or the
+# tenant in a terminal) manages named project sessions with it. It only READS
+# state and WRITES the switch request file — the entrypoint supervisor is the
+# sole executor, so a chat-initiated "switch yourself" is safe: the requester
+# (claude) dying mid-switch cannot orphan the operation.
+#
+#   session-ctl list            # sessions + which one is active
+#   session-ctl active          # active session name
+#   session-ctl create <name>   # new project dir under ~/work/projects/
+#   session-ctl switch <name>   # ask the supervisor to switch (≤90s)
+set -u
+
+RUN_DIR="$HOME/.claude/run"
+SWITCH_REQ="$RUN_DIR/session-switch.json"
+SWITCH_RES="$RUN_DIR/session-switch.result.json"
+ACTIVE_FILE="$RUN_DIR/active-session"
+PROJECTS="$HOME/work/projects"
+
+valid_name() { printf '%s' "$1" | grep -Eq '^[a-z0-9][a-z0-9-]{0,31}$'; }
+
+active() { cat "$ACTIVE_FILE" 2>/dev/null || echo default; }
+
+case "${1:-}" in
+  list)
+    act=$(active)
+    for n in default $(ls -1 "$PROJECTS" 2>/dev/null); do
+      [ "$n" = default ] || [ -d "$PROJECTS/$n" ] || continue
+      [ "$n" = "$act" ] && echo "* $n" || echo "  $n"
+    done
+    ;;
+  active)
+    active
+    ;;
+  create)
+    name="${2:-}"
+    valid_name "$name" || { echo "invalid name (need ^[a-z0-9][a-z0-9-]{0,31}$)" >&2; exit 1; }
+    [ "$name" = default ] && { echo "default always exists" >&2; exit 1; }
+    [ -d "$PROJECTS/$name" ] && { echo "session '$name' already exists" >&2; exit 1; }
+    mkdir -p "$PROJECTS/$name"
+    echo "created: $name → $PROJECTS/$name"
+    ;;
+  switch)
+    name="${2:-}"
+    if [ "$name" != default ]; then
+      valid_name "$name" || { echo "invalid name" >&2; exit 1; }
+      [ -d "$PROJECTS/$name" ] || { echo "no such session '$name' (create first)" >&2; exit 1; }
+    fi
+    [ "$name" = "$(active)" ] && { echo "already on '$name'"; exit 0; }
+    mkdir -p "$RUN_DIR"
+    id="ctl-$$-$(date +%s)"
+    rm -f "$SWITCH_RES"
+    printf '{"id":"%s","action":"switch","name":"%s"}\n' "$id" "$name" > "$SWITCH_REQ.tmp" \
+      && mv "$SWITCH_REQ.tmp" "$SWITCH_REQ"
+    echo "switch to '$name' requested (the supervisor executes it within ~5s;"
+    echo "NOTE: this kills the current claude pane — if you are the bot, this is"
+    echo "expected suicide-switch; the result lands in $SWITCH_RES)"
+    ;;
+  *)
+    echo "usage: session-ctl {list|active|create <name>|switch <name>}" >&2
+    exit 1
+    ;;
+esac

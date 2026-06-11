@@ -14,6 +14,7 @@ import { registerLiveRoutes } from "./live-routes.js";
 import { registerApprovalRoutes } from "./approval-routes.js";
 import { registerMcpRoutes } from "./mcp-routes.js";
 import { registerIdeRoutes } from "./ide-routes.js";
+import { registerSessionRoutes } from "./session-routes.js";
 import {
   applyMcpConnect,
   deleteStagedSecret,
@@ -111,6 +112,15 @@ registerIdeRoutes(app, {
   jwtSecret: config.jwtSecret,
   auditSocket: config.auditSocket,
   ideUrl: config.ideUrl,
+});
+
+// M5.7 named sessions/projects: list / create / switch. cp-api writes the
+// switch request into the tenant home; the pod supervisor is the executor.
+registerSessionRoutes(app, {
+  redis,
+  jwtSecret: config.jwtSecret,
+  auditSocket: config.auditSocket,
+  homeRoot: config.tenantHomeRoot,
 });
 
 // POST /auth/session — verify Telegram initData, resolve the tenant, issue a JWT.
@@ -224,9 +234,9 @@ app.get("/usage", async (req, reply) => {
   return reply.send({ records: rows.length, totalTokens, byModel, byWindow });
 });
 
-// Still-stubbed surface (later M5/M5.5 increments). /fs/*, /approvals, /live
-// are implemented above.
-for (const route of ["/registry/items", "/sessions"] as const) {
+// Still-stubbed surface (later M5/M5.5 increments). /fs/*, /approvals, /live,
+// /sessions are implemented above.
+for (const route of ["/registry/items"] as const) {
   app.get(route, async (_req, reply) =>
     reply.code(501).send({ error: "not implemented yet", route }),
   );

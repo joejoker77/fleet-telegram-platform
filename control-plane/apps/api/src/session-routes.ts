@@ -1,0 +1,308 @@
+// M5.7 named sessions/projects (docs/M5.7-sessions-design.md). A session is a
+// project dir in the tenant's OWN sandbox (~/work = "default", else
+// ~/work/projects/<name>) plus its per-cwd claude conversation. cp-api never
+// touches the pod directly: it writes a switch REQUEST file into the tenant
+// home and the pod's entrypoint supervisor — the sole executor — respawns the
+// claude pane and writes the RESULT file. Same trust boundary as fs-routes
+// (boundary-1: the tenant's own files), audited per operation.
+import fs from "node:fs";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
+import type { FastifyInstance } from "fastify";
+import type { Redis } from "ioredis";
+import { and, eq } from "drizzle-orm";
+import { getDb, schema } from "@fleet/db";
+import { sendAudit } from "./audit.js";
+import { requireAuth, AuthError } from "./authz.js";
+
+const NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+const SWITCH_TIMEOUT_MS = 90_000; // supervisor tick is 5s + claude respawn time
+const POLL_MS = 1_000;
+
+export interface SessionDeps {
+  redis: Redis;
+  jwtSecret: Uint8Array;
+  auditSocket: string;
+  homeRoot: string; // e.g. /home
+}
+
+interface TenantPaths {
+  home: string;
+  projects: string;
+  runDir: string;
+  reqFile: string;
+  resFile: string;
+  activeFile: string;
+}
+
+function tenantPaths(homeRoot: string, osUsername: string): TenantPaths {
+  const home = path.resolve(path.join(homeRoot, osUsername));
+  const runDir = path.join(home, ".claude", "run");
+  return {
+    home,
+    projects: path.join(home, "work", "projects"),
+    runDir,
+    reqFile: path.join(runDir, "session-switch.json"),
+    resFile: path.join(runDir, "session-switch.result.json"),
+    activeFile: path.join(runDir, "active-session"),
+  };
+}
+
+function dirSessions(p: TenantPaths): string[] {
+  const names = ["default"];
+  try {
+    for (const ent of fs.readdirSync(p.projects, { withFileTypes: true })) {
+      if (ent.isDirectory() && NAME_RE.test(ent.name)) names.push(ent.name);
+    }
+  } catch {
+    /* no projects dir yet */
+  }
+  return names;
+}
+
+function activeName(p: TenantPaths): string {
+  try {
+    const n = fs.readFileSync(p.activeFile, "utf8").trim();
+    return n || "default";
+  } catch {
+    return "default";
+  }
+}
+
+function tenantOwner(p: TenantPaths): { uid: number; gid: number } {
+  const st = fs.statSync(p.home);
+  return { uid: st.uid, gid: st.gid };
+}
+
+// Write a file owned by the tenant, atomically (tmp + rename).
+function writeAsTenant(p: TenantPaths, file: string, content: string): void {
+  if (!fs.existsSync(p.runDir)) {
+    fs.mkdirSync(p.runDir, { recursive: true });
+    const { uid, gid } = tenantOwner(p);
+    try {
+      fs.chownSync(p.runDir, uid, gid);
+    } catch {
+      /* api not root in dev */
+    }
+  }
+  const tmp = file + ".cp-tmp";
+  fs.writeFileSync(tmp, content, { mode: 0o644 });
+  try {
+    const { uid, gid } = tenantOwner(p);
+    fs.chownSync(tmp, uid, gid);
+  } catch {
+    /* api not root in dev */
+  }
+  fs.renameSync(tmp, file);
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+export function registerSessionRoutes(app: FastifyInstance, deps: SessionDeps): void {
+  const db = getDb();
+  const auth = (req: Parameters<typeof requireAuth>[0]) =>
+    requireAuth(req, deps.redis, deps.jwtSecret);
+
+  // GET /sessions — dirs are ground truth, DB rows are reconciled to them
+  // (self-heal: a dir created by hand still shows up; a row without a dir is
+  // closed). The active marker is maintained by the pod supervisor.
+  app.get("/sessions", async (req, reply) => {
+    let ctx;
+    try {
+      ctx = await auth(req);
+    } catch (e) {
+      const err = e as AuthError;
+      return reply.code(err.code ?? 401).send({ error: err.message });
+    }
+    const p = tenantPaths(deps.homeRoot, ctx.osUsername);
+    const names = dirSessions(p);
+    const active = activeName(p);
+
+    const rows = await db
+      .select()
+      .from(schema.sessions)
+      .where(eq(schema.sessions.userId, ctx.userId));
+    const byName = new Map(rows.map((r) => [r.sessionName, r]));
+
+    for (const name of names) {
+      const want = name === active ? "active" : "idle";
+      const row = byName.get(name);
+      if (!row) {
+        const inserted = await db
+          .insert(schema.sessions)
+          .values({ userId: ctx.userId, sessionName: name, state: want })
+          .returning();
+        if (inserted[0]) byName.set(name, inserted[0]);
+      } else if (row.state !== want && row.state !== "closed") {
+        await db
+          .update(schema.sessions)
+          .set({ state: want })
+          .where(eq(schema.sessions.id, row.id));
+        row.state = want;
+      } else if (row.state === "closed") {
+        // dir is back → reopen
+        await db
+          .update(schema.sessions)
+          .set({ state: want })
+          .where(eq(schema.sessions.id, row.id));
+        row.state = want;
+      }
+    }
+    for (const row of rows) {
+      if (!names.includes(row.sessionName) && row.state !== "closed") {
+        await db
+          .update(schema.sessions)
+          .set({ state: "closed" })
+          .where(eq(schema.sessions.id, row.id));
+        row.state = "closed";
+      }
+    }
+
+    const sessions = [...byName.values()]
+      .filter((r) => r.state !== "closed")
+      .sort((a, b) => (a.sessionName === "default" ? -1 : b.sessionName === "default" ? 1 : a.sessionName.localeCompare(b.sessionName)))
+      .map((r) => ({
+        id: r.id,
+        name: r.sessionName,
+        state: r.state,
+        active: r.sessionName === active,
+        startedAt: r.startedAt,
+        lastMessageAt: r.lastMessageAt,
+      }));
+    return reply.send({ active, sessions });
+  });
+
+  // POST /sessions { name } — create the project dir (owned by the tenant) + row.
+  app.post("/sessions", async (req, reply) => {
+    let ctx;
+    try {
+      ctx = await auth(req);
+    } catch (e) {
+      const err = e as AuthError;
+      return reply.code(err.code ?? 401).send({ error: err.message });
+    }
+    const name = (req.body as { name?: string } | null)?.name;
+    if (typeof name !== "string" || !NAME_RE.test(name)) {
+      return reply.code(400).send({ error: "name must match ^[a-z0-9][a-z0-9-]{0,31}$" });
+    }
+    if (name === "default") return reply.code(409).send({ error: "default always exists" });
+    const p = tenantPaths(deps.homeRoot, ctx.osUsername);
+    const dir = path.join(p.projects, name);
+    if (fs.existsSync(dir)) return reply.code(409).send({ error: "session already exists" });
+
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      const { uid, gid } = tenantOwner(p);
+      try {
+        fs.chownSync(p.projects, uid, gid);
+        fs.chownSync(dir, uid, gid);
+      } catch {
+        /* api not root in dev */
+      }
+    } catch (err) {
+      app.log.error({ err }, "session dir create failed");
+      return reply.code(500).send({ error: "mkdir failed" });
+    }
+
+    const existing = await db
+      .select()
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.userId, ctx.userId), eq(schema.sessions.sessionName, name)));
+    let row = existing[0];
+    if (row) {
+      await db.update(schema.sessions).set({ state: "idle" }).where(eq(schema.sessions.id, row.id));
+      row.state = "idle";
+    } else {
+      const inserted = await db
+        .insert(schema.sessions)
+        .values({ userId: ctx.userId, sessionName: name, state: "idle" })
+        .returning();
+      row = inserted[0];
+    }
+    if (!row) return reply.code(500).send({ error: "session row insert failed" });
+
+    await sendAudit(deps.auditSocket, {
+      userId: ctx.userId,
+      kind: "session.create",
+      actor: ctx.osUsername,
+      payload: { name },
+    });
+    return reply.send({ ok: true, session: { id: row.id, name, state: row.state, active: false } });
+  });
+
+  // POST /sessions/:id/switch — request file → the pod supervisor respawns the
+  // claude pane in the project dir → result file. Synchronous from the Mini
+  // App's point of view (≤90s), 504 on timeout.
+  app.post("/sessions/:id/switch", async (req, reply) => {
+    let ctx;
+    try {
+      ctx = await auth(req);
+    } catch (e) {
+      const err = e as AuthError;
+      return reply.code(err.code ?? 401).send({ error: err.message });
+    }
+    const id = (req.params as { id?: string })?.id ?? "";
+    const rows = await db
+      .select()
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.id, id), eq(schema.sessions.userId, ctx.userId)))
+      .limit(1);
+    const row = rows[0];
+    if (!row) return reply.code(404).send({ error: "no such session" });
+    const name = row.sessionName;
+    const p = tenantPaths(deps.homeRoot, ctx.osUsername);
+    if (name !== "default" && !fs.existsSync(path.join(p.projects, name))) {
+      return reply.code(409).send({ error: "session dir is gone" });
+    }
+
+    const reqId = randomUUID();
+    try {
+      try {
+        fs.rmSync(p.resFile, { force: true });
+      } catch {
+        /* ignore */
+      }
+      writeAsTenant(p, p.reqFile, JSON.stringify({ id: reqId, action: "switch", name }) + "\n");
+    } catch (err) {
+      app.log.error({ err }, "switch request write failed");
+      return reply.code(500).send({ error: "could not write switch request" });
+    }
+
+    const deadline = Date.now() + SWITCH_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      await sleep(POLL_MS);
+      let res: { id?: string; ok?: boolean; error?: string };
+      try {
+        res = JSON.parse(fs.readFileSync(p.resFile, "utf8"));
+      } catch {
+        continue; // not written yet (or torn read — next poll re-reads)
+      }
+      if (res.id !== reqId) continue; // stale result from an earlier request
+      if (!res.ok) {
+        await sendAudit(deps.auditSocket, {
+          userId: ctx.userId,
+          kind: "session.switch.fail",
+          actor: ctx.osUsername,
+          payload: { name, error: res.error ?? "unknown" },
+        });
+        return reply.code(409).send({ error: res.error ?? "switch failed" });
+      }
+      // success → flip states (single active per tenant)
+      await db
+        .update(schema.sessions)
+        .set({ state: "idle" })
+        .where(and(eq(schema.sessions.userId, ctx.userId), eq(schema.sessions.state, "active")));
+      await db.update(schema.sessions).set({ state: "active" }).where(eq(schema.sessions.id, row.id));
+      await sendAudit(deps.auditSocket, {
+        userId: ctx.userId,
+        kind: "session.switch",
+        actor: ctx.osUsername,
+        payload: { name },
+      });
+      return reply.send({ ok: true, name });
+    }
+    return reply.code(504).send({
+      error: "switch not confirmed in 90s (pod down or pre-M5.7 image?)",
+    });
+  });
+}

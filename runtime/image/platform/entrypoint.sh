@@ -59,13 +59,16 @@ if command -v code-server >/dev/null 2>&1; then
   fi
 fi
 
-# Ensure THIS container's workspace is trusted in ~/.claude.json, else Claude Code
+# Ensure a workspace dir is trusted in ~/.claude.json, else Claude Code
 # stops at the per-project trust prompt ("Is this a project you trust?") and hangs
 # the non-interactive pane (no session -> no plugin). Per-project, keyed by path:
 # a seeded .claude.json only trusts the donor's workspace, so a tenant whose path
 # differs (e.g. the m3smoke test tenant) re-prompts. Idempotent: writes only on a
 # real change, so it's a no-op when the path is already trusted (the live cutover).
-CJ="$HOME/.claude.json" WORKDIR="$HOME/work" python3 - <<'PY' 2>/dev/null || true
+# M5.7: factored into a function — every session dir we launch into must be
+# trusted the same way (a new project dir would otherwise hang the pane).
+trust_workdir() {
+  CJ="$HOME/.claude.json" WORKDIR="$1" python3 - <<'PY' 2>/dev/null || true
 import json, os
 p, work = os.environ["CJ"], os.environ["WORKDIR"]
 try:
@@ -86,6 +89,7 @@ if json.dumps(d, sort_keys=True) != before:
     with open(p, "w") as f:
         json.dump(d, f, indent=2)
 PY
+}
 
 # M4.1 — seed shellfirm per-user state. ~/.config IS a mounted volume (claude-pod-run
 # mounts it precisely for this block — the rootfs is --read-only, so any $HOME path the
@@ -125,14 +129,96 @@ else
   CLAUDE_CMD="/usr/bin/claude --channels plugin:telegram@claude-plugins-official --remote-control $REMOTE_CONTROL_NAME"
 fi
 
+# ── M5.7 named sessions/projects (docs/M5.7-sessions-design.md) ──────────────
+# A session = a project dir (~/work = "default", else ~/work/projects/<name>) +
+# its per-cwd claude conversation. Exactly ONE claude runs (telegram singleton);
+# switching respawns the pane in the new dir. Control files live on the mounted
+# ~/.claude volume; cp-api / session-ctl write the request, WE (the supervisor)
+# execute it and write the result — single writer per file, no races.
+RUN_DIR="$HOME/.claude/run"
+mkdir -p "$RUN_DIR"
+SWITCH_REQ="$RUN_DIR/session-switch.json"
+SWITCH_RES="$RUN_DIR/session-switch.result.json"
+ACTIVE_FILE="$RUN_DIR/active-session"
+# a request that survived a pod restart is stale — never execute it blind
+rm -f "$SWITCH_REQ" "$SWITCH_RES"
+
+session_dir() { # name → absolute dir on stdout; empty = invalid name
+  case "$1" in
+    default) echo "$HOME/work" ;;
+    *) printf '%s' "$1" | grep -Eq '^[a-z0-9][a-z0-9-]{0,31}$' \
+         && echo "$HOME/work/projects/$1" ;;
+  esac
+}
+
+resume_flag() { # dir → "--continue" iff a prior conversation exists for this cwd
+  # Claude Code keeps per-project state under ~/.claude/projects/<path-slug>
+  # (slug = path with / and . mapped to -). `claude --continue` with NO prior
+  # conversation exits immediately → dead pane → supervisor restart loop, so
+  # the flag is added only when there is something to continue.
+  local slug
+  slug=$(printf '%s' "$1" | tr '/.' '--')
+  if ls "$HOME/.claude/projects/$slug"/*.jsonl >/dev/null 2>&1; then
+    echo "--continue"
+  fi
+}
+
+launch_claude() { # $1 = dir, $2 = boot|switch
+  local dir="$1" mode="$2" cmd="$CLAUDE_CMD"
+  trust_workdir "$dir"
+  # boot keeps the historical behavior (fresh instance + session-restore seed
+  # below); a switch resumes the target project's own conversation instead.
+  [ "$mode" = "switch" ] && cmd="$cmd $(resume_flag "$dir")"
+  if tmux has-session -t "$SESSION" 2>/dev/null; then
+    tmux respawn-window -k -t "$SESSION" "cd '$dir' && exec $cmd"
+  else
+    tmux -f "$TMUX_CFG" new-session -d -s "$SESSION" -x 200 -y 60 -c "$dir" "exec $cmd"
+  fi
+  # Non-destructively capture the pane (claude's TUI/errors) to a log so launch
+  # failures are diagnosable from the host; re-armed after every respawn.
+  tmux pipe-pane -t "$SESSION" -o "cat >> '$TELEGRAM_STATE_DIR/logs/claude-pane.log'" 2>/dev/null || true
+}
+
+# The supervisor executes a pending switch request (validated, atomic result).
+process_switch_request() {
+  [ -f "$SWITCH_REQ" ] || return 0
+  local req id name dir res
+  req=$(cat "$SWITCH_REQ" 2>/dev/null); rm -f "$SWITCH_REQ"
+  read -r id name <<EOF2
+$(printf '%s' "$req" | python3 -c 'import json,sys
+try: d=json.load(sys.stdin)
+except Exception: d={}
+print(str(d.get("id","")).replace(" ",""), str(d.get("name","")).replace(" ",""))' 2>/dev/null)
+EOF2
+  fail() {
+    res="{\"id\":\"$id\",\"ok\":false,\"error\":\"$1\"}"
+    printf '%s\n' "$res" > "$SWITCH_RES.tmp" && mv "$SWITCH_RES.tmp" "$SWITCH_RES"
+  }
+  [ -n "$id" ] || { fail "malformed request"; return 0; }
+  dir=$(session_dir "$name")
+  [ -n "$dir" ] || { fail "invalid session name"; return 0; }
+  [ -d "$dir" ] || { fail "no such session dir"; return 0; }
+  echo "[sessions] switch → $name ($dir)"
+  launch_claude "$dir" switch
+  echo "$name" > "$ACTIVE_FILE"
+  printf '%s\n' "{\"id\":\"$id\",\"ok\":true,\"name\":\"$name\"}" > "$SWITCH_RES.tmp" \
+    && mv "$SWITCH_RES.tmp" "$SWITCH_RES"
+}
+
+# Boot into the active session (pod restart returns to the project the bot was
+# in), falling back to default if the marker is missing/invalid.
+ACTIVE_NAME=$(cat "$ACTIVE_FILE" 2>/dev/null || true)
+ACTIVE_DIR=$(session_dir "${ACTIVE_NAME:-default}")
+if [ -z "$ACTIVE_DIR" ] || [ ! -d "$ACTIVE_DIR" ]; then
+  ACTIVE_NAME="default"; ACTIVE_DIR="$HOME/work"
+fi
+echo "${ACTIVE_NAME:-default}" > "$ACTIVE_FILE"
+
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 TMUX_CFG="$(mktemp)"; trap 'rm -f "$TMUX_CFG"' EXIT
 echo "set-option -g history-limit 100000" > "$TMUX_CFG"
-tmux -f "$TMUX_CFG" new-session -d -s "$SESSION" -x 200 -y 60 "exec $CLAUDE_CMD"
-# Non-destructively capture the pane (claude's TUI/errors) to a log so launch
-# failures are diagnosable from the host (the pty itself is preserved).
 mkdir -p "$TELEGRAM_STATE_DIR/logs"
-tmux pipe-pane -t "$SESSION" -o "cat >> '$TELEGRAM_STATE_DIR/logs/claude-pane.log'" 2>/dev/null || true
+launch_claude "$ACTIVE_DIR" boot
 
 # Seed prior-session context (same logic as the host launcher; silent restore).
 (
@@ -214,8 +300,15 @@ fi
 
 # Phase 2 — steady state. Exit (→ Restart) if claude OR the channel drops, the
 # latter only after CHAN_FLAP_GRACE of continuous absence to ride out flaps.
+# M5.7: each tick also executes a pending session-switch request. The respawn
+# briefly kills the plugin — resetting `down` gives the new channel the full
+# flap grace instead of whatever was left of it.
 down=0
 while tmux has-session -t "$SESSION" 2>/dev/null; do
+  if [ -f "$SWITCH_REQ" ]; then
+    process_switch_request
+    down=0
+  fi
   if [ "${DISABLE_TELEGRAM_CHANNEL:-0}" != "1" ] && ! channel_alive; then
     down=$((down + 5))
     if [ "$down" -ge "$CHAN_FLAP_GRACE" ]; then

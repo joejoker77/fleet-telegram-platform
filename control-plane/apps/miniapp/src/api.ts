@@ -221,3 +221,28 @@ export function ideTicket(token: string): Promise<IdeTicketResponse> {
   // explicit empty JSON body: fastify 400s an empty body with a json content-type
   return request("/ide/ticket", { method: "POST", body: "{}" }, token);
 }
+
+// ── M5.7 named sessions/projects (mirrors apps/api session-routes.ts) ──
+
+export interface SessionInfo {
+  id: string;
+  name: string;
+  state: string; // active | idle
+  active: boolean;
+  startedAt: string;
+  lastMessageAt: string | null;
+}
+
+export function sessionsList(token: string): Promise<{ active: string; sessions: SessionInfo[] }> {
+  return request("/sessions", {}, token);
+}
+
+export function sessionCreate(token: string, name: string): Promise<{ ok: boolean; session: SessionInfo }> {
+  return request("/sessions", { method: "POST", body: JSON.stringify({ name }) }, token);
+}
+
+/** Synchronous switch: the API waits (≤90s) for the pod supervisor to respawn
+ *  the claude pane in the project dir. The bot's current task IS interrupted. */
+export function sessionSwitch(token: string, id: string): Promise<{ ok: boolean; name: string }> {
+  return request(`/sessions/${id}/switch`, { method: "POST", body: "{}" }, token);
+}

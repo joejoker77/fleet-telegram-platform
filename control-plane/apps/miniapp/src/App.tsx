@@ -10,6 +10,7 @@ import { FileTree } from "./components/FileTree";
 import { FileView } from "./components/FileView";
 import { LiveActivity } from "./components/LiveActivity";
 import { McpBuilder } from "./components/McpBuilder";
+import { SessionsManager } from "./components/SessionsManager";
 import { SubagentBuilder } from "./components/SubagentBuilder";
 
 type State =
@@ -25,7 +26,8 @@ type Screen =
   | { kind: "command" }
   | { kind: "mcp" }
   | { kind: "live" }
-  | { kind: "approvals" };
+  | { kind: "approvals" }
+  | { kind: "sessions" };
 
 export function App() {
   const [state, setState] = useState<State>({ phase: "auth" });
@@ -93,6 +95,9 @@ export function App() {
           <button className="ghost" onClick={() => void openIde()} title="Открыть web-IDE">
             🖥
           </button>
+          <button className="ghost" onClick={() => setScreen({ kind: "sessions" })} title="Сессии/проекты">
+            🗂
+          </button>
           <button className="ghost" onClick={() => setScreen({ kind: "approvals" })} title="Аппрувы">
             🛂
           </button>
@@ -145,6 +150,7 @@ export function App() {
       )}
       {screen.kind === "live" && <LiveActivity token={state.session.token} onClose={toTree} />}
       {screen.kind === "approvals" && <ApprovalsQueue token={state.session.token} onClose={toTree} />}
+      {screen.kind === "sessions" && <SessionsManager token={state.session.token} onClose={toTree} />}
     </div>
   );
 }
