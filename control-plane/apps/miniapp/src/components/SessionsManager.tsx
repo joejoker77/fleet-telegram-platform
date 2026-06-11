@@ -5,9 +5,12 @@
 // returns false (blocking dialogs are suppressed), so OK silently no-ops.
 // Instead: two-tap inline confirm — first tap arms the button, second fires.
 // The switch call is synchronous (≤90s): the pod supervisor confirms via the
-// result file before the API returns.
+// result file before the API returns. "Switched" (pane respawned) is NOT
+// "ready" (the new claude's telegram plugin is polling) — the supervisor
+// reports real readiness via session-state.json and the API surfaces it as
+// `ready`; until then the active row shows 🟡 «запускается…» and we poll.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { sessionCreate, sessionsList, sessionSwitch, type SessionInfo } from "../api";
 
@@ -34,6 +37,25 @@ export function SessionsManager({ token, onClose }: { token: string; onClose: ()
   useEffect(() => {
     void refetch();
   }, [refetch]);
+
+  // While the active session is still starting (ready === false), poll every
+  // 3s until the supervisor reports ready. Bounded: the supervisor's own
+  // readiness watch gives up after ~3 min, so 100 polls (~5 min) is a hard cap
+  // against a dead pod keeping the timer alive forever.
+  const pollCount = useRef(0);
+  const starting = sessions?.some((s) => s.active && s.ready === false) ?? false;
+  useEffect(() => {
+    if (!starting) {
+      pollCount.current = 0;
+      return;
+    }
+    if (pollCount.current >= 100) return;
+    const t = setTimeout(() => {
+      pollCount.current += 1;
+      void refetch();
+    }, 3000);
+    return () => clearTimeout(t);
+  }, [starting, sessions, refetch]);
 
   async function create() {
     const name = newName.trim();
@@ -94,11 +116,11 @@ export function SessionsManager({ token, onClose }: { token: string; onClose: ()
             <li key={s.id} className="live-row">
               <div className="live-line">
                 <span>
-                  {s.active ? "🟢" : "⚪"} <strong>{s.name}</strong>
+                  {s.active ? (s.ready === false ? "🟡" : "🟢") : "⚪"} <strong>{s.name}</strong>
                   {s.name === "default" && <span className="muted"> (~/work)</span>}
                 </span>
                 {s.active ? (
-                  <span className="live-ts">активна</span>
+                  <span className="live-ts">{s.ready === false ? "запускается…" : "активна"}</span>
                 ) : (
                   <button
                     disabled={switching !== null}
@@ -126,6 +148,12 @@ export function SessionsManager({ token, onClose }: { token: string; onClose: ()
       )}
       {switching !== null && (
         <p className="muted">Переключение: супервизор перезапускает Claude в папке проекта (до 90 с)…</p>
+      )}
+      {switching === null && starting && (
+        <p className="muted">
+          Сессия переключена, Claude запускается… Бот начнёт отвечать, когда статус станет
+          «активна».
+        </p>
       )}
       <div className="toolbar">
         <input

@@ -229,11 +229,17 @@ export interface SessionInfo {
   name: string;
   state: string; // active | idle
   active: boolean;
+  /** Supervisor-confirmed readiness: the active session's claude+plugin are
+   *  actually up. false while the fresh pane is still starting. Non-active
+   *  sessions are always true. Missing on a pre-readiness API → treat as true. */
+  ready?: boolean;
   startedAt: string;
   lastMessageAt: string | null;
 }
 
-export function sessionsList(token: string): Promise<{ active: string; sessions: SessionInfo[] }> {
+export function sessionsList(
+  token: string,
+): Promise<{ active: string; activeReady?: boolean; sessions: SessionInfo[] }> {
   return request("/sessions", {}, token);
 }
 

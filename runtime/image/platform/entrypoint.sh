@@ -163,9 +163,65 @@ resume_flag() { # dir → "--continue" iff a prior conversation exists for this 
   fi
 }
 
+# Seed per-project MCP approvals for a session dir. Claude discovers
+# ~/work/.mcp.json from subdirs too, but the approval (enabledMcpjsonServers)
+# is per-project in <dir>/.claude/settings.local.json — without it a FRESH
+# session blocks forever on the interactive "New MCP server found" dialog:
+# the telegram plugin never starts, the bot is mute, and the liveness watchdog
+# restarts the whole pod (2026-06-11 incident; the restore-seed's Enter then
+# answered the dialog by accident). The servers in ~/work/.mcp.json are
+# platform-vetted (M5.5 gate), so a new session dir inherits the same approval.
+seed_mcp_approvals() { # $1 = session dir
+  local dir="$1" src="$HOME/work/.claude/settings.local.json"
+  [ "$dir" = "$HOME/work" ] && return 0
+  [ -f "$src" ] || return 0
+  [ -f "$dir/.claude/settings.local.json" ] && return 0
+  mkdir -p "$dir/.claude" 2>/dev/null || return 0
+  SRC="$src" DST="$dir/.claude/settings.local.json" python3 - <<'PY' 2>/dev/null || true
+import json, os
+try: s = json.load(open(os.environ["SRC"]))
+except Exception: s = {}
+out = {k: s[k] for k in ("enableAllProjectMcpServers", "enabledMcpjsonServers") if k in s}
+if out:
+    with open(os.environ["DST"], "w") as f:
+        json.dump(out, f, indent=2)
+PY
+}
+
+# M5.7 readiness: "switched" (pane respawned) != "ready" (bot actually answers).
+# Ready = the telegram plugin of the NEW claude is polling. The supervisor is
+# the only place that can see pod processes, so it owns the state file; cp-api
+# exposes it and the Mini App shows "запускается…" until ready — no timeouts.
+SESSION_STATE="$RUN_DIR/session-state.json"
+set_session_state() { # $1 = name, $2 = starting|ready
+  printf '{"name":"%s","status":"%s"}\n' "$1" "$2" > "$SESSION_STATE.tmp" \
+    && mv "$SESSION_STATE.tmp" "$SESSION_STATE"
+}
+arm_readiness_watch() { # $1 = name — flips starting→ready when the plugin is up
+  local name="$1"
+  if [ "${DISABLE_TELEGRAM_CHANNEL:-0}" = "1" ]; then
+    set_session_state "$name" ready; return 0
+  fi
+  (
+    # respawn-window -k killed the old plugin synchronously; wait for the NEW one.
+    sleep 2
+    i=0
+    while [ $i -lt 90 ]; do
+      if pgrep -f 'bun server\.ts' >/dev/null 2>&1; then
+        # only publish if this watch is still for the current session
+        [ "$(cat "$ACTIVE_FILE" 2>/dev/null)" = "$name" ] && set_session_state "$name" ready
+        exit 0
+      fi
+      sleep 2; i=$((i + 1))
+    done
+    # never came up — leave "starting"; the liveness watchdog handles recovery
+  ) &
+}
+
 launch_claude() { # $1 = dir, $2 = boot|switch
   local dir="$1" mode="$2" cmd="$CLAUDE_CMD"
   trust_workdir "$dir"
+  seed_mcp_approvals "$dir"
   # boot keeps the historical behavior (fresh instance + session-restore seed
   # below); a switch resumes the target project's own conversation instead.
   [ "$mode" = "switch" ] && cmd="$cmd $(resume_flag "$dir")"
@@ -201,6 +257,8 @@ EOF2
   echo "[sessions] switch → $name ($dir)"
   launch_claude "$dir" switch
   echo "$name" > "$ACTIVE_FILE"
+  set_session_state "$name" starting
+  arm_readiness_watch "$name"
   printf '%s\n' "{\"id\":\"$id\",\"ok\":true,\"name\":\"$name\"}" > "$SWITCH_RES.tmp" \
     && mv "$SWITCH_RES.tmp" "$SWITCH_RES"
 }
@@ -219,9 +277,15 @@ TMUX_CFG="$(mktemp)"; trap 'rm -f "$TMUX_CFG"' EXIT
 echo "set-option -g history-limit 100000" > "$TMUX_CFG"
 mkdir -p "$TELEGRAM_STATE_DIR/logs"
 launch_claude "$ACTIVE_DIR" boot
+set_session_state "${ACTIVE_NAME:-default}" starting
+arm_readiness_watch "${ACTIVE_NAME:-default}"
 
 # Seed prior-session context (same logic as the host launcher; silent restore).
-(
+# DEFAULT session only: the tail below is ~/work's conversation — pasting it
+# into a project session bleeds context across sessions, and its trailing
+# Enter blindly answers whatever TUI dialog is on screen (2026-06-11: it
+# "confirmed" the MCP-approval dialog in a fresh project session).
+[ "${ACTIVE_NAME:-default}" = "default" ] && (
   sleep 15
   LOG_FILE="$TELEGRAM_STATE_DIR/logs/session_current.txt"
   ROT_DIR=$(dirname "$LOG_FILE")

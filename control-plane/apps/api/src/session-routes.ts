@@ -69,6 +69,56 @@ function activeName(p: TenantPaths): string {
   }
 }
 
+// Supervisor-owned readiness: "switched" (pane respawned) != "ready" (the new
+// claude's telegram plugin is actually polling). The supervisor writes
+// session-state.json when the plugin comes up; a missing file (pre-readiness
+// image) degrades to ready=true so the UI never sticks on "запускается…".
+function activeReady(p: TenantPaths, active: string): boolean {
+  try {
+    const s = JSON.parse(fs.readFileSync(path.join(p.runDir, "session-state.json"), "utf8")) as {
+      name?: string;
+      status?: string;
+    };
+    if (s.name !== active) return false; // state lags a fresh switch → not ready yet
+    return s.status === "ready";
+  } catch {
+    return true; // legacy image without the state file
+  }
+}
+
+// Seed per-project MCP approvals into a new session dir. Claude discovers
+// ~/work/.mcp.json from project subdirs, but approval is per-project
+// (<dir>/.claude/settings.local.json) — without it the first launch blocks
+// forever on the interactive "New MCP server found" dialog and the bot is
+// mute (2026-06-11 incident). The servers are platform-vetted (M5.5 gate), so
+// a new session inherits the default session's approvals verbatim.
+function seedMcpApprovals(p: TenantPaths, dir: string): void {
+  const src = path.join(p.home, "work", ".claude", "settings.local.json");
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(fs.readFileSync(src, "utf8")) as Record<string, unknown>;
+  } catch {
+    return; // nothing to inherit
+  }
+  const out: Record<string, unknown> = {};
+  for (const k of ["enableAllProjectMcpServers", "enabledMcpjsonServers"]) {
+    if (k in parsed) out[k] = parsed[k];
+  }
+  if (Object.keys(out).length === 0) return;
+  const dstDir = path.join(dir, ".claude");
+  const dst = path.join(dstDir, "settings.local.json");
+  if (fs.existsSync(dst)) return;
+  fs.mkdirSync(dstDir, { recursive: true });
+  fs.writeFileSync(dst, JSON.stringify(out, null, 2) + "\n", { mode: 0o644 });
+  try {
+    const { uid, gid } = tenantOwner(p);
+    fs.chownSync(dstDir, uid, gid);
+    fs.chownSync(dst, uid, gid);
+  } catch {
+    /* api not root in dev */
+  }
+}
+
 function tenantOwner(p: TenantPaths): { uid: number; gid: number } {
   const st = fs.statSync(p.home);
   return { uid: st.uid, gid: st.gid };
@@ -117,6 +167,7 @@ export function registerSessionRoutes(app: FastifyInstance, deps: SessionDeps): 
     const p = tenantPaths(deps.homeRoot, ctx.osUsername);
     const names = dirSessions(p);
     const active = activeName(p);
+    const ready = activeReady(p, active);
 
     const rows = await db
       .select()
@@ -166,10 +217,11 @@ export function registerSessionRoutes(app: FastifyInstance, deps: SessionDeps): 
         name: r.sessionName,
         state: r.state,
         active: r.sessionName === active,
+        ready: r.sessionName === active ? ready : true,
         startedAt: r.startedAt,
         lastMessageAt: r.lastMessageAt,
       }));
-    return reply.send({ active, sessions });
+    return reply.send({ active, activeReady: ready, sessions });
   });
 
   // POST /sessions { name } — create the project dir (owned by the tenant) + row.
@@ -203,6 +255,7 @@ export function registerSessionRoutes(app: FastifyInstance, deps: SessionDeps): 
       app.log.error({ err }, "session dir create failed");
       return reply.code(500).send({ error: "mkdir failed" });
     }
+    seedMcpApprovals(p, dir);
 
     const existing = await db
       .select()
