@@ -27,6 +27,10 @@ export interface Config {
   // Bot username (no @) for Mini App deep links (t.me/<bot>?startapp=…).
   // Optional: empty → approval notifications go out without the url-button.
   botUsername: string;
+  // Public Mini App URL. When set, approval notifications use a web_app button
+  // (opens the app directly, no BotFather Main-App / client-cache dependency —
+  // the t.me?startapp= deep link proved unreliable on real clients, 2026-06-11).
+  miniappUrl: string;
   jwtSecret: Uint8Array;
   jwtTtlSeconds: number;
   initDataMaxAgeSeconds: number;
@@ -45,6 +49,7 @@ export function loadConfig(): Config {
     auditSocket: process.env.AUDIT_SOCKET ?? "/run/audit/collector.sock",
     botToken: fileOrEnv("TELEGRAM_BOT_TOKEN"),
     botUsername: (process.env.TELEGRAM_BOT_USERNAME ?? "").replace(/^@/, ""),
+    miniappUrl: (process.env.MINIAPP_URL ?? "https://miniapp.ai-assistant.gg").replace(/\/$/, ""),
     jwtSecret: new TextEncoder().encode(fileOrEnv("JWT_SECRET")),
     jwtTtlSeconds: Number(process.env.JWT_TTL_SECONDS ?? 3600),
     initDataMaxAgeSeconds: Number(process.env.INITDATA_MAX_AGE_SECONDS ?? 86400),

@@ -46,6 +46,7 @@ const approvalsDeps = {
   auditSocket: config.auditSocket,
   botToken: config.botToken,
   botUsername: config.botUsername,
+  miniappUrl: config.miniappUrl,
 };
 const mcpGateDeps = {
   homeRoot: config.tenantHomeRoot,

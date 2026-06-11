@@ -20,7 +20,12 @@ export interface ApprovalsDeps {
   jwtSecret: Uint8Array;
   auditSocket: string;
   botToken: string;
-  botUsername: string; // for the t.me/<bot>?startapp=approvals deep link; "" → text-only notify
+  botUsername: string; // fallback t.me/<bot>?startapp=approvals deep link; "" → no fallback button
+  // Mini App URL for the web_app notify button (preferred: opens the app
+  // directly; the startapp deep link silently fails on clients with stale bot
+  // metadata / Main-App config — observed live 2026-06-11). "" → fall back to
+  // the botUsername deep link, then to text-only.
+  miniappUrl: string;
 }
 
 export interface ApprovalRow {
@@ -205,7 +210,15 @@ async function notifyTelegram(deps: ApprovalsDeps, userId: string, title: string
     chat_id: chatId,
     text: `⚠️ Запрос на подтверждение: ${title}\n\nОткрой аппрувы в mini-app, чтобы разрешить или отклонить.`,
   };
-  if (deps.botUsername) {
+  if (deps.miniappUrl) {
+    // web_app button: allowed in private chats, opens the Mini App directly.
+    // ?screen=approvals routes the app (no start_param in this open mode).
+    body.reply_markup = {
+      inline_keyboard: [
+        [{ text: "Открыть аппрувы", web_app: { url: `${deps.miniappUrl}/?screen=approvals` } }],
+      ],
+    };
+  } else if (deps.botUsername) {
     body.reply_markup = {
       inline_keyboard: [
         [{ text: "Открыть аппрувы", url: `https://t.me/${deps.botUsername}?startapp=approvals` }],

@@ -64,11 +64,17 @@ export function dropSession(): void {
 }
 
 /**
- * start_param from a t.me/<bot>?startapp=<value> deep link (e.g. approval
- * notifications link to startapp=approvals). null outside Telegram / no param.
+ * Requested start screen. Two sources, checked in order:
+ *  - ?screen=<value> in the app URL — set by web_app notify buttons (approval
+ *    notifications open <miniapp>/?screen=approvals); survives all open modes.
+ *  - start_param from a t.me/<bot>?startapp=<value> deep link — kept as a
+ *    fallback (unreliable on clients with stale bot metadata, 2026-06-11).
+ * null outside Telegram / no param.
  */
 export function startParam(): string | null {
   try {
+    const fromUrl = new URLSearchParams(window.location.search).get("screen");
+    if (fromUrl) return fromUrl;
     const raw = retrieveRawInitData();
     if (!raw) return null;
     return new URLSearchParams(raw).get("start_param");
