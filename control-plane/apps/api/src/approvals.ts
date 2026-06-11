@@ -213,9 +213,12 @@ async function notifyTelegram(deps: ApprovalsDeps, userId: string, title: string
   if (deps.miniappUrl) {
     // web_app button: allowed in private chats, opens the Mini App directly.
     // ?screen=approvals routes the app (no start_param in this open mode).
+    // v=… busts the webview's heuristic cache of index.html (a stale cached
+    // copy kept serving an old bundle, 2026-06-11) — belt to the nginx
+    // Cache-Control:no-cache suspenders (deploy/nginx-miniapp.conf).
     body.reply_markup = {
       inline_keyboard: [
-        [{ text: "Открыть аппрувы", web_app: { url: `${deps.miniappUrl}/?screen=approvals` } }],
+        [{ text: "Открыть аппрувы", web_app: { url: `${deps.miniappUrl}/?screen=approvals&v=2` } }],
       ],
     };
   } else if (deps.botUsername) {
