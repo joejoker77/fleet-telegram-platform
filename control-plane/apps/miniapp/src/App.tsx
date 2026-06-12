@@ -13,6 +13,7 @@ import { LiveActivity } from "./components/LiveActivity";
 import { McpBuilder } from "./components/McpBuilder";
 import { SessionsManager } from "./components/SessionsManager";
 import { SubagentBuilder } from "./components/SubagentBuilder";
+import { WorkflowBuilder } from "./components/WorkflowBuilder";
 
 type State =
   | { phase: "auth" }
@@ -25,6 +26,7 @@ type Screen =
   | { kind: "new" }
   | { kind: "subagent" }
   | { kind: "command" }
+  | { kind: "workflow" }
   | { kind: "mcp" }
   | { kind: "live" }
   | { kind: "approvals" }
@@ -179,6 +181,9 @@ export function App() {
           <button className="primary" onClick={() => setScreen({ kind: "command" })}>
             ⚡ Новая slash-команда
           </button>
+          <button className="primary" onClick={() => setScreen({ kind: "workflow" })}>
+            {t("wf.menuButton")}
+          </button>
           <button className="primary" onClick={() => setScreen({ kind: "mcp" })}>
             🔌 Подключить MCP
           </button>
@@ -191,6 +196,9 @@ export function App() {
       )}
       {screen.kind === "command" && (
         <CommandBuilder token={state.session.token} existingPaths={existingPaths} onClose={toTree} onSaved={savedToTree} />
+      )}
+      {screen.kind === "workflow" && (
+        <WorkflowBuilder token={state.session.token} existingPaths={existingPaths} onClose={toTree} onSaved={savedToTree} />
       )}
       {screen.kind === "mcp" && (
         <McpBuilder

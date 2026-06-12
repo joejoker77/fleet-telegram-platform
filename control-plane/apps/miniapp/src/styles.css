@@ -333,3 +333,32 @@ button.ghost {
   padding: 6px 8px;
   white-space: nowrap;
 }
+
+/* M5.9 workflow builder steps */
+.wf-step {
+  border: 1px solid var(--surface);
+  border-radius: 8px;
+  padding: 8px;
+  margin-bottom: 8px;
+}
+
+.wf-step-head {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.wf-step-head select {
+  max-width: 40%;
+}
+
+.wf-step-actions {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.wf-step textarea {
+  width: 100%;
+  box-sizing: border-box;
+}
