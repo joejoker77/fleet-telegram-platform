@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# composio-connect — M6.2 replacement for the prototype helper of the same name.
+# Creates a Composio hosted-auth Connect Link for a toolkit and prints the
+# redirect URL the bot sends to the user.
+#
+#   composio-connect --toolkit gmail --user-id <telegram_chat_id>
+#
+# KEY-LESS BY DESIGN: this runs inside the pod; every HTTPS call goes through
+# the OneCLI egress proxy, which injects the platform `x-api-key` for
+# *.composio.dev (vault secrets staged by runtime/install/m6.2-composio-vault.sh).
+# The raw key never exists in the pod.
+#
+# API notes (docs.composio.dev, checked 2026-06-12):
+#   * POST /api/v3.1/connected_accounts/link — hosted auth (Connect Link).
+#     The legacy initiate() endpoint is being retired for Composio-managed
+#     OAuth (400 after 2026-07-03) — do NOT switch back to it.
+#   * Composio appends status=success|failed and connected_account_id to our
+#     callback_url; we pre-embed uid + toolkit so cp-api can notify the chat.
+set -euo pipefail
+
+BASE="https://backend.composio.dev"
+CB_BASE="${COMPOSIO_CALLBACK_BASE:-https://miniapp.ai-assistant.gg/api}"
+TOOLKIT="" UID_ARG=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --toolkit) TOOLKIT="${2:-}"; shift 2;;
+    --user-id) UID_ARG="${2:-}"; shift 2;;
+    --callback-base) CB_BASE="${2:-}"; shift 2;;
+    -h|--help) sed -n '2,16p' "$0"; exit 0;;
+    *) echo "unknown arg: $1" >&2; exit 2;;
+  esac
+done
+case "$TOOLKIT" in (*[!a-zA-Z0-9_-]*|"") echo "ERROR: --toolkit must be a slug (e.g. gmail)" >&2; exit 2;; esac
+case "$UID_ARG" in (*[!0-9]*|"") echo "ERROR: --user-id must be the numeric telegram chat_id" >&2; exit 2;; esac
+TOOLKIT="$(echo "$TOOLKIT" | tr 'A-Z' 'a-z')"
+
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+
+# 1) resolve the toolkit's auth_config (bootstrapped once per fleet)
+HTTP="$(curl -sS -o "$TMP/ac.json" -w '%{http_code}' \
+  "$BASE/api/v3/auth_configs?toolkit_slug=$TOOLKIT&limit=10")"
+[ "$HTTP" = "200" ] || { echo "ERROR: auth_configs HTTP $HTTP: $(cat "$TMP/ac.json")" >&2; exit 1; }
+AC_ID="$(jq -r '(.items // [])[0].id // empty' "$TMP/ac.json")"
+if [ -z "$AC_ID" ]; then
+  echo "ERROR: no auth_config for toolkit '$TOOLKIT' — bootstrap it once (COMPOSIO_MANAGE_CONNECTIONS or dashboard), then retry" >&2
+  exit 1
+fi
+
+# 2) create the Connect Link bound to this user
+CB_URL="$CB_BASE/integrations/composio/callback?uid=$UID_ARG&toolkit=$TOOLKIT"
+jq -n --arg ac "$AC_ID" --arg uid "$UID_ARG" --arg cb "$CB_URL" \
+  '{auth_config_id:$ac, user_id:$uid, callback_url:$cb}' > "$TMP/req.json"
+HTTP="$(curl -sS -o "$TMP/link.json" -w '%{http_code}' \
+  -X POST "$BASE/api/v3.1/connected_accounts/link" \
+  -H 'content-type: application/json' --data-binary @"$TMP/req.json")"
+case "$HTTP" in (2*) :;; (*) echo "ERROR: connected_accounts/link HTTP $HTTP: $(cat "$TMP/link.json")" >&2; exit 1;; esac
+
+REDIRECT="$(jq -r '.redirect_url // .redirectUrl // empty' "$TMP/link.json")"
+[ -n "$REDIRECT" ] || { echo "ERROR: no redirect_url in response: $(cat "$TMP/link.json")" >&2; exit 1; }
+echo "$REDIRECT"

@@ -62,8 +62,11 @@ RUN chmod 0755 /usr/local/share/claude-guard/block-nested-claude.py
 # managed-settings.json locked layer was removed 2026-06-09 (see the tombstone
 # README in platform/). Security lives in the tenant ~/.claude/settings.json.
 COPY platform/ /opt/platform/
-RUN chmod 0755 /opt/platform/entrypoint.sh /opt/platform/session-ctl \
- && ln -sf /opt/platform/session-ctl /usr/local/bin/session-ctl
+RUN chmod 0755 /opt/platform/entrypoint.sh /opt/platform/session-ctl /opt/platform/bin/* \
+ && ln -sf /opt/platform/session-ctl /usr/local/bin/session-ctl \
+ # M6.2: key-less Composio helpers (x-api-key injected by the OneCLI proxy)
+ && ln -sf /opt/platform/bin/composio-connect /usr/local/bin/composio-connect \
+ && ln -sf /opt/platform/bin/composio-session /usr/local/bin/composio-session
 
 # Sanity: fail the build early if a core tool is missing.
 RUN claude --version && bun --version && code-server --version && node --version \

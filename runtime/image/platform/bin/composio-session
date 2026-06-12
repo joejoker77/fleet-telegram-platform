@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# composio-session — M6.2: create a Composio tool-router session for a user and
+# print its MCP URL (the value to put in ~/work/.mcp.json as the `composio`
+# http server). Replaces the prototype's static stanza + dead stdio bridge.
+#
+#   composio-session --user-id <telegram_chat_id> [--toolkits gmail,slack]
+#
+# KEY-LESS: runs in the pod; the OneCLI egress proxy injects the platform
+# x-api-key for *.composio.dev (see m6.2-composio-vault.sh). The MCP URL it
+# prints may live on backend.composio.dev or mcp.composio.dev — both hosts are
+# covered by the vault bindings, so the MCP connection is key-less too.
+#
+# API (docs.composio.dev, checked 2026-06-12):
+#   POST /api/v3.1/tool_router/session {user_id, manage_connections:{enable}}
+#   → {session_id, mcp:{type:"http", url}}
+set -euo pipefail
+
+BASE="https://backend.composio.dev"
+UID_ARG="" TOOLKITS=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --user-id) UID_ARG="${2:-}"; shift 2;;
+    --toolkits) TOOLKITS="${2:-}"; shift 2;;
+    -h|--help) sed -n '2,16p' "$0"; exit 0;;
+    *) echo "unknown arg: $1" >&2; exit 2;;
+  esac
+done
+case "$UID_ARG" in (*[!0-9]*|"") echo "ERROR: --user-id must be the numeric telegram chat_id" >&2; exit 2;; esac
+case "$TOOLKITS" in (*[!a-zA-Z0-9_,-]*) echo "ERROR: --toolkits must be comma-separated slugs" >&2; exit 2;; esac
+
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+
+# manage_connections enabled → the session exposes the connection meta-tools
+# (COMPOSIO_MANAGE_CONNECTIONS etc.) the bot's playbooks already rely on.
+if [ -n "$TOOLKITS" ]; then
+  jq -n --arg uid "$UID_ARG" --arg tk "$TOOLKITS" \
+    '{user_id:$uid, toolkits:($tk|split(",")), manage_connections:{enable:true}}' > "$TMP/req.json"
+else
+  jq -n --arg uid "$UID_ARG" \
+    '{user_id:$uid, manage_connections:{enable:true}}' > "$TMP/req.json"
+fi
+
+HTTP="$(curl -sS -o "$TMP/sess.json" -w '%{http_code}' \
+  -X POST "$BASE/api/v3.1/tool_router/session" \
+  -H 'content-type: application/json' --data-binary @"$TMP/req.json")"
+case "$HTTP" in (2*) :;; (*) echo "ERROR: tool_router/session HTTP $HTTP: $(cat "$TMP/sess.json")" >&2; exit 1;; esac
+
+URL="$(jq -r '.mcp.url // empty' "$TMP/sess.json")"
+SID="$(jq -r '.session_id // empty' "$TMP/sess.json")"
+[ -n "$URL" ] || { echo "ERROR: no mcp.url in response: $(cat "$TMP/sess.json")" >&2; exit 1; }
+echo "session_id=$SID" >&2
+echo "$URL"

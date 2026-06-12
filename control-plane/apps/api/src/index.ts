@@ -15,6 +15,7 @@ import { registerApprovalRoutes } from "./approval-routes.js";
 import { registerMcpRoutes } from "./mcp-routes.js";
 import { registerIdeRoutes } from "./ide-routes.js";
 import { registerSessionRoutes } from "./session-routes.js";
+import { registerIntegrationRoutes } from "./integration-routes.js";
 import {
   applyMcpConnect,
   deleteStagedSecret,
@@ -121,6 +122,12 @@ registerSessionRoutes(app, {
   jwtSecret: config.jwtSecret,
   auditSocket: config.auditSocket,
   homeRoot: config.tenantHomeRoot,
+});
+
+// M6.2 Composio integrations: public OAuth-callback landing + notify + audit.
+registerIntegrationRoutes(app, {
+  auditSocket: config.auditSocket,
+  botToken: config.botToken,
 });
 
 // POST /auth/session — verify Telegram initData, resolve the tenant, issue a JWT.
