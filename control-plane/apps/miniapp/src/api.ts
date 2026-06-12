@@ -17,11 +17,24 @@ export interface FsEntry {
   path: string;
   type: "file" | "dir";
   size: number;
+  /** Present in scoped (M5.10) responses; legacy recursive dump omits it. */
+  name?: string;
 }
 
 export interface FsTreeResponse {
   root: string; // ".claude"
   entries: FsEntry[];
+}
+
+// ── M5.10 workspace scopes (mirrors apps/api fs-routes.ts) ──
+export type FsScope = "project" | "artifacts" | "home";
+
+export interface FsScopedTreeResponse {
+  scope: FsScope;
+  root: string; // display label: "~/work" | ".claude" | "~"
+  dir: string; // the listed dir, relative to the scope root ("" = root)
+  entries: FsEntry[];
+  hidden: number; // junk entries suppressed at this level (?all=1 reveals)
 }
 
 export interface FsFileResponse {
@@ -40,6 +53,8 @@ export class ApiError extends Error {
   constructor(
     public readonly status: number,
     message: string,
+    /** Stable machine code (M5.10+) — the i18n layer translates by it. */
+    public readonly code?: string,
   ) {
     super(message);
   }
@@ -87,8 +102,9 @@ async function request<T>(path: string, init: RequestInit = {}, token?: string):
   }
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const msg = typeof (body as { error?: string }).error === "string" ? (body as { error: string }).error : res.statusText;
-    throw new ApiError(res.status, msg);
+    const b = body as { error?: string; code?: string };
+    const msg = typeof b.error === "string" ? b.error : res.statusText;
+    throw new ApiError(res.status, msg, typeof b.code === "string" ? b.code : undefined);
   }
   return body as T;
 }
@@ -101,16 +117,36 @@ export function me(token: string): Promise<MeResponse> {
   return request("/me", {}, token);
 }
 
+/** Legacy recursive ~/.claude dump — kept for the builders' existingPaths. */
 export function fsTree(token: string): Promise<FsTreeResponse> {
   return request("/fs/tree", {}, token);
 }
 
-export function fsFile(token: string, path: string): Promise<FsFileResponse> {
-  return request(`/fs/file?path=${encodeURIComponent(path)}`, {}, token);
+/** M5.10 lazy listing: ONE directory level per call. */
+export function fsTreeScoped(
+  token: string,
+  scope: FsScope,
+  dir = "",
+  all = false,
+): Promise<FsScopedTreeResponse> {
+  const q = new URLSearchParams({ scope });
+  if (dir) q.set("dir", dir);
+  if (all) q.set("all", "1");
+  return request(`/fs/tree?${q.toString()}`, {}, token);
 }
 
-export function fsPut(token: string, path: string, content: string): Promise<FsPutResponse> {
-  return request("/fs/file", { method: "PUT", body: JSON.stringify({ path, content }) }, token);
+export function fsFile(token: string, path: string, scope?: FsScope): Promise<FsFileResponse> {
+  const q = new URLSearchParams({ path });
+  if (scope) q.set("scope", scope);
+  return request(`/fs/file?${q.toString()}`, {}, token);
+}
+
+export function fsPut(token: string, path: string, content: string, scope?: FsScope): Promise<FsPutResponse> {
+  return request(
+    "/fs/file",
+    { method: "PUT", body: JSON.stringify({ path, content, ...(scope ? { scope } : {}) }) },
+    token,
+  );
 }
 
 /** One audit record as streamed by ws /live (mirrors @fleet/shared AuditRecord). */

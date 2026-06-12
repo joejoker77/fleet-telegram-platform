@@ -319,3 +319,17 @@ button.ghost {
 .success {
   padding: 12px;
 }
+
+/* M5.10 workspace scope switcher */
+.scope-bar {
+  display: flex;
+  gap: 6px;
+  padding: 8px 8px 4px;
+  align-items: center;
+}
+
+.scope-bar button {
+  font-size: 13px;
+  padding: 6px 8px;
+  white-space: nowrap;
+}

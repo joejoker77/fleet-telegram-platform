@@ -1,11 +1,24 @@
 import { useEffect, useState } from "react";
 
-import { ApiError, fsFile, fsPut } from "../api";
+import { ApiError, fsFile, fsPut, type FsScope } from "../api";
 import { diffLines, hasChanges } from "../diff";
 
 type Mode = "view" | "edit" | "diff";
 
-export function FileView({ token, path, onClose }: { token: string; path: string; onClose: () => void }) {
+// Display prefix per scope (matches the server's root labels).
+const SCOPE_PREFIX: Record<FsScope, string> = { project: "📁", artifacts: ".claude", home: "~" };
+
+export function FileView({
+  token,
+  path,
+  scope = "artifacts",
+  onClose,
+}: {
+  token: string;
+  path: string;
+  scope?: FsScope;
+  onClose: () => void;
+}) {
   const [original, setOriginal] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [mode, setMode] = useState<Mode>("view");
@@ -18,13 +31,13 @@ export function FileView({ token, path, onClose }: { token: string; path: string
     setError(null);
     setAdvisory(null);
     setMode("view");
-    fsFile(token, path)
+    fsFile(token, path, scope)
       .then((r) => {
         setOriginal(r.content);
         setDraft(r.content);
       })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
-  }, [token, path]);
+  }, [token, path, scope]);
 
   const dirty = original !== null && draft !== original;
 
@@ -32,7 +45,7 @@ export function FileView({ token, path, onClose }: { token: string; path: string
     setBusy(true);
     setError(null);
     try {
-      const res = await fsPut(token, path, draft);
+      const res = await fsPut(token, path, draft, scope);
       setOriginal(draft);
       setMode("view");
       // Scanner advisory comes back non-blocking — show it inline (M5 design:
@@ -49,7 +62,7 @@ export function FileView({ token, path, onClose }: { token: string; path: string
   if (error && original === null) {
     return (
       <div className="fileview">
-        <Header path={path} onClose={onClose} />
+        <Header path={path} scope={scope} onClose={onClose} />
         <p className="error">{error}</p>
       </div>
     );
@@ -57,7 +70,7 @@ export function FileView({ token, path, onClose }: { token: string; path: string
   if (original === null) {
     return (
       <div className="fileview">
-        <Header path={path} onClose={onClose} />
+        <Header path={path} scope={scope} onClose={onClose} />
         <p className="muted">Загрузка…</p>
       </div>
     );
@@ -67,7 +80,7 @@ export function FileView({ token, path, onClose }: { token: string; path: string
 
   return (
     <div className="fileview">
-      <Header path={path} onClose={onClose} />
+      <Header path={path} scope={scope} onClose={onClose} />
       <div className="toolbar">
         <button disabled={mode === "view"} onClick={() => setMode("view")}>
           Просмотр
@@ -111,11 +124,13 @@ export function FileView({ token, path, onClose }: { token: string; path: string
   );
 }
 
-function Header({ path, onClose }: { path: string; onClose: () => void }) {
+function Header({ path, scope, onClose }: { path: string; scope: FsScope; onClose: () => void }) {
   return (
     <div className="fileview-header">
       <button onClick={onClose}>← Дерево</button>
-      <code className="path">.claude/{path}</code>
+      <code className="path">
+        {SCOPE_PREFIX[scope]}/{path}
+      </code>
     </div>
   );
 }

@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 
 import { openLink } from "@telegram-apps/sdk";
 
-import { fsTree, ideTicket, me, setAuthRefresher, setLiveToken, type FsEntry, type MeResponse } from "./api";
+import { fsTree, ideTicket, me, setAuthRefresher, setLiveToken, type FsEntry, type FsScope, type MeResponse } from "./api";
+import { t, type I18nKey } from "./i18n";
 import { dropSession, ensureSession, refreshSession, startParam, type Session } from "./auth";
 import { ApprovalsQueue } from "./components/ApprovalsQueue";
 import { CommandBuilder } from "./components/CommandBuilder";
@@ -20,7 +21,7 @@ type State =
 
 type Screen =
   | { kind: "tree" }
-  | { kind: "file"; path: string }
+  | { kind: "file"; path: string; scope: FsScope }
   | { kind: "new" }
   | { kind: "subagent" }
   | { kind: "command" }
@@ -29,12 +30,24 @@ type Screen =
   | { kind: "approvals" }
   | { kind: "sessions" };
 
+const SCOPES: FsScope[] = ["project", "artifacts", "home"];
+const SCOPE_LABEL: Record<FsScope, I18nKey> = {
+  project: "tree.scope.project",
+  artifacts: "tree.scope.artifacts",
+  home: "tree.scope.home",
+};
+
 export function App() {
   const [state, setState] = useState<State>({ phase: "auth" });
   // Deep link: approval notifications open the app with startapp=approvals.
   const [screen, setScreen] = useState<Screen>(() =>
     startParam() === "approvals" ? { kind: "approvals" } : { kind: "tree" },
   );
+  // M5.10 workspace scopes — every launch starts on 📁 Проект (the clean
+  // working dir of the active session), by design.
+  const [scope, setScope] = useState<FsScope>("project");
+  const [showAll, setShowAll] = useState(false);
+  const [treeEpoch, setTreeEpoch] = useState(0); // bump = remount the lazy tree
 
   async function boot() {
     setState({ phase: "auth" });
@@ -99,7 +112,7 @@ export function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <strong>.claude/ — {state.profile.osUsername}</strong>
+        <strong>{state.profile.osUsername}</strong>
         <span>
           <button className="ghost" onClick={() => void openIde()} title="Открыть web-IDE">
             🖥
@@ -120,6 +133,7 @@ export function App() {
             className="ghost"
             onClick={() => {
               toTree();
+              setTreeEpoch((n) => n + 1);
               void boot();
             }}
           >
@@ -127,8 +141,36 @@ export function App() {
           </button>
         </span>
       </header>
-      {screen.kind === "tree" && <FileTree entries={state.entries} onOpen={(path) => setScreen({ kind: "file", path })} />}
-      {screen.kind === "file" && <FileView token={state.session.token} path={screen.path} onClose={toTree} />}
+      {screen.kind === "tree" && (
+        <>
+          <div className="scope-bar">
+            {SCOPES.map((s) => (
+              <button key={s} className={scope === s ? "primary" : ""} onClick={() => setScope(s)}>
+                {t(SCOPE_LABEL[s])}
+              </button>
+            ))}
+            {scope !== "artifacts" && (
+              <button
+                className={showAll ? "primary" : "ghost"}
+                title={t("tree.showHidden")}
+                onClick={() => setShowAll(!showAll)}
+              >
+                👁
+              </button>
+            )}
+          </div>
+          <FileTree
+            key={`${scope}:${showAll}:${treeEpoch}`}
+            token={state.session.token}
+            scope={scope}
+            showAll={showAll}
+            onOpen={(path) => setScreen({ kind: "file", path, scope })}
+          />
+        </>
+      )}
+      {screen.kind === "file" && (
+        <FileView token={state.session.token} path={screen.path} scope={screen.scope} onClose={toTree} />
+      )}
       {screen.kind === "new" && (
         <div className="centered">
           <button className="primary" onClick={() => setScreen({ kind: "subagent" })}>
