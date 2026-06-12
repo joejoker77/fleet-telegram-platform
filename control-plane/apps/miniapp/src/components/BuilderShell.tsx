@@ -39,7 +39,10 @@ export function BuilderShell({
     setError(null);
     try {
       const res = await fsPut(token, compiled.path, compiled.content);
-      setAdvisory(res.advisory ? JSON.stringify(res.advisory, null, 2) : null);
+      // builtinScan returns an array; an empty one means "no findings" — don't
+      // render the ⚠️ block for it (truthy-[] bug, msg 2999 #1).
+      const adv = Array.isArray(res.advisory) && res.advisory.length > 0 ? res.advisory : null;
+      setAdvisory(adv ? JSON.stringify(adv, null, 2) : null);
       setSaved(true);
     } catch (e) {
       if (e instanceof ApiError) setError(`Отклонено (${e.status}): ${e.message}`);

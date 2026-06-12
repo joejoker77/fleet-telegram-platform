@@ -60,6 +60,31 @@ function publishLive(record: AuditRecord): void {
   redisPub.publish(`live:${record.userId}`, JSON.stringify(record)).catch(() => {});
 }
 
+// actor (os_username) → users.id. Pod-side hooks (usage.turn from the Stop
+// hook, anything else baked into the image) only know their os user, so events
+// arrive with userId=null — which made publishLive drop ALL pod activity and
+// left LiveActivity showing nothing but live.hello (msg 2999 bug). Resolve the
+// tenant up front so the record is attributed in the WORM file, audit_index
+// AND the live channel. Positive-only cache: a tenant created later must not
+// be masked by a stale negative.
+const actorIds = new Map<string, string>();
+async function resolveUserId(actor: string): Promise<string | null> {
+  const hit = actorIds.get(actor);
+  if (hit) return hit;
+  try {
+    const u = await getDb()
+      .select({ id: schema.users.id })
+      .from(schema.users)
+      .where(eq(schema.users.osUsername, actor))
+      .limit(1);
+    const id = u[0]?.id ?? null;
+    if (id) actorIds.set(actor, id);
+    return id;
+  } catch {
+    return null; // db hiccup → the record stays unattributed (as before)
+  }
+}
+
 function currentFile(): string {
   // One file per UTC day. ts is supplied per-record; the file is chosen at
   // write time so a long-running collector rolls over at midnight.
@@ -99,7 +124,7 @@ async function commit(raw: unknown): Promise<AuditRecord> {
   const ts = new Date().toISOString();
   const core = {
     ts,
-    userId: event.userId,
+    userId: event.userId ?? (await resolveUserId(event.actor)),
     kind: event.kind,
     actor: event.actor,
     payload: event.payload,
@@ -114,7 +139,7 @@ async function commit(raw: unknown): Promise<AuditRecord> {
 
   try {
     await getDb().insert(schema.auditIndex).values({
-      userId: event.userId,
+      userId: record.userId,
       kind: event.kind,
       ref: hash,
     });
@@ -125,23 +150,13 @@ async function commit(raw: unknown): Promise<AuditRecord> {
   publishLive(record);
 
   // Usage metering: a usage.turn event also lands in usage_records (tokens only;
-  // flat subscription has no $). Resolve the tenant by actor (os_username) when
-  // the hook didn't supply a user_id.
+  // flat subscription has no $). The tenant was already resolved by actor above.
   if (event.kind === USAGE_TURN_KIND) {
     try {
       const up = usageTurnPayload.parse(event.payload);
-      let userId = event.userId;
-      if (!userId) {
-        const u = await getDb()
-          .select({ id: schema.users.id })
-          .from(schema.users)
-          .where(eq(schema.users.osUsername, event.actor))
-          .limit(1);
-        userId = u[0]?.id ?? null;
-      }
-      if (userId) {
+      if (record.userId) {
         await getDb().insert(schema.usageRecords).values({
-          userId,
+          userId: record.userId,
           window: ts.slice(0, 10),
           tokens: up.inputTokens + up.outputTokens,
           model: up.model,

@@ -50,7 +50,9 @@ export function FileView({
       setMode("view");
       // Scanner advisory comes back non-blocking — show it inline (M5 design:
       // verdict visible before/at save; hard rejects arrive as HTTP errors).
-      setAdvisory(res.advisory ? JSON.stringify(res.advisory, null, 2) : null);
+      // Empty array = no findings → no block (truthy-[] bug, msg 2999 #1).
+      const adv = Array.isArray(res.advisory) && res.advisory.length > 0 ? res.advisory : null;
+      setAdvisory(adv ? JSON.stringify(adv, null, 2) : null);
     } catch (e) {
       if (e instanceof ApiError) setError(`Сохранение отклонено (${e.status}): ${e.message}`);
       else setError(e instanceof Error ? e.message : String(e));

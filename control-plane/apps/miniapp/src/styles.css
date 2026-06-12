@@ -18,6 +18,9 @@ body {
   background: var(--bg);
   color: var(--fg);
   font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  /* No page-level horizontal scroll, ever (msg 2999 #2): wide content blocks
+     (pre/code) scroll internally via their own overflow-x. */
+  overflow-x: hidden;
 }
 
 .app {
@@ -34,6 +37,18 @@ body {
   background: var(--surface);
   position: sticky;
   top: 0;
+}
+
+/* Username may not push the action buttons off-screen on narrow phones. */
+.app-header strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-header .ghost {
+  padding: 8px 6px;
 }
 
 .centered {
@@ -302,6 +317,7 @@ button.ghost {
 .live-payload {
   margin: 6px 0 0;
   white-space: pre-wrap;
+  overflow-wrap: anywhere; /* hashes/paths have no spaces — force-break them */
 }
 
 /* approvals */
@@ -323,6 +339,7 @@ button.ghost {
 /* M5.10 workspace scope switcher */
 .scope-bar {
   display: flex;
+  flex-wrap: wrap; /* 3 scopes + 👁 don't fit a narrow phone in one row */
   gap: 6px;
   padding: 8px 8px 4px;
   align-items: center;
@@ -344,13 +361,18 @@ button.ghost {
 
 .wf-step-head {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   align-items: center;
   margin-bottom: 6px;
 }
 
+/* Selects have an intrinsic min-width (longest option) that overflowed the
+   row — let them shrink and wrap instead. */
 .wf-step-head select {
-  max-width: 40%;
+  flex: 1 1 110px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .wf-step-actions {
