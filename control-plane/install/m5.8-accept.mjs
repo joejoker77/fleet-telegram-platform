@@ -65,7 +65,8 @@ const ckptCreate = async (id, label) =>
 const ckptRewind = async (id, cid) =>
   j(await fetch(`${api}/sessions/${id}/checkpoints/${cid}/rewind`, { method: "POST", headers: H, body: "{}" }));
 const ckptDelete = async (id, cid) =>
-  j(await fetch(`${api}/sessions/${id}/checkpoints/${cid}`, { method: "DELETE", headers: H }));
+  // no content-type on a bodyless DELETE: fastify 400s "body cannot be empty"
+  j(await fetch(`${api}/sessions/${id}/checkpoints/${cid}`, { method: "DELETE", headers: { authorization: H.authorization } }));
 
 console.log("PHASE A — list / create / delete checkpoint (no pane respawn)");
 
