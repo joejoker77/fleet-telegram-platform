@@ -160,6 +160,12 @@ async function commit(raw: unknown): Promise<AuditRecord> {
           window: ts.slice(0, 10),
           tokens: up.inputTokens + up.outputTokens,
           model: up.model,
+          // M5.13: split counters for the UsageDashboard (cache dominates the
+          // real volume and must not be folded into in+out).
+          inputTokens: up.inputTokens,
+          outputTokens: up.outputTokens,
+          cacheReadTokens: up.cacheReadTokens,
+          cacheCreationTokens: up.cacheCreationTokens,
         });
       } else {
         log.warn({ actor: event.actor }, "usage.turn: no tenant matched actor; usage_records skipped");

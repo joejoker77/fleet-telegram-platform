@@ -378,3 +378,25 @@ export function checkpointDelete(
 ): Promise<{ ok: boolean; checkpoint: string }> {
   return request(`/sessions/${sessionId}/checkpoints/${checkpointId}`, { method: "DELETE" }, token);
 }
+
+// ── M5.13 UsageDashboard ──
+
+export interface UsageDay {
+  date: string; // UTC YYYY-MM-DD
+  in: number;
+  out: number;
+  cacheRead: number;
+  cacheWrite: number;
+  legacy: number; // rows older than migration 0002: in+out total without split
+  turns: number;
+}
+
+export interface UsageSummary {
+  days: UsageDay[];
+  byModel: Record<string, { tokens: number; turns: number }>;
+  last5h: { in: number; out: number; cacheRead: number; cacheWrite: number; turns: number };
+}
+
+export function usageSummary(token: string, days = 30): Promise<UsageSummary> {
+  return request(`/usage/summary?days=${days}`, {}, token);
+}

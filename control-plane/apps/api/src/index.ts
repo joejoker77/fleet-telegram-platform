@@ -2,7 +2,7 @@
 // auth → POST /auth/session, GET /me. Endpoints from later milestones return 501.
 import Fastify from "fastify";
 import { Redis } from "ioredis";
-import { eq } from "drizzle-orm";
+import { and, eq, gte } from "drizzle-orm";
 import { authSessionRequest, type MeResponse } from "@fleet/shared";
 import { getDb, getPool, schema } from "@fleet/db";
 import { loadConfig } from "./config.js";
@@ -232,6 +232,91 @@ app.get("/usage", async (req, reply) => {
     if (r.window) byWindow[r.window] = (byWindow[r.window] ?? 0) + t;
   }
   return reply.send({ records: rows.length, totalTokens, byModel, byWindow });
+});
+
+// GET /usage/summary?days=30 — M5.13 UsageDashboard. Daily series with split
+// counters (in/out/cache; cache dominates real volume so it is never folded
+// into in+out), per-model totals and the last-5h window (the Max-subscription
+// fair-use window). Rows written before migration 0002 have no split — their
+// in+out total is surfaced per-day as `legacy`. Dates are UTC. Tokens only:
+// the subscription is flat-rate, there is no $ to show.
+app.get("/usage/summary", async (req, reply) => {
+  const auth = req.headers.authorization ?? "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  if (!token) return reply.code(401).send({ error: "missing bearer token" });
+  let sub: string;
+  try {
+    ({ sub } = await verifySession(redis, config.jwtSecret, token));
+  } catch {
+    return reply.code(401).send({ error: "invalid or expired session" });
+  }
+
+  const q = (req.query ?? {}) as { days?: string };
+  const days = Math.min(90, Math.max(1, Number(q.days) || 30));
+  const cutoff = new Date(Date.now() - days * 24 * 3600 * 1000);
+  const fiveHoursAgo = new Date(Date.now() - 5 * 3600 * 1000);
+
+  const rows = await db
+    .select({
+      ts: schema.usageRecords.ts,
+      window: schema.usageRecords.window,
+      tokens: schema.usageRecords.tokens,
+      model: schema.usageRecords.model,
+      inputTokens: schema.usageRecords.inputTokens,
+      outputTokens: schema.usageRecords.outputTokens,
+      cacheReadTokens: schema.usageRecords.cacheReadTokens,
+      cacheCreationTokens: schema.usageRecords.cacheCreationTokens,
+    })
+    .from(schema.usageRecords)
+    .where(and(eq(schema.usageRecords.userId, sub), gte(schema.usageRecords.ts, cutoff)));
+
+  type Day = {
+    date: string;
+    in: number;
+    out: number;
+    cacheRead: number;
+    cacheWrite: number;
+    legacy: number;
+    turns: number;
+  };
+  const byDay = new Map<string, Day>();
+  // Zero-fill the whole range so the chart has no gaps (UTC dates).
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(Date.now() - i * 24 * 3600 * 1000).toISOString().slice(0, 10);
+    byDay.set(d, { date: d, in: 0, out: 0, cacheRead: 0, cacheWrite: 0, legacy: 0, turns: 0 });
+  }
+  const byModel: Record<string, { tokens: number; turns: number }> = {};
+  const last5h = { in: 0, out: 0, cacheRead: 0, cacheWrite: 0, turns: 0 };
+
+  for (const r of rows) {
+    const date = r.window ?? r.ts.toISOString().slice(0, 10);
+    const day = byDay.get(date);
+    const split = r.inputTokens != null || r.outputTokens != null;
+    if (day) {
+      day.turns += 1;
+      if (split) {
+        day.in += r.inputTokens ?? 0;
+        day.out += r.outputTokens ?? 0;
+        day.cacheRead += r.cacheReadTokens ?? 0;
+        day.cacheWrite += r.cacheCreationTokens ?? 0;
+      } else {
+        day.legacy += r.tokens ?? 0;
+      }
+    }
+    const m = r.model ?? "unknown";
+    byModel[m] = byModel[m] ?? { tokens: 0, turns: 0 };
+    byModel[m].tokens += r.tokens ?? 0;
+    byModel[m].turns += 1;
+    if (r.ts >= fiveHoursAgo) {
+      last5h.turns += 1;
+      last5h.in += r.inputTokens ?? 0;
+      last5h.out += r.outputTokens ?? 0;
+      last5h.cacheRead += r.cacheReadTokens ?? 0;
+      last5h.cacheWrite += r.cacheCreationTokens ?? 0;
+    }
+  }
+
+  return reply.send({ days: [...byDay.values()], byModel, last5h });
 });
 
 // Still-stubbed surface (later M5/M5.5 increments). /fs/*, /approvals, /live,

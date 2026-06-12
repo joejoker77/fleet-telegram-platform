@@ -145,6 +145,12 @@ export const usageRecords = pgTable("usage_records", {
   compute: numeric("compute"),
   model: text("model"),
   ts: timestamp("ts", { withTimezone: true }).notNull().defaultNow(),
+  // M5.13 UsageDashboard: split counters per turn. `tokens` stays = in+out so
+  // rows written before the migration still aggregate; new rows fill all five.
+  inputTokens: bigint("input_tokens", { mode: "number" }),
+  outputTokens: bigint("output_tokens", { mode: "number" }),
+  cacheReadTokens: bigint("cache_read_tokens", { mode: "number" }),
+  cacheCreationTokens: bigint("cache_creation_tokens", { mode: "number" }),
 });
 
 export const secretBindings = pgTable("secret_bindings", {

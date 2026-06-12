@@ -13,6 +13,7 @@ import { LiveActivity } from "./components/LiveActivity";
 import { McpBuilder } from "./components/McpBuilder";
 import { SessionsManager } from "./components/SessionsManager";
 import { SubagentBuilder } from "./components/SubagentBuilder";
+import { UsageDashboard } from "./components/UsageDashboard";
 import { WorkflowBuilder } from "./components/WorkflowBuilder";
 
 type State =
@@ -30,7 +31,8 @@ type Screen =
   | { kind: "mcp" }
   | { kind: "live" }
   | { kind: "approvals" }
-  | { kind: "sessions" };
+  | { kind: "sessions" }
+  | { kind: "usage" };
 
 const SCOPES: FsScope[] = ["project", "artifacts", "home"];
 const SCOPE_LABEL: Record<FsScope, I18nKey> = {
@@ -128,6 +130,9 @@ export function App() {
           <button className="ghost" onClick={() => setScreen({ kind: "live" })} title="Live-активность">
             📡
           </button>
+          <button className="ghost" onClick={() => setScreen({ kind: "usage" })} title="Расход токенов">
+            📊
+          </button>
           <button className="ghost" onClick={() => setScreen({ kind: "new" })} title="Создать">
             ＋
           </button>
@@ -210,6 +215,7 @@ export function App() {
       {screen.kind === "live" && <LiveActivity token={state.session.token} onClose={toTree} />}
       {screen.kind === "approvals" && <ApprovalsQueue token={state.session.token} onClose={toTree} />}
       {screen.kind === "sessions" && <SessionsManager token={state.session.token} onClose={toTree} />}
+      {screen.kind === "usage" && <UsageDashboard token={state.session.token} onClose={toTree} />}
     </div>
   );
 }

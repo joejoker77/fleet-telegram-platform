@@ -516,3 +516,158 @@ button.ghost {
   width: 100%;
   box-sizing: border-box;
 }
+
+/* usage dashboard (M5.13) */
+.usage-range {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+}
+
+.usage-range button {
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.usage-body {
+  padding: 0 12px 16px;
+  overflow-y: auto;
+}
+
+.usage-cards {
+  display: flex;
+  gap: 8px;
+  margin: 8px 0 4px;
+}
+
+.usage-card {
+  flex: 1;
+  background: var(--surface);
+  border-radius: 10px;
+  padding: 10px 8px;
+  text-align: center;
+  min-width: 0;
+}
+
+.usage-card-value {
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.usage-card-label {
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.usage-card-sub {
+  font-size: 11px;
+  opacity: 0.6;
+  margin-top: 2px;
+}
+
+.usage-section {
+  margin: 14px 0 6px;
+  font-size: 13px;
+}
+
+.usage-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 120px;
+}
+
+.usage-chart-cache {
+  height: 80px;
+}
+
+.usage-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  height: 100%;
+}
+
+.usage-bar {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  background: var(--surface);
+  border-radius: 3px 3px 0 0;
+  overflow: hidden;
+}
+
+.usage-seg {
+  width: 100%;
+}
+
+.usage-seg-in {
+  background: var(--accent);
+}
+
+.usage-seg-out {
+  background: #2ecc71;
+}
+
+.usage-seg-legacy {
+  background: #b2b2b2;
+}
+
+.usage-seg-cr {
+  background: #9b8ade;
+}
+
+.usage-seg-cw {
+  background: #d9a8e8;
+}
+
+.usage-x {
+  font-size: 9px;
+  text-align: center;
+  opacity: 0.55;
+  height: 12px;
+  overflow: hidden;
+}
+
+.usage-legend {
+  display: flex;
+  gap: 12px;
+  font-size: 11px;
+  opacity: 0.75;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+
+.usage-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  vertical-align: -1px;
+}
+
+.usage-models {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.usage-models li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--surface);
+  font-size: 13px;
+}
+
+.usage-model-name {
+  overflow-wrap: anywhere;
+}
+
+.usage-note {
+  margin-top: 12px;
+  font-size: 11px;
+}
