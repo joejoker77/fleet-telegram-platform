@@ -314,6 +314,12 @@ button.ghost {
   font-size: 12px;
 }
 
+/* M5.11 step stream: the always-visible one-liner under the kind row */
+.live-summary {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
 .live-payload {
   margin: 6px 0 0;
   white-space: pre-wrap;

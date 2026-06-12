@@ -80,9 +80,10 @@ export function LiveActivity({ token, onClose }: { token: string; onClose: () =>
           {events.map((ev, i) => (
             <li key={`${ev.ts}-${i}`} className="live-row" onClick={() => setExpanded(expanded === i ? null : i)}>
               <div className="live-line">
-                <span className="live-kind">{kindIcon(ev.kind)} {ev.kind}</span>
+                <span className="live-kind">{kindIcon(ev)} {ev.kind}</span>
                 <span className="live-ts">{shortTs(ev.ts)}</span>
               </div>
+              {rowSummary(ev) !== null && <div className="live-summary">{rowSummary(ev)}</div>}
               {ev.actor && <div className="live-actor">{ev.actor}</div>}
               {expanded === i && ev.payload !== undefined && (
                 <pre className="content live-payload">{JSON.stringify(ev.payload, null, 2)}</pre>
@@ -101,10 +102,51 @@ function shortTs(ts: string): string {
   return m?.[1] ?? ts;
 }
 
-function kindIcon(kind: string): string {
+// M5.11: per-tool icons for the step stream (kind=tool.use).
+const TOOL_ICON: [RegExp, string][] = [
+  [/^(Task|Agent)$/, "🤖"],
+  [/^Bash$/, "🖥"],
+  [/^(Write|Edit|NotebookEdit)$/, "✏️"],
+  [/^Read$/, "📖"],
+  [/^(Grep|Glob)$/, "🔎"],
+  [/^Skill$/, "🧩"],
+  [/^Web/, "🌐"],
+  [/^mcp__/, "🔌"],
+];
+
+function payloadOf(ev: LiveEvent): Record<string, unknown> | null {
+  return ev.payload !== null && typeof ev.payload === "object" ? (ev.payload as Record<string, unknown>) : null;
+}
+
+function kindIcon(ev: LiveEvent): string {
+  const { kind } = ev;
+  if (kind === "tool.use") {
+    const tool = String(payloadOf(ev)?.tool ?? "");
+    for (const [re, icon] of TOOL_ICON) if (re.test(tool)) return icon;
+    return "⚙️";
+  }
   if (kind === "live.hello") return "👋";
   if (kind.startsWith("auth.")) return "🔑";
   if (kind.startsWith("fs.")) return "📝";
   if (kind.startsWith("usage.")) return "📊";
   return "•";
+}
+
+// One always-visible line per event; full payload stays behind the tap.
+function rowSummary(ev: LiveEvent): string | null {
+  const p = payloadOf(ev);
+  if (!p) return null;
+  if (ev.kind === "tool.use") {
+    const tool = typeof p.tool === "string" ? p.tool : "?";
+    const s = typeof p.summary === "string" && p.summary ? ` · ${p.summary}` : "";
+    return `${tool}${s}`;
+  }
+  if (ev.kind === "usage.turn") {
+    // End-of-turn totals: model, in/out tokens, cache read/write.
+    const n = (k: string) => (typeof p[k] === "number" ? (p[k] as number) : 0);
+    const model = typeof p.model === "string" ? p.model : "?";
+    return `${model} · in ${n("inputTokens")} / out ${n("outputTokens")} · cache ${n("cacheReadTokens")}r + ${n("cacheCreationTokens")}w`;
+  }
+  if (ev.kind.startsWith("fs.") && typeof p.path === "string") return p.path;
+  return null;
 }
