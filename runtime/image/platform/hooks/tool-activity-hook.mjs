@@ -1,15 +1,18 @@
-// Claude Code PreToolUse hook (M5.11 live tool stream). Fires before EVERY
-// tool call and emits a compact `tool.use` audit event so LiveActivity shows
-// the bot's steps in real time: subagent launches, shell commands, file edits,
-// skills, MCP calls. Subagents run in the same harness, so their tool calls
-// stream too. NOT an LLM call.
+// Claude Code activity hook (M5.11 live tool stream, M5.12 step semantics).
+// Wired on THREE hook events (same command, branches on hook_event_name):
+//   PreToolUse   → tool.use  {phase:"start"} — a step began (spinner in UI)
+//   PostToolUse  → tool.use  {phase:"end"}   — step finished (ok + duration)
+//   SubagentStop → agent.done                — a subagent completed
+// `tool_use_id` links start↔end; `agent_id`/`agent_type` (present on every
+// hook event fired INSIDE a subagent) let the UI nest those steps under the
+// parent Agent row, Cursor-style. NOT an LLM call.
 //
 // Hard requirements: never blocks or influences the tool (no stdout, exit 0
 // always — a PreToolUse hook's stdout can carry a permission decision, so we
 // print NOTHING), never throws, fire-and-forget to the collector socket.
 //
 // Baked read-only into the image; wired via the tenant's ~/.claude/settings.json
-// (install/m5.11-live-tool-stream.sh — git HEAD + agentshield rebaseline).
+// (install/m5.12-live-stream-v2.sh — git HEAD + agentshield rebaseline).
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -55,6 +58,53 @@ function summarize(tool, inp) {
   }
 }
 
+// PostToolUse `tool_response` → did the step succeed? Shape varies by tool;
+// look for the common failure markers, default to ok.
+function respOk(resp) {
+  if (resp === null || typeof resp !== "object") return true;
+  if (resp.success === false) return false;
+  if (resp.is_error === true || resp.isError === true) return false;
+  return true;
+}
+
+// Build the audit event for one hook invocation, or null to stay silent.
+function buildEvent(evt) {
+  const name = evt.hook_event_name;
+  const sub = {};
+  if (typeof evt.agent_id === "string" && evt.agent_id) {
+    sub.agentId = evt.agent_id;
+    if (typeof evt.agent_type === "string") sub.agentType = evt.agent_type;
+  }
+
+  if (name === "SubagentStop") {
+    return {
+      kind: "agent.done",
+      payload: {
+        agentId: evt.agent_id ?? null,
+        agentType: evt.agent_type ?? null,
+        summary: clip(evt.last_assistant_message),
+      },
+    };
+  }
+
+  const tool = evt.tool_name;
+  if (!tool) return null;
+
+  if (name === "PostToolUse") {
+    const payload = { tool, phase: "end", ...sub };
+    if (typeof evt.tool_use_id === "string") payload.tid = evt.tool_use_id;
+    if (typeof evt.duration_ms === "number") payload.ms = evt.duration_ms;
+    if (!respOk(evt.tool_response)) payload.ok = false;
+    return { kind: "tool.use", payload };
+  }
+
+  // PreToolUse (and any unknown event that still carries tool_name: degrade
+  // to the old single-event stream rather than dropping the step).
+  const payload = { tool, summary: summarize(tool, evt.tool_input), phase: "start", ...sub };
+  if (typeof evt.tool_use_id === "string") payload.tid = evt.tool_use_id;
+  return { kind: "tool.use", payload };
+}
+
 function main() {
   let evt = {};
   try {
@@ -62,15 +112,15 @@ function main() {
   } catch {
     /* ignore */
   }
-  const tool = evt.tool_name;
-  if (!tool) return;
+  const built = buildEvent(evt);
+  if (!built) return;
 
   const line =
     JSON.stringify({
       userId: null, // collector resolves tenant by actor (os_username)
-      kind: "tool.use",
+      kind: built.kind,
       actor: os.userInfo().username,
-      payload: { tool, summary: summarize(tool, evt.tool_input) },
+      payload: built.payload,
     }) + "\n";
 
   // Fire-and-forget: write and leave — unlike the metering Stop hook we never
