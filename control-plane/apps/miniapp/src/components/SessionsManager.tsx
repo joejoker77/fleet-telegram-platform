@@ -12,7 +12,18 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { sessionCreate, sessionDelete, sessionsList, sessionSwitch, type SessionInfo } from "../api";
+import {
+  checkpointCreate,
+  checkpointDelete,
+  checkpointRewind,
+  checkpointsList,
+  sessionCreate,
+  sessionDelete,
+  sessionsList,
+  sessionSwitch,
+  type CheckpointInfo,
+  type SessionInfo,
+} from "../api";
 
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
@@ -25,6 +36,7 @@ export function SessionsManager({ token, onClose }: { token: string; onClose: ()
   const [armed, setArmed] = useState<string | null>(null); // session id awaiting 2nd tap
   const [armedDel, setArmedDel] = useState<string | null>(null); // session id awaiting delete confirm
   const [deleting, setDeleting] = useState<string | null>(null); // session id mid-delete
+  const [ckptFor, setCkptFor] = useState<SessionInfo | null>(null); // M5.8: timeline open for this session
 
   const refetch = useCallback(async () => {
     try {
@@ -121,6 +133,19 @@ export function SessionsManager({ token, onClose }: { token: string; onClose: ()
     }
   }
 
+  if (ckptFor) {
+    return (
+      <CheckpointsPanel
+        token={token}
+        session={ckptFor}
+        onBack={() => {
+          setCkptFor(null);
+          void refetch(); // a rewind may have flipped readiness → restart polling
+        }}
+      />
+    );
+  }
+
   return (
     <div className="fileview">
       <div className="fileview-header">
@@ -145,7 +170,12 @@ export function SessionsManager({ token, onClose }: { token: string; onClose: ()
                   {s.name === "default" && <span className="muted"> (~/work)</span>}
                 </span>
                 {s.active ? (
-                  <span className="live-ts">{s.ready === false ? "запускается…" : "активна"}</span>
+                  <span className="live-ts">
+                    {s.ready === false ? "запускается…" : "активна"}{" "}
+                    <button className="ghost" title="Чекпоинты" onClick={() => setCkptFor(s)}>
+                      🕑
+                    </button>
+                  </span>
                 ) : (
                   <span>
                     <button
@@ -158,6 +188,14 @@ export function SessionsManager({ token, onClose }: { token: string; onClose: ()
                         : armed === s.id
                           ? "⚠️ точно переключить"
                           : "переключить"}
+                    </button>{" "}
+                    <button
+                      disabled={switching !== null || deleting !== null}
+                      className="ghost"
+                      title="Чекпоинты"
+                      onClick={() => setCkptFor(s)}
+                    >
+                      🕑
                     </button>{" "}
                     {s.name !== "default" && (
                       <button
@@ -213,6 +251,203 @@ export function SessionsManager({ token, onClose }: { token: string; onClose: ()
       <p className="muted">
         Сессия = папка проекта (~/work/projects/&lt;имя&gt;) со своим разговором Claude. Создание не
         переключает — нажмите «переключить», когда готовы.
+      </p>
+    </div>
+  );
+}
+
+// ── M5.8 checkpoints timeline ──
+// Checkpoint = git snapshot of the project dir + a copy of the conversation.
+// Create is instant and safe (no confirm needed); rewind restores BOTH files
+// and conversation — destructive for state created after the checkpoint, so
+// it gets the two-tap confirm (window.confirm is a no-op in the Telegram
+// webview) and a pre-rewind auto-checkpoint server-side makes it undoable.
+
+function fmtTs(iso: string): string {
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? iso : d.toLocaleString();
+}
+
+function CheckpointsPanel({
+  token,
+  session,
+  onBack,
+}: {
+  token: string;
+  session: SessionInfo;
+  onBack: () => void;
+}) {
+  const [list, setList] = useState<CheckpointInfo[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [label, setLabel] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [armedRw, setArmedRw] = useState<string | null>(null); // ckpt id awaiting rewind confirm
+  const [rewinding, setRewinding] = useState<string | null>(null);
+  const [rewound, setRewound] = useState<string | null>(null); // last applied ckpt («← вы здесь»)
+  const [armedDel, setArmedDel] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<string | null>(null);
+
+  const refetch = useCallback(async () => {
+    try {
+      const res = await checkpointsList(token, session.id);
+      setList(res.checkpoints);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [token, session.id]);
+
+  useEffect(() => {
+    void refetch();
+  }, [refetch]);
+
+  async function create() {
+    setCreating(true);
+    setError(null);
+    try {
+      await checkpointCreate(token, session.id, label.trim() || undefined);
+      setLabel("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCreating(false);
+      void refetch();
+    }
+  }
+
+  async function doRewind(c: CheckpointInfo) {
+    if (armedRw !== c.id) {
+      setArmedRw(c.id);
+      setArmedDel(null);
+      setTimeout(() => setArmedRw((cur) => (cur === c.id ? null : cur)), 8000);
+      return;
+    }
+    setArmedRw(null);
+    setRewinding(c.id);
+    setError(null);
+    try {
+      await checkpointRewind(token, session.id, c.id);
+      setRewound(c.id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRewinding(null);
+      void refetch(); // the pre-rewind auto-checkpoint shows up
+    }
+  }
+
+  async function doDelete(c: CheckpointInfo) {
+    if (armedDel !== c.id) {
+      setArmedDel(c.id);
+      setArmedRw(null);
+      setTimeout(() => setArmedDel((cur) => (cur === c.id ? null : cur)), 8000);
+      return;
+    }
+    setArmedDel(null);
+    setDeleting(c.id);
+    setError(null);
+    try {
+      await checkpointDelete(token, session.id, c.id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDeleting(null);
+      void refetch();
+    }
+  }
+
+  const busy = creating || rewinding !== null || deleting !== null;
+
+  return (
+    <div className="fileview">
+      <div className="fileview-header">
+        <button className="ghost" onClick={onBack}>
+          ←
+        </button>
+        <span className="path">Чекпоинты: {session.name}</span>
+        <button className="ghost" onClick={() => void refetch()} title="Обновить">
+          ⟳
+        </button>
+      </div>
+      {error && <p className="error">{error}</p>}
+      <div className="toolbar">
+        <input
+          value={label}
+          placeholder="метка (необязательно)"
+          onChange={(e) => setLabel(e.target.value)}
+          disabled={busy}
+        />
+        <button className="primary" disabled={busy} onClick={() => void create()}>
+          {creating ? "…" : "＋ Чекпоинт"}
+        </button>
+      </div>
+      {list === null ? (
+        <p className="muted">Загрузка…</p>
+      ) : list.length === 0 ? (
+        <p className="muted">
+          Чекпоинтов пока нет. Чекпоинт сохраняет файлы проекта и разговор Claude — к нему можно
+          откатиться в любой момент. Авто-чекпоинты создаются при каждом переключении сессии.
+        </p>
+      ) : (
+        <ul className="live-list">
+          {list.map((c) => (
+            <li key={c.id} className="live-row">
+              <div className="live-line">
+                <span>
+                  {c.auto ? "🤖" : "📌"} <strong>{c.label}</strong>
+                  {rewound === c.id && <span className="muted"> ← вы здесь</span>}
+                </span>
+                <span className="live-ts">{fmtTs(c.ts)}</span>
+              </div>
+              <div className="live-line">
+                <span className="muted">{c.auto ? "авто" : "ручной"}</span>
+                <span>
+                  <button
+                    disabled={busy}
+                    className={armedRw === c.id ? "primary" : undefined}
+                    onClick={() => void doRewind(c)}
+                  >
+                    {rewinding === c.id ? "откат…" : armedRw === c.id ? "⚠️ точно откатить" : "⏪ откатить"}
+                  </button>{" "}
+                  <button
+                    disabled={busy}
+                    className={armedDel === c.id ? "primary" : "ghost"}
+                    title="Удалить чекпоинт"
+                    onClick={() => void doDelete(c)}
+                  >
+                    {deleting === c.id ? "…" : armedDel === c.id ? "⚠️ удалить?" : "🗑"}
+                  </button>
+                </span>
+              </div>
+              {armedRw === c.id && rewinding === null && (
+                <p className="muted">
+                  Файлы проекта и разговор Claude вернутся к состоянию этого чекпоинта. Текущее
+                  состояние будет сохранено авто-чекпоинтом (откат обратим).
+                  {session.active && " Сессия активна: Claude перезапустится, текущая задача бота прервётся."}
+                  {" "}Нажмите ещё раз для подтверждения.
+                </p>
+              )}
+              {armedDel === c.id && deleting === null && (
+                <p className="muted">Запись чекпоинта и копия разговора будут удалены. Нажмите ещё раз.</p>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {rewinding !== null && (
+        <p className="muted">Откат: супервизор восстанавливает файлы и разговор (до 90 с)…</p>
+      )}
+      {rewound !== null && rewinding === null && (
+        <p className="muted">
+          Откат выполнен.
+          {session.active
+            ? " Claude перезапускается — вернитесь к списку сессий, чтобы увидеть статус готовности."
+            : " Изменения вступят в силу при переключении на эту сессию."}
+        </p>
+      )}
+      <p className="muted">
+        Чекпоинт = снимок файлов проекта + разговора Claude. Вложенные git-репозитории сохраняются
+        как ссылки (их файлы защищает их собственный git). 🤖 — авто, 📌 — ручной.
       </p>
     </div>
   );

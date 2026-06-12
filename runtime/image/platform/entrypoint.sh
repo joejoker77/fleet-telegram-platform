@@ -140,8 +140,12 @@ mkdir -p "$RUN_DIR"
 SWITCH_REQ="$RUN_DIR/session-switch.json"
 SWITCH_RES="$RUN_DIR/session-switch.result.json"
 ACTIVE_FILE="$RUN_DIR/active-session"
+# M5.8 checkpoint/rewind requests share the supervisor-executor pattern but use
+# their OWN request/result pair so they can't race the switch contract.
+TASK_REQ="$RUN_DIR/session-task.json"
+TASK_RES="$RUN_DIR/session-task.result.json"
 # a request that survived a pod restart is stale — never execute it blind
-rm -f "$SWITCH_REQ" "$SWITCH_RES"
+rm -f "$SWITCH_REQ" "$SWITCH_RES" "$TASK_REQ" "$TASK_RES"
 
 session_dir() { # name → absolute dir on stdout; empty = invalid name
   case "$1" in
@@ -186,6 +190,193 @@ if out:
     with open(os.environ["DST"], "w") as f:
         json.dump(out, f, indent=2)
 PY
+}
+
+# ── M5.8 checkpoints / rewind (docs/M5.8-checkpoints-design.md) ──────────────
+# Checkpoint = shadow-git commit of the session dir + a copy of its newest
+# conversation jsonl. Native Claude file-history only tracks Edit/Write tool
+# edits — bash-driven changes are invisible to it — hence platform snapshots.
+# The supervisor is the SOLE executor (single writer of index.json, files stay
+# tenant-owned); cp-api/session-ctl only write request files.
+CKPT_ROOT="$HOME/.claude/checkpoints"
+CKPT_CAP="${CHECKPOINT_CAP:-20}"
+
+conv_latest() { # $1 = session dir → newest conversation jsonl path (or empty)
+  local slug
+  slug=$(printf '%s' "$1" | tr '/.' '--')
+  ls -t "$HOME/.claude/projects/$slug"/*.jsonl 2>/dev/null | head -1
+}
+
+ckpt_git() { # $1 = session name, rest = git args (shadow repo, session worktree)
+  local name="$1"; shift
+  git --git-dir="$CKPT_ROOT/$name/repo.git" --work-tree="$(session_dir "$name")" \
+      -c user.name=checkpoint -c user.email=checkpoint@platform "$@"
+}
+
+checkpoint_create() { # $1=name $2=label $3=auto(0|1) → checkpoint id on stdout
+  local name="$1" label="$2" auto="${3:-0}" dir base conv id commit
+  dir=$(session_dir "$name")
+  [ -n "$dir" ] && [ -d "$dir" ] || return 1
+  base="$CKPT_ROOT/$name"
+  mkdir -p "$base/conv"
+  if [ ! -d "$base/repo.git" ]; then
+    git init -q --bare "$base/repo.git" || return 1
+    # ignored junk never enters snapshots; nested git repos become gitlinks
+    # (their working files are protected by their OWN git, not the checkpoint)
+    printf '%s\n' '.trash/' 'node_modules/' 'dist/' '.venv/' '.cache/' \
+      '__pycache__/' '*.log' > "$base/exclude"
+    ckpt_git "$name" config core.excludesFile "$base/exclude"
+  fi
+  ckpt_git "$name" add -A . >/dev/null 2>&1 || return 1
+  ckpt_git "$name" commit -q --allow-empty -m "$label" >/dev/null 2>&1 || return 1
+  commit=$(ckpt_git "$name" rev-parse HEAD) || return 1
+  id="$(date -u +%Y%m%dT%H%M%SZ)-$RANDOM"
+  conv=$(conv_latest "$dir")
+  [ -n "$conv" ] && cp "$conv" "$base/conv/$id.jsonl" 2>/dev/null
+  CKPT_BASE="$base" CKPT_ID="$id" CKPT_LABEL="$label" CKPT_COMMIT="$commit" \
+    CKPT_AUTO="$auto" CKPT_CONV="${conv:+$(basename "$conv")}" CAP="$CKPT_CAP" \
+    python3 - <<'PY' || return 1
+import json, os, time
+base = os.environ["CKPT_BASE"]; idx = os.path.join(base, "index.json")
+try: arr = json.load(open(idx))
+except Exception: arr = []
+arr.append({
+    "id": os.environ["CKPT_ID"], "label": os.environ["CKPT_LABEL"],
+    "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    "commit": os.environ["CKPT_COMMIT"], "auto": os.environ["CKPT_AUTO"] == "1",
+    "convSource": os.environ.get("CKPT_CONV") or None,
+})
+cap = int(os.environ.get("CAP") or 20)
+def drop(victim):
+    arr.remove(victim)
+    try: os.remove(os.path.join(base, "conv", victim["id"] + ".jsonl"))
+    except OSError: pass
+# retention: oldest AUTO checkpoints go first; manual ones live up to 2*cap
+while len(arr) > cap:
+    autos = [c for c in arr if c.get("auto")]
+    if not autos: break
+    drop(autos[0])
+while len(arr) > 2 * cap:
+    drop(arr[0])
+tmp = idx + ".tmp"
+json.dump(arr, open(tmp, "w"), indent=1)
+os.replace(tmp, idx)
+PY
+  ckpt_git "$name" gc --auto -q 2>/dev/null || true
+  echo "$id"
+}
+
+ckpt_lookup() { # $1=name $2=ckpt-id $3=field → value on stdout (empty = not found)
+  CKPT_BASE="$CKPT_ROOT/$1" CKPT_ID="$2" FIELD="$3" python3 - <<'PY' 2>/dev/null
+import json, os
+try: arr = json.load(open(os.path.join(os.environ["CKPT_BASE"], "index.json")))
+except Exception: arr = []
+for c in arr:
+    if c["id"] == os.environ["CKPT_ID"]:
+        v = c.get(os.environ["FIELD"])
+        print(v if v is not None else "")
+        break
+PY
+}
+
+checkpoint_rewind() { # $1=name $2=ckpt-id → 0 ok; error message on stdout on failure
+  local name="$1" cid="$2" dir base commit conv_src slug was_active=0
+  dir=$(session_dir "$name")
+  [ -n "$dir" ] && [ -d "$dir" ] || { echo "no such session"; return 1; }
+  base="$CKPT_ROOT/$name"
+  commit=$(ckpt_lookup "$name" "$cid" commit)
+  [ -n "$commit" ] || { echo "no such checkpoint"; return 1; }
+  # the rewind itself must always be undoable — snapshot BEFORE touching anything
+  checkpoint_create "$name" "auto: before rewind" 1 >/dev/null \
+    || { echo "pre-rewind checkpoint failed"; return 1; }
+  [ "$(cat "$ACTIVE_FILE" 2>/dev/null || echo default)" = "$name" ] && was_active=1
+  if [ "$was_active" = 1 ]; then
+    # park the pane first so the dying claude can't append to the jsonl or
+    # write files AFTER we restore them (respawn-window kills synchronously)
+    tmux respawn-window -k -t "$SESSION" "sleep 600" 2>/dev/null || true
+    set_session_state "$name" starting
+  fi
+  ckpt_git "$name" reset -q --hard "$commit" 2>/dev/null \
+    || { [ "$was_active" = 1 ] && launch_claude "$dir" switch && arm_readiness_watch "$name"; echo "git reset failed"; return 1; }
+  # untracked files born after the checkpoint go too (the pre-rewind snapshot
+  # keeps them); ignored junk (node_modules, .trash…) is untouched (no -x)
+  ckpt_git "$name" clean -qfd 2>/dev/null || true
+  # conversation: put the snapshot back over its source file and make it the
+  # newest jsonl so --continue resumes exactly this fork
+  conv_src=$(ckpt_lookup "$name" "$cid" convSource)
+  if [ -f "$base/conv/$cid.jsonl" ] && [ -n "$conv_src" ]; then
+    slug=$(printf '%s' "$dir" | tr '/.' '--')
+    mkdir -p "$HOME/.claude/projects/$slug"
+    cp "$base/conv/$cid.jsonl" "$HOME/.claude/projects/$slug/$conv_src" \
+      && touch "$HOME/.claude/projects/$slug/$conv_src"
+  fi
+  if [ "$was_active" = 1 ]; then
+    launch_claude "$dir" switch
+    arm_readiness_watch "$name"
+  fi
+  return 0
+}
+
+# The supervisor executes a pending checkpoint/rewind/delete task (same
+# contract as process_switch_request: validated, atomic result file).
+process_task_request() {
+  [ -f "$TASK_REQ" ] || return 0
+  local req id action name label checkpoint cid out res
+  req=$(cat "$TASK_REQ" 2>/dev/null); rm -f "$TASK_REQ"
+  eval "$(printf '%s' "$req" | python3 -c 'import json,sys,shlex
+try: d=json.load(sys.stdin)
+except Exception: d={}
+for k in ("id","action","name","label","checkpoint"):
+    v=str(d.get(k,"") or "")
+    print(f"{k}={shlex.quote(v)}") ' 2>/dev/null)"
+  cid="$checkpoint"
+  task_res() { # $1 = json payload
+    printf '%s\n' "$1" > "$TASK_RES.tmp" && mv "$TASK_RES.tmp" "$TASK_RES"
+  }
+  fail_task() { task_res "{\"id\":\"$id\",\"ok\":false,\"error\":\"$1\"}"; }
+  # id is echoed back inside the result JSON — keep it to a safe charset
+  printf '%s' "$id" | grep -Eq '^[A-Za-z0-9._:-]{1,64}$' || id=""
+  [ -n "$id" ] && [ -n "$action" ] || { fail_task "malformed request"; return 0; }
+  [ -n "$(session_dir "$name")" ] || { fail_task "invalid session name"; return 0; }
+  case "$action" in
+    checkpoint)
+      echo "[checkpoints] create @ $name"
+      if out=$(checkpoint_create "$name" "${label:-manual}" 0); then
+        task_res "{\"id\":\"$id\",\"ok\":true,\"checkpoint\":\"$out\"}"
+      else
+        fail_task "checkpoint failed"
+      fi
+      ;;
+    rewind)
+      echo "[checkpoints] rewind $name → $cid"
+      if out=$(checkpoint_rewind "$name" "$cid"); then
+        task_res "{\"id\":\"$id\",\"ok\":true,\"checkpoint\":\"$cid\"}"
+      else
+        fail_task "${out:-rewind failed}"
+      fi
+      ;;
+    ckpt-delete)
+      CKPT_BASE="$CKPT_ROOT/$name" CKPT_ID="$cid" python3 - <<'PY' 2>/dev/null
+import json, os, sys
+base = os.environ["CKPT_BASE"]; idx = os.path.join(base, "index.json")
+try: arr = json.load(open(idx))
+except Exception: sys.exit(1)
+keep = [c for c in arr if c["id"] != os.environ["CKPT_ID"]]
+if len(keep) == len(arr): sys.exit(1)
+try: os.remove(os.path.join(base, "conv", os.environ["CKPT_ID"] + ".jsonl"))
+except OSError: pass
+tmp = idx + ".tmp"
+json.dump(keep, open(tmp, "w"), indent=1)
+os.replace(tmp, idx)
+PY
+      if [ $? -eq 0 ]; then
+        task_res "{\"id\":\"$id\",\"ok\":true}"
+      else
+        fail_task "no such checkpoint"
+      fi
+      ;;
+    *) fail_task "unknown action" ;;
+  esac
 }
 
 # M5.7 readiness: "switched" (pane respawned) != "ready" (bot actually answers).
@@ -255,6 +446,11 @@ EOF2
   [ -n "$dir" ] || { fail "invalid session name"; return 0; }
   [ -d "$dir" ] || { fail "no such session dir"; return 0; }
   echo "[sessions] switch → $name ($dir)"
+  # M5.8: the session we are LEAVING gets an automatic checkpoint (files +
+  # conversation) so a switch is always rewindable. Best-effort: a checkpoint
+  # failure must not block the switch itself.
+  checkpoint_create "$(cat "$ACTIVE_FILE" 2>/dev/null || echo default)" \
+    "auto: before switch → $name" 1 >/dev/null 2>&1 || true
   launch_claude "$dir" switch
   echo "$name" > "$ACTIVE_FILE"
   set_session_state "$name" starting
@@ -371,6 +567,11 @@ down=0
 while tmux has-session -t "$SESSION" 2>/dev/null; do
   if [ -f "$SWITCH_REQ" ]; then
     process_switch_request
+    down=0
+  fi
+  if [ -f "$TASK_REQ" ]; then
+    # M5.8 checkpoint/rewind tasks; a rewind respawns the pane like a switch
+    process_task_request
     down=0
   fi
   if [ "${DISABLE_TELEGRAM_CHANNEL:-0}" != "1" ] && ! channel_alive; then

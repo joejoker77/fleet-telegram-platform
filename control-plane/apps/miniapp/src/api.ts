@@ -290,3 +290,55 @@ export function sessionSwitch(token: string, id: string): Promise<{ ok: boolean;
 export function sessionDelete(token: string, id: string): Promise<{ ok: boolean; name: string }> {
   return request(`/sessions/${id}`, { method: "DELETE" }, token);
 }
+
+// ── M5.8 checkpoints (mirrors apps/api session-routes.ts checkpoint routes) ──
+
+export interface CheckpointInfo {
+  id: string;
+  label: string;
+  ts: string; // ISO UTC
+  commit: string;
+  auto: boolean;
+  convSource: string | null;
+}
+
+/** Newest first. */
+export function checkpointsList(
+  token: string,
+  sessionId: string,
+): Promise<{ name: string; checkpoints: CheckpointInfo[] }> {
+  return request(`/sessions/${sessionId}/checkpoints`, {}, token);
+}
+
+/** Snapshot files + conversation of a session. Safe on a live session —
+ *  nothing is restarted; the pod supervisor executes within ~5s. */
+export function checkpointCreate(
+  token: string,
+  sessionId: string,
+  label?: string,
+): Promise<{ ok: boolean; checkpoint: string; entry: CheckpointInfo | null }> {
+  return request(
+    `/sessions/${sessionId}/checkpoints`,
+    { method: "POST", body: JSON.stringify(label ? { label } : {}) },
+    token,
+  );
+}
+
+/** Restore files AND conversation to a checkpoint. For the active session the
+ *  claude pane respawns (current bot task IS interrupted) — poll readiness
+ *  like after a switch. A pre-rewind auto-checkpoint is always taken first. */
+export function checkpointRewind(
+  token: string,
+  sessionId: string,
+  checkpointId: string,
+): Promise<{ ok: boolean; checkpoint: string }> {
+  return request(`/sessions/${sessionId}/checkpoints/${checkpointId}/rewind`, { method: "POST", body: "{}" }, token);
+}
+
+export function checkpointDelete(
+  token: string,
+  sessionId: string,
+  checkpointId: string,
+): Promise<{ ok: boolean; checkpoint: string }> {
+  return request(`/sessions/${sessionId}/checkpoints/${checkpointId}`, { method: "DELETE" }, token);
+}

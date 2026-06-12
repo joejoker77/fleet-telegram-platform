@@ -9,17 +9,55 @@
 #   session-ctl active          # active session name
 #   session-ctl create <name>   # new project dir under ~/work/projects/
 #   session-ctl switch <name>   # ask the supervisor to switch (≤90s)
+#
+# M5.8 checkpoints (docs/M5.8-checkpoints-design.md) — same supervisor-executor
+# pattern via the task request file:
+#   session-ctl checkpoints [name]        # list checkpoints of a session
+#   session-ctl checkpoint [label]        # snapshot the ACTIVE session now
+#   session-ctl rewind <ckpt-id> [name]   # restore files+conversation (active
+#                                         #   session: pane respawns — if you
+#                                         #   are the bot this is suicide-rewind,
+#                                         #   safe: the supervisor executes it)
 set -u
 
 RUN_DIR="$HOME/.claude/run"
 SWITCH_REQ="$RUN_DIR/session-switch.json"
 SWITCH_RES="$RUN_DIR/session-switch.result.json"
+TASK_REQ="$RUN_DIR/session-task.json"
+TASK_RES="$RUN_DIR/session-task.result.json"
 ACTIVE_FILE="$RUN_DIR/active-session"
 PROJECTS="$HOME/work/projects"
+CKPT_ROOT="$HOME/.claude/checkpoints"
 
 valid_name() { printf '%s' "$1" | grep -Eq '^[a-z0-9][a-z0-9-]{0,31}$'; }
 
 active() { cat "$ACTIVE_FILE" 2>/dev/null || echo default; }
+
+session_exists() { [ "$1" = default ] || { valid_name "$1" && [ -d "$PROJECTS/$1" ]; }; }
+
+# Write a checkpoint/rewind task for the supervisor and wait for its result
+# (5s supervisor tick; rewind of the active session also waits for respawn).
+run_task() { # $1=action $2=name $3=label $4=checkpoint-id
+  mkdir -p "$RUN_DIR"
+  id="ctl-$$-$(date +%s)"
+  rm -f "$TASK_RES"
+  T_ID="$id" T_ACTION="$1" T_NAME="$2" T_LABEL="$3" T_CKPT="$4" python3 -c '
+import json, os
+print(json.dumps({"id": os.environ["T_ID"], "action": os.environ["T_ACTION"],
+    "name": os.environ["T_NAME"], "label": os.environ["T_LABEL"],
+    "checkpoint": os.environ["T_CKPT"]}))' > "$TASK_REQ.tmp" \
+    && mv "$TASK_REQ.tmp" "$TASK_REQ" || { echo "cannot write request" >&2; exit 1; }
+  i=0
+  while [ $i -lt 90 ]; do
+    if [ -f "$TASK_RES" ]; then
+      res=$(cat "$TASK_RES" 2>/dev/null)
+      case "$res" in *"\"$id\""*) echo "$res"; return 0 ;; esac
+    fi
+    sleep 1; i=$((i + 1))
+  done
+  echo "timeout: supervisor did not respond in 90s" >&2
+  exit 1
+}
 
 case "${1:-}" in
   list)
@@ -56,8 +94,33 @@ case "${1:-}" in
     echo "NOTE: this kills the current claude pane — if you are the bot, this is"
     echo "expected suicide-switch; the result lands in $SWITCH_RES)"
     ;;
+  checkpoints)
+    name="${2:-$(active)}"
+    session_exists "$name" || { echo "no such session '$name'" >&2; exit 1; }
+    idx="$CKPT_ROOT/$name/index.json"
+    [ -f "$idx" ] || { echo "(no checkpoints for '$name' yet)"; exit 0; }
+    IDX="$idx" python3 -c '
+import json, os
+for c in json.load(open(os.environ["IDX"])):
+    kind = "auto  " if c.get("auto") else "manual"
+    print(c["id"], c["ts"], kind, c["label"], sep="  ")'
+    ;;
+  checkpoint)
+    # snapshot the ACTIVE session (files + conversation); label optional
+    name=$(active)
+    label="${2:-manual}"
+    run_task checkpoint "$name" "$label" ""
+    ;;
+  rewind)
+    cid="${2:-}"
+    [ -n "$cid" ] || { echo "usage: session-ctl rewind <ckpt-id> [name]" >&2; exit 1; }
+    name="${3:-$(active)}"
+    session_exists "$name" || { echo "no such session '$name'" >&2; exit 1; }
+    echo "rewinding '$name' to $cid (active session: the claude pane respawns)…"
+    run_task rewind "$name" "" "$cid"
+    ;;
   *)
-    echo "usage: session-ctl {list|active|create <name>|switch <name>}" >&2
+    echo "usage: session-ctl {list|active|create <name>|switch <name>|checkpoints [name]|checkpoint [label]|rewind <id> [name]}" >&2
     exit 1
     ;;
 esac
