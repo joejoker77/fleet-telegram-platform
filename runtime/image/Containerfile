@@ -8,6 +8,7 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
       curl ca-certificates git tmux python3 unzip xz-utils socat jq \
+      openssh-client rsync \
  && rm -rf /var/lib/apt/lists/*
 
 # Node 22 (NodeSource) — Claude Code + the official Telegram plugin's tooling.

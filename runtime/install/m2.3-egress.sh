@@ -79,9 +79,12 @@ systemctl enable --now cl-egress-forwarder
 sleep 2
 systemctl is-active cl-egress-forwarder >/dev/null || { journalctl -u cl-egress-forwarder -n 20 --no-pager; die "forwarder not active"; }
 
-# 7) verify lockdown from inside the container
-log "VERIFY egress lockdown (from inside claude-$TEST_USER)"
-echo -n "  direct internet (1.1.1.1, no proxy) — expect BLOCKED (000): "
+# 7) verify egress (FULL OUTBOUND policy, 2026-06-15 owner decision — agents must
+#    reach remote servers). Direct internet is now reachable BY DESIGN; the proxy
+#    path stays intact (HTTP tools keep secret injection + audit); host services
+#    stay confined by the unchanged `input` chain (only :10255).
+log "VERIFY egress (full outbound; from inside claude-$TEST_USER)"
+echo -n "  direct internet (1.1.1.1, no proxy) — expect REACHABLE now (non-000): "
 # curl prints the http_code (000 on connection failure); `|| true` only
 # neutralises the non-zero exit under set -e (no extra echo → no '000000').
 direct=$(podman exec claude-$TEST_USER curl --noproxy '*' -m 6 -s -o /dev/null -w '%{http_code}' https://1.1.1.1/ 2>/dev/null || true)
@@ -91,9 +94,9 @@ viaproxy=$(podman exec claude-$TEST_USER curl -m 12 -s -o /dev/null -w '%{http_c
 echo "$viaproxy"
 
 echo
-if [ "$direct" = "000" ] && [ "$viaproxy" != "000" ]; then
-  echo "✅ M2.3 LOCKDOWN OK — direct internet blocked, egress only via the proxy (subnet $SUBNET)"
+if [ "$direct" != "000" ] && [ "$viaproxy" != "000" ]; then
+  echo "✅ M2.3 egress OK — full outbound reachable; HTTP still via proxy (subnet $SUBNET); host confined by the input chain (:10255 only)"
 else
-  echo "❌ M2.3 lockdown NOT as expected (direct=$direct viaproxy=$viaproxy) — see above"
+  echo "❌ M2.3 egress NOT as expected (direct=$direct viaproxy=$viaproxy) — see above"
   exit 1
 fi

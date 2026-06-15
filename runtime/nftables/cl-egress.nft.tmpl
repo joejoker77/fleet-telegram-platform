@@ -12,9 +12,14 @@ delete table inet cl_egress
 table inet cl_egress {
   chain forward {
     type filter hook forward priority -10; policy accept;
-    ip saddr __SUBNET__ ct state established,related counter accept
-    ip saddr __SUBNET__ ip daddr __GW__ counter accept
-    ip saddr __SUBNET__ counter drop
+    # FULL OUTBOUND (2026-06-15, owner decision): agents must reach remote servers
+    # (ssh, rsync, package installs, third-party APIs) or they're crippled for
+    # devops/debugging. HTTP/HTTPS still routes through the OneCLI proxy via the
+    # pod's HTTPS_PROXY env (secret injection + audit preserved for those tools);
+    # ssh and other protocols go direct. The `input` chain below still confines
+    # container->HOST traffic to the proxy port only, so host services stay closed.
+    # To re-lock egress, restore the prior drop rule (see git history).
+    ip saddr __SUBNET__ counter accept
   }
   chain input {
     type filter hook input priority -10; policy accept;
