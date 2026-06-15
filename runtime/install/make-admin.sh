@@ -34,9 +34,13 @@ log "3) ssh bridge key (pod private half + host authorized_keys forced-command)"
 install -d -m 700 -o "$U" -g "$U" "$SSH_DIR"
 [ -f "$KEY" ] || runuser -u "$U" -- ssh-keygen -t ed25519 -N '' -f "$KEY" -C "host-admin-$U" >/dev/null
 SUBNET="$(podman network inspect cl-net 2>/dev/null | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d[0]["subnets"][0]["subnet"])' 2>/dev/null || true)"
-FROM=""; [ -n "$SUBNET" ] && FROM="from=\"$SUBNET\","
 PUB="$(cat "$KEY.pub")"
-LINE="command=\"$BROKER\",no-port-forwarding,no-x11-forwarding,no-agent-forwarding,no-pty,${FROM}${PUB}"
+# authorized_keys grammar: options are comma-joined, then ONE SPACE, then the key.
+# (A comma before the key makes sshd parse "ssh-ed25519" as another option and the
+#  bare blob as the key type -> "key is not allowed". Cost us a long debug session.)
+OPTS="command=\"$BROKER\",no-port-forwarding,no-x11-forwarding,no-agent-forwarding,no-pty"
+[ -n "$SUBNET" ] && OPTS="$OPTS,from=\"$SUBNET\""
+LINE="$OPTS $PUB"
 touch "$AUTHK"; chown "$U:$U" "$AUTHK"; chmod 600 "$AUTHK"
 grep -qF "$PUB" "$AUTHK" || printf '%s\n' "$LINE" >> "$AUTHK"
 
