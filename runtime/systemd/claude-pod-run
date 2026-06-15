@@ -62,6 +62,15 @@ fi
 CFG_ARGS=()
 [ -f "$HOME_DIR/.claude.json" ] && CFG_ARGS+=(-v "$HOME_DIR/.claude.json:$HOME_DIR/.claude.json")
 
+# ~/.ssh: mount the tenant's own SSH keys so the agent can reach remote servers
+# (owner decision 2026-06-15; egress is full-outbound). Mounted rw so ssh can
+# append to ~/.ssh/known_hosts on first connect. Only when present — users with
+# no keys are unaffected. Perms must already be ssh-correct on the host (~/.ssh
+# 700, private keys 600, tenant-owned); the pod runs as the tenant uid (--user)
+# so ownership carries over and ssh accepts the keys.
+SSH_ARGS=()
+[ -d "$HOME_DIR/.ssh" ] && SSH_ARGS+=(-v "$HOME_DIR/.ssh:$HOME_DIR/.ssh")
+
 # ~/.config must be a mounted volume: the pod rootfs is --read-only, and the
 # entrypoint's M4.1 shellfirm seed writes ~/.config/shellfirm/settings.yaml.
 # Without the mount the mkdir hits the RO overlay and the entrypoint dies
@@ -121,6 +130,6 @@ exec /usr/bin/podman run --rm --name "claude-$U" \
   -v "$HOME_DIR/work:$HOME_DIR/work" \
   -v "$HOME_DIR/.config:$HOME_DIR/.config" \
   -v "$HOME_DIR/.local:$HOME_DIR/.local" \
-  "${CFG_ARGS[@]}" "${AUDIT_ARGS[@]}" "${IDE_ARGS[@]}" \
+  "${CFG_ARGS[@]}" "${SSH_ARGS[@]}" "${AUDIT_ARGS[@]}" "${IDE_ARGS[@]}" \
   -w "$HOME_DIR/work" \
   "$IMAGE"
