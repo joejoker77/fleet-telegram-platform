@@ -34,7 +34,25 @@ export function registerLiveRoutes(app: FastifyInstance, deps: LiveDeps): void {
     // its own dedicated connection (cannot share the command client).
     const subscriber = new Redis(deps.redisUrl, { maxRetriesPerRequest: 1 });
     const channel = `live:${sub}`;
+
+    // Heartbeat: while a tenant is idle no audit frames flow, and Cloudflare
+    // (in front of miniapp.ai-assistant.gg) drops a WebSocket after ~100s of
+    // silence. The client then auto-reconnects, logging a fresh "live.hello" —
+    // visually noisy churn. A periodic ping keeps the connection alive through
+    // CF without surfacing in the event feed (control frames aren't onmessage).
+    const HEARTBEAT_MS = 30_000;
+    const heartbeat = setInterval(() => {
+      if (socket.readyState === socket.OPEN) {
+        try {
+          socket.ping();
+        } catch {
+          /* socket dying — the close handler will clean up */
+        }
+      }
+    }, HEARTBEAT_MS);
+
     const cleanup = () => {
+      clearInterval(heartbeat);
       subscriber.disconnect();
     };
 

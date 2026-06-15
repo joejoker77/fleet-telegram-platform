@@ -78,7 +78,22 @@ function fold(events: LiveEvent[]): Turn[] {
 
     if (ev.kind !== "tool.use" || !p) {
       // auth.*, fs.*, live.hello, … — plain rows in the current card.
-      open(ev.ts).steps.push({
+      const card = open(ev.ts);
+      // Idle reconnects (Cloudflare drops a silent ws ~100s → client reconnects)
+      // emit repeated live.hello. Collapse consecutive ones into a single row
+      // with a count so the screen isn't cluttered by transparent reconnects.
+      if (ev.kind === "live.hello") {
+        const last = card.steps[card.steps.length - 1];
+        if (last && last.tool === "live.hello") {
+          const prev = typeof (last.raw as { count?: unknown } | null)?.count === "number" ? (last.raw as { count: number }).count : 1;
+          const count = prev + 1;
+          last.summary = `×${count}`;
+          last.ts = ev.ts;
+          last.raw = { count };
+          return;
+        }
+      }
+      card.steps.push({
         key: `${ev.ts}-${i}`,
         tool: ev.kind,
         summary: typeof p?.path === "string" ? p.path : "",
@@ -182,7 +197,7 @@ function stepLabel(s: Step): { icon: string; text: string; mono?: string } {
     return { icon: "🔌", text: `${short}${sum ? `: ${sum}` : ""}` };
   }
   // non-tool kinds folded as instant rows
-  if (t === "live.hello") return { icon: "👋", text: "Подключение к стриму" };
+  if (t === "live.hello") return { icon: "👋", text: `Подключение к стриму${sum ? ` ${sum}` : ""}` };
   if (t.startsWith("auth.")) return { icon: "🔑", text: "Авторизация" };
   if (t.startsWith("fs.")) return { icon: "📝", text: `Файл: ${sum}` };
   return { icon: "⚙️", text: `${t}${sum ? `: ${sum}` : ""}` };
