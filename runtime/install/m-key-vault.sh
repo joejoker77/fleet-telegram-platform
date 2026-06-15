@@ -18,7 +18,12 @@ set -euo pipefail
 SUFFIX="${1:?usage: m-key-vault.sh <secret-suffix> <host-pattern> <header-name> [value-format]}"
 HOST_PATTERN="${2:?host-pattern required (e.g. api.elevenlabs.io)}"
 HEADER_NAME="${3:?header-name required (e.g. xi-api-key)}"
-VALUE_FORMAT="${4:-{value}}"
+# NB: do NOT inline the default as "${4:-{value}}" — bash closes the ${...} at the
+# first '}', leaving a STRAY literal '}' appended (e.g. 'Bearer {value}}'), which
+# glues a '}' onto the injected token and breaks auth (caught 2026-06-15). Assign,
+# then fall back, so the brace-y default never sits inside a parameter expansion.
+VALUE_FORMAT="${4:-}"
+[ -n "$VALUE_FORMAT" ] || VALUE_FORMAT='{value}'
 
 USER_NAME=vitaliy
 AGENT_IDENT="${USER_NAME}-bot"
