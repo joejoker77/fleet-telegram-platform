@@ -13,7 +13,14 @@
 import { createHmac } from "node:crypto";
 import fs from "node:fs";
 
-const token = fs.readFileSync(process.env.BOT_TOKEN_FILE, "utf8").trim();
+// Token source (no plaintext file required): BOT_TOKEN_FILE → BOT_TOKEN env → fail.
+const token = (process.env.BOT_TOKEN_FILE
+  ? fs.readFileSync(process.env.BOT_TOKEN_FILE, "utf8")
+  : process.env.BOT_TOKEN ?? "").trim();
+if (!token) {
+  console.error("provide the bot token: set BOT_TOKEN_FILE=<path> OR BOT_TOKEN=<token>");
+  process.exit(64);
+}
 const tg = Number(process.env.TG_ID || "2112420187");
 const api = process.env.API || "http://127.0.0.1:8080";
 
