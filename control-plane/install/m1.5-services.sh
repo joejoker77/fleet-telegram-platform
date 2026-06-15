@@ -120,12 +120,16 @@ podman rm -f cp-api >/dev/null 2>&1 || true
 # m5.5b-secretd.sh). Dir-bind: the socket appears when the helper is installed;
 # absent helper only degrades secretSpec connects (clear error), nothing else.
 mkdir -p /run/cp-secretd
+# -v /home:/home (NOT a single tenant): cp-api is the MULTI-TENANT control plane —
+# it reads/writes every tenant's ~/.claude + ~/work (fs API, mcp-gate) and each
+# bot's .env token for multi-bot Mini App initData verification. Single-tenant
+# mount broke the 2nd tenant (dmrudenko, 2026-06-15).
 podman run -d --name cp-api --network host \
   --workdir "$REPO" \
   -v "$REPO:$REPO:ro" \
   -v cp-audit-run:/run/audit \
   -v /run/cp-secretd:/run/cp-secretd \
-  -v "/home/${TENANT}:/home/${TENANT}" \
+  -v /home:/home \
   --secret "$PG_SECRET" --secret "$BOT_SECRET" --secret "$JWT_SECRET" \
   --restart=unless-stopped \
   "$NODE_IMAGE" \

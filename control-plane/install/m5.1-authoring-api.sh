@@ -39,7 +39,7 @@ podman run -d --name cp-api --network host \
   --workdir "$REPO" \
   -v "$REPO:$REPO:ro" \
   -v cp-audit-run:/run/audit \
-  -v "/home/${TENANT}:/home/${TENANT}" \
+  -v /home:/home \
   --secret "$PG_SECRET" --secret "$BOT_SECRET" --secret "$JWT_SECRET" \
   --restart=unless-stopped \
   "$NODE_IMAGE" \
