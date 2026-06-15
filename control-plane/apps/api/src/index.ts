@@ -7,6 +7,7 @@ import { authSessionRequest, type MeResponse } from "@fleet/shared";
 import { getDb, getPool, schema } from "@fleet/db";
 import { loadConfig } from "./config.js";
 import { verifyInitData, InitDataError } from "./initdata.js";
+import { peekInitDataUserId, readTenantBotToken } from "./bot-token.js";
 import { issueSession, verifySession } from "./auth.js";
 import { sendAudit } from "./audit.js";
 import { registerFsRoutes } from "./fs-routes.js";
@@ -135,9 +136,26 @@ app.post("/auth/session", async (req, reply) => {
   const body = authSessionRequest.safeParse(req.body);
   if (!body.success) return reply.code(400).send({ error: "invalid body" });
 
+  // Multi-bot: verify initData against the token of the bot it was opened from.
+  // Peek the (untrusted) user id → resolve the tenant → read THAT bot's token;
+  // the HMAC still gates auth, so picking the candidate by claimed id is safe.
+  // Falls back to the configured token (pilot/single-bot) when none is found.
+  const peekedId = peekInitDataUserId(body.data.initData);
+  let botToken = config.botToken;
+  if (peekedId !== null) {
+    const cand = await db
+      .select({ os: schema.users.osUsername })
+      .from(schema.users)
+      .where(eq(schema.users.telegramUserId, peekedId))
+      .limit(1);
+    const os = cand[0]?.os;
+    const tenantToken = os ? readTenantBotToken(config.tenantHomeRoot, os) : null;
+    if (tenantToken) botToken = tenantToken;
+  }
+
   let verified;
   try {
-    verified = verifyInitData(body.data.initData, config.botToken, config.initDataMaxAgeSeconds);
+    verified = verifyInitData(body.data.initData, botToken, config.initDataMaxAgeSeconds);
   } catch (err) {
     if (err instanceof InitDataError) return reply.code(401).send({ error: err.message });
     throw err;
