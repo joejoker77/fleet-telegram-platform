@@ -67,7 +67,9 @@ RUN chmod 0755 /opt/platform/entrypoint.sh /opt/platform/session-ctl /opt/platfo
  && ln -sf /opt/platform/session-ctl /usr/local/bin/session-ctl \
  # M6.2: key-less Composio helpers (x-api-key injected by the OneCLI proxy)
  && ln -sf /opt/platform/bin/composio-connect /usr/local/bin/composio-connect \
- && ln -sf /opt/platform/bin/composio-session /usr/local/bin/composio-session
+ && ln -sf /opt/platform/bin/composio-session /usr/local/bin/composio-session \
+ # M7.5: host-root bridge for admins (inert unless make-admin.sh provisioned the key)
+ && ln -sf /opt/platform/bin/host-sudo /usr/local/bin/host-sudo
 
 # Sanity: fail the build early if a core tool is missing.
 RUN claude --version && bun --version && code-server --version && node --version \

@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# host-sudo-broker — the AUTHORITATIVE host-side gate for admin (Model B, M7.5).
+#
+# Installed on the HOST as the forced command of the admin's ssh key
+# (authorized_keys: command="/usr/local/sbin/host-sudo-broker",no-pty,...). The
+# pod's `host-sudo` helper connects with that key; the requested command arrives
+# in $SSH_ORIGINAL_COMMAND. Because the key is pinned to this broker, the pod
+# CANNOT open a raw shell or skip the classify/audit step — this is the gate.
+#
+# Flow: classify -> normal: run via NOPASSWD sudo + audit -> destructive:
+#   PHASE 1 (now): BLOCK + audit (never run a destructive cmd unguarded).
+#   PHASE 2 (next): create a Telegram approval and run only on allow.
+#
+# Runs as the admin's host user; that user has NOPASSWD sudo (make-admin.sh).
+set -uo pipefail
+
+CMD="${SSH_ORIGINAL_COMMAND:-}"
+WHO="$(id -un 2>/dev/null || echo '?')"
+AUDIT_SOCK="${AUDIT_SOCK:-/run/audit/collector.sock}"
+
+# Best-effort WORM audit (never fatal). One JSON line to the collector socket.
+audit() {
+  local kind="$1" verdict="$2"
+  command -v socat >/dev/null 2>&1 || return 0
+  # cmd is logged truncated; the collector is the durable record.
+  printf '{"userId":null,"kind":"%s","actor":"host-sudo:%s","payload":{"verdict":"%s","cmd":%s}}\n' \
+    "$kind" "$WHO" "$verdict" "$(printf '%s' "${CMD:0:400}" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))' 2>/dev/null || echo '""')" \
+    | socat - "UNIX-CONNECT:$AUDIT_SOCK" 2>/dev/null || true
+}
+
+[ -n "$CMD" ] || { echo "host-sudo: empty command" >&2; exit 2; }
+
+# Destructive signatures (mirror shellfirm critical set). Conservative: a hit means
+# "needs human approval", not "definitely malicious".
+DESTRUCTIVE='(\brm\b[^|;&]*-[A-Za-z]*r[A-Za-z]*f|\brm\b[^|;&]*-[A-Za-z]*f[A-Za-z]*r|\bmkfs|\bdd\b[^|;&]*\bof=|>[[:space:]]*/dev/sd|/dev/sd[a-z]|:\(\)[[:space:]]*\{[[:space:]]*:|fork|\bshutdown\b|\breboot\b|\bhalt\b|\buserdel\b|\bdeluser\b|\bvisudo\b|/etc/sudoers|\bchpasswd\b|\bpasswd\b[[:space:]]|authorized_keys|\bnft\b[^|;&]*flush|\biptables\b[^|;&]*-F)'
+
+if printf '%s' "$CMD" | grep -qiE "$DESTRUCTIVE"; then
+  audit "admin.hostcmd.destructive" "blocked_phase1"
+  echo "host-sudo: command classified DESTRUCTIVE." >&2
+  echo "host-sudo: HITL approval for destructive host commands is not enabled yet (M7.5 phase 2). Refused for safety." >&2
+  exit 3
+fi
+
+audit "admin.hostcmd.run" "normal"
+# Run as root via NOPASSWD sudo. -n: never prompt (fail instead of hanging if the
+# NOPASSWD rule is missing). bash -lc so pipes/redirects/&& in the command work.
+exec sudo -n bash -lc "$CMD"
