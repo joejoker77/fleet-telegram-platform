@@ -33,6 +33,10 @@ done
 echo "  container running now? $(podman inspect -f '{{.State.Running}}' "claude-$U" 2>/dev/null || echo no)" | tee -a "$LOG"
 
 say "2) start the original host launcher (retakes the token)"
+# Restore the reboot end-state too: host enabled, pod disabled — the mirror of
+# the cutover's finalize, so 'as it was' survives a reboot, not just right now.
+systemctl disable "claude-pod@$U" >/dev/null 2>&1 || true
+systemctl enable "claude-tg@$U" >/dev/null 2>&1 || true
 systemctl start "claude-tg@$U" 2>&1 | tee -a "$LOG"
 
 say "3) verify the host bot is back (bot.pid + getMe)"

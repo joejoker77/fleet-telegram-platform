@@ -2,8 +2,13 @@
 # SEAMLESS CUTOVER of a live per-user bot onto the container runtime (generalized
 # from the proven m3-cutover.sh). Parameterized by <user>.
 #
-#   sudo bash migrate-cutover.sh <os_user>            # real run
-#   DRYRUN=1 sudo bash migrate-cutover.sh <os_user>   # pre-flight asserts only
+#   sudo bash migrate-cutover.sh <os_user>              # real run
+#   sudo bash migrate-cutover.sh <os_user> --dry-run    # pre-flight asserts only
+#   sudo DRYRUN=1 bash migrate-cutover.sh <os_user>     # env form (see note!)
+#
+# ⚠️ DRYRUN via env: `sudo` STRIPS env vars by default, so `DRYRUN=1 sudo …`
+# (var BEFORE sudo) does NOT reach the script and it runs FOR REAL. Use the
+# `--dry-run` FLAG (survives sudo) or put the var AFTER sudo: `sudo DRYRUN=1 …`.
 #
 # ⚠️ `systemctl stop claude-tg@<user>` kills the live Claude session of that bot.
 # RUN FROM THE OPERATOR'S OWN TERMINAL — never from inside the target bot's own
@@ -11,9 +16,19 @@
 #
 # Flow: pre-flight asserts -> stop old host poller (releases token + the shared
 # OAuth) -> start container pod (same ~/.claude, same token, single instance =>
-# no rotation race, no 409) -> verify -> AUTO-ROLLBACK on any failure.
+# no rotation race, no 409) -> verify -> finalize (enable pod, disable host) ->
+# AUTO-ROLLBACK on any failure.
 set -uo pipefail
-U="${1:?usage: migrate-cutover.sh <os_user>}"
+DRYRUN="${DRYRUN:-0}"
+U=""
+for a in "$@"; do
+  case "$a" in
+    --dry-run|-n) DRYRUN=1 ;;
+    -*) echo "unknown flag: $a"; exit 64 ;;
+    *) if [ -z "$U" ]; then U="$a"; else echo "unexpected arg: $a"; exit 64; fi ;;
+  esac
+done
+[ -n "$U" ] || { echo "usage: migrate-cutover.sh <os_user> [--dry-run]"; exit 64; }
 RT=/home/vitaliy/work/fleet-platform/runtime
 SD="/home/$U/.claude/channels/telegram-$U"
 DEFAULT_SD="/home/$U/.claude/channels/telegram"   # plugin fallback if TELEGRAM_STATE_DIR not seen
@@ -43,7 +58,7 @@ chk "control-plane tenant"   "podman exec -i cp-postgres psql -U cplane -d contr
 chk "pod unit installed"     "test -f /etc/systemd/system/claude-pod@.service"
 if [ "$fail" = 1 ]; then echo "  ✗ pre-flight FAILED — fix the MISS rows (run migrate-prep.sh $U <telegram_id>) before cutover." | tee -a "$LOG"; exit 1; fi
 echo "  ✓ pre-flight all green" | tee -a "$LOG"
-[ "${DRYRUN:-0}" = 1 ] && { echo "DRYRUN: stopping before any change."; exit 0; }
+[ "$DRYRUN" = 1 ] && { echo "DRYRUN: stopping before any change." | tee -a "$LOG"; exit 0; }
 
 say "1) STOP old host poller (claude-tg@$U) — releases token; this ends the live session"
 systemctl stop "claude-tg@$U" 2>&1 | tee -a "$LOG"
@@ -83,6 +98,12 @@ code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "https://api.telegra
 echo "  getMe http=$code" | tee -a "$LOG"
 
 if [ "$ok" = 1 ]; then
+  # Finalize the end-state so a reboot brings up the POD, not the old host bot.
+  # Leaving claude-tg@<user> enabled is exactly the dual-runtime race that ran a
+  # host poller parallel to the pod for 16h on 2026-06-11. enable pod / disable host.
+  say "4) FINALIZE — enable pod, disable old host unit (no reboot race)"
+  systemctl enable "claude-pod@$U" >/dev/null 2>&1 && echo "  enabled claude-pod@$U (survives reboot)" | tee -a "$LOG" || echo "  ⚠️ could not enable claude-pod@$U" | tee -a "$LOG"
+  systemctl disable "claude-tg@$U" >/dev/null 2>&1 && echo "  disabled claude-tg@$U (won't come back to race the pod)" | tee -a "$LOG" || echo "  ⚠️ could not disable claude-tg@$U" | tee -a "$LOG"
   say "✅ CUTOVER VERIFIED — container poller live, no 409. Send the bot a message to confirm round-trip."
   echo "  (hot rollback still available: sudo bash $RT/install/migrate-rollback.sh $U)" | tee -a "$LOG"
   exit 0
