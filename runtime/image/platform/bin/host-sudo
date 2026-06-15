@@ -12,10 +12,13 @@ set -uo pipefail
 KEY="${HOST_ADMIN_KEY:-$HOME/.ssh/host-admin}"
 [ -f "$KEY" ] || { echo "host-sudo: no admin key at $KEY — this assistant is not an admin." >&2; exit 4; }
 
-# Host = the pod's default-route gateway (cl-net gateway). Override with CL_HOST_GW.
+# Host address. Override with CL_HOST_GW. The pod image has no iproute2, so we can't
+# rely on `ip route`; podman seeds /etc/hosts with host.containers.internal -> the
+# cl-net gateway, which is exactly the host. Fall back to `ip route` only if present.
 GW="${CL_HOST_GW:-}"
-[ -n "$GW" ] || GW="$(ip route show default 2>/dev/null | awk '/default/{print $3; exit}')"
-[ -n "$GW" ] || { echo "host-sudo: cannot resolve host gateway (set CL_HOST_GW)" >&2; exit 5; }
+[ -n "$GW" ] || GW="$(getent hosts host.containers.internal 2>/dev/null | awk '{print $1; exit}')"
+[ -n "$GW" ] || { command -v ip >/dev/null 2>&1 && GW="$(ip route show default 2>/dev/null | awk '/default/{print $3; exit}')"; }
+[ -n "$GW" ] || { echo "host-sudo: cannot resolve host address (set CL_HOST_GW)" >&2; exit 5; }
 
 # Host login user (the admin's own host account). Injected by make-admin via the
 # pod, else falls back to the pod's user name.
