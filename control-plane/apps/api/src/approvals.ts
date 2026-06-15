@@ -13,13 +13,15 @@ import type { Redis as RedisClient } from "ioredis";
 import { and, desc, eq, lt, sql } from "drizzle-orm";
 import { getDb, schema } from "@fleet/db";
 import { sendAudit } from "./audit.js";
+import { readTenantBotToken } from "./bot-token.js";
 
 export interface ApprovalsDeps {
   redis: RedisClient;
   redisUrl: string;
   jwtSecret: Uint8Array;
   auditSocket: string;
-  botToken: string;
+  botToken: string; // fallback / default outbound bot (pilot tenant)
+  tenantHomeRoot: string; // resolve each tenant's own bot token for the notify
   botUsername: string; // fallback t.me/<bot>?startapp=approvals deep link; "" → no fallback button
   // Mini App URL for the web_app notify button (preferred: opens the app
   // directly; the startapp deep link silently fails on clients with stale bot
@@ -196,15 +198,21 @@ export async function waitForAnswer(
 // inline button is a URL button (opens the Mini App deep link); url buttons
 // produce no callback_query, so there is still no second consumer.
 async function notifyTelegram(deps: ApprovalsDeps, userId: string, title: string): Promise<void> {
-  if (!deps.botToken) return;
   const db = getDb();
   const rows = await db
-    .select({ tg: schema.users.telegramUserId })
+    .select({ tg: schema.users.telegramUserId, os: schema.users.osUsername })
     .from(schema.users)
     .where(eq(schema.users.id, userId))
     .limit(1);
   const chatId = rows[0]?.tg;
   if (!chatId) return;
+
+  // Send via THIS tenant's own bot — a bot can only message users who started
+  // it, so the pilot's bot can't notify another tenant (multi-bot). Fall back to
+  // the configured token only when the tenant token can't be read.
+  const os = rows[0]?.os;
+  const botToken = (os && readTenantBotToken(deps.tenantHomeRoot, os)) || deps.botToken;
+  if (!botToken) return;
 
   const body: Record<string, unknown> = {
     chat_id: chatId,
@@ -228,7 +236,7 @@ async function notifyTelegram(deps: ApprovalsDeps, userId: string, title: string
       ],
     };
   }
-  await fetch(`https://api.telegram.org/bot${deps.botToken}/sendMessage`, {
+  await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),

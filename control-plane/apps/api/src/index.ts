@@ -55,6 +55,7 @@ const approvalsDeps = {
   jwtSecret: config.jwtSecret,
   auditSocket: config.auditSocket,
   botToken: config.botToken,
+  tenantHomeRoot: config.tenantHomeRoot,
   botUsername: config.botUsername,
   miniappUrl: config.miniappUrl,
 };
@@ -129,6 +130,7 @@ registerSessionRoutes(app, {
 registerIntegrationRoutes(app, {
   auditSocket: config.auditSocket,
   botToken: config.botToken,
+  tenantHomeRoot: config.tenantHomeRoot,
 });
 
 // POST /auth/session — verify Telegram initData, resolve the tenant, issue a JWT.

@@ -14,10 +14,12 @@ import type { FastifyInstance } from "fastify";
 import { eq } from "drizzle-orm";
 import { getDb, schema } from "@fleet/db";
 import { sendAudit } from "./audit.js";
+import { readTenantBotToken } from "./bot-token.js";
 
 export interface IntegrationRoutesDeps {
   auditSocket: string;
-  botToken: string;
+  botToken: string; // fallback / default outbound bot (pilot tenant)
+  tenantHomeRoot: string; // resolve each tenant's own bot token for the notify
 }
 
 const UID_RE = /^\d{1,20}$/; // telegram chat_id we embedded in callback_url
@@ -74,18 +76,11 @@ export function registerIntegrationRoutes(app: FastifyInstance, deps: Integratio
 
     // Fire-and-forget: the user's browser should never wait on Telegram/audit.
     void (async () => {
-      if (deps.botToken && allowNotify(uid)) {
-        const text = okFlow
-          ? `✅ ${nice} подключён — можно возвращаться в чат и пользоваться.`
-          : `⚠️ Подключить ${nice} не получилось. Вернитесь в чат и попросите ссылку ещё раз.`;
-        await fetch(`https://api.telegram.org/bot${deps.botToken}/sendMessage`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ chat_id: uid, text }),
-        }).catch(() => {});
-      }
-      // Audit under the tenant if the uid maps to one (it does for real flows).
+      // Resolve the tenant first: we need its os_username to send the notify via
+      // THAT tenant's own bot (multi-bot — a bot can only message users who
+      // started it, so the pilot's bot can't notify another tenant).
       let userId: string | undefined;
+      let osUsername: string | undefined;
       try {
         // telegram_user_id is bigint in PG; out-of-safe-range uids (only
         // possible on forged hits) simply find no tenant.
@@ -93,14 +88,27 @@ export function registerIntegrationRoutes(app: FastifyInstance, deps: Integratio
         const db = getDb();
         const rows = Number.isSafeInteger(tgId)
           ? await db
-              .select({ id: schema.users.id })
+              .select({ id: schema.users.id, os: schema.users.osUsername })
               .from(schema.users)
               .where(eq(schema.users.telegramUserId, tgId))
               .limit(1)
           : [];
         userId = rows[0]?.id;
+        osUsername = rows[0]?.os;
       } catch {
         /* audit is best-effort on this public route */
+      }
+
+      const botToken = (osUsername && readTenantBotToken(deps.tenantHomeRoot, osUsername)) || deps.botToken;
+      if (botToken && allowNotify(uid)) {
+        const text = okFlow
+          ? `✅ ${nice} подключён — можно возвращаться в чат и пользоваться.`
+          : `⚠️ Подключить ${nice} не получилось. Вернитесь в чат и попросите ссылку ещё раз.`;
+        await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ chat_id: uid, text }),
+        }).catch(() => {});
       }
       if (userId) {
         await sendAudit(deps.auditSocket, {
