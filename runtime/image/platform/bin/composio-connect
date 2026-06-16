@@ -10,29 +10,40 @@
 # *.composio.dev (vault secrets staged by runtime/install/m6.2-composio-vault.sh).
 # The raw key never exists in the pod.
 #
-# API notes (docs.composio.dev, checked 2026-06-12):
+# API notes (docs.composio.dev, checked 2026-06-12; multi-account 2026-06-16):
 #   * POST /api/v3.1/connected_accounts/link — hosted auth (Connect Link).
 #     The legacy initiate() endpoint is being retired for Composio-managed
 #     OAuth (400 after 2026-07-03) — do NOT switch back to it.
 #   * Composio appends status=success|failed and connected_account_id to our
-#     callback_url; we pre-embed uid + toolkit so cp-api can notify the chat.
+#     callback_url; we pre-embed uid + toolkit (+ alias) so cp-api can notify.
+#   * MULTI-ACCOUNT (M7.5): /link allows multiple accounts of the same toolkit
+#     per user BY DEFAULT (verified in the REST reference — there is NO
+#     allow_multiple field on the endpoint; the allow_multiple/allowMultiple
+#     guard is SDK-client-side only, and we call raw REST). To connect a 2nd
+#     same-toolkit account, just call again with a distinct --alias. Aliases
+#     must be unique per (user, toolkit) in the project; they let the bot/user
+#     tell accounts apart ("work" vs "personal") and select one at execution.
 set -euo pipefail
 
 BASE="https://backend.composio.dev"
 CB_BASE="${COMPOSIO_CALLBACK_BASE:-https://miniapp.ai-assistant.gg/api}"
-TOOLKIT="" UID_ARG=""
+TOOLKIT="" UID_ARG="" ALIAS=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --toolkit) TOOLKIT="${2:-}"; shift 2;;
     --user-id) UID_ARG="${2:-}"; shift 2;;
+    --alias) ALIAS="${2:-}"; shift 2;;
     --callback-base) CB_BASE="${2:-}"; shift 2;;
-    -h|--help) sed -n '2,16p' "$0"; exit 0;;
+    -h|--help) sed -n '2,24p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
 case "$TOOLKIT" in (*[!a-zA-Z0-9_-]*|"") echo "ERROR: --toolkit must be a slug (e.g. gmail)" >&2; exit 2;; esac
 case "$UID_ARG" in (*[!0-9]*|"") echo "ERROR: --user-id must be the numeric telegram chat_id" >&2; exit 2;; esac
+# alias is optional, but recommended for a 2nd+ account of the same toolkit so
+# the bot/user can tell them apart. Keep it a friendly, URL-safe slug.
+case "$ALIAS" in (*[!a-zA-Z0-9_-]*) echo "ERROR: --alias must be a slug (a-z 0-9 _ -), e.g. work or personal" >&2; exit 2;; esac
 TOOLKIT="$(echo "$TOOLKIT" | tr 'A-Z' 'a-z')"
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
@@ -48,9 +59,12 @@ if [ -z "$AC_ID" ]; then
 fi
 
 # 2) create the Connect Link bound to this user
+# Embed alias in the callback too so cp-api can tell the user WHICH account
+# connected ("✅ Gmail (work) connected"); cp-api ignores it if unhandled.
 CB_URL="$CB_BASE/integrations/composio/callback?uid=$UID_ARG&toolkit=$TOOLKIT"
-jq -n --arg ac "$AC_ID" --arg uid "$UID_ARG" --arg cb "$CB_URL" \
-  '{auth_config_id:$ac, user_id:$uid, callback_url:$cb}' > "$TMP/req.json"
+[ -n "$ALIAS" ] && CB_URL="$CB_URL&alias=$ALIAS"
+jq -n --arg ac "$AC_ID" --arg uid "$UID_ARG" --arg cb "$CB_URL" --arg alias "$ALIAS" \
+  '{auth_config_id:$ac, user_id:$uid, callback_url:$cb} + (if $alias=="" then {} else {alias:$alias} end)' > "$TMP/req.json"
 HTTP="$(curl -sS -o "$TMP/link.json" -w '%{http_code}' \
   -X POST "$BASE/api/v3.1/connected_accounts/link" \
   -H 'content-type: application/json' --data-binary @"$TMP/req.json")"
