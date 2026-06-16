@@ -1,0 +1,283 @@
+#!/usr/bin/env bash
+# graceful-restart-pod-bot — schedule a SAFE graceful restart for a single
+# pod-runtime bot (`claude-pod@<user>.service`, container `claude-<user>`).
+#
+# ADMIN-ONLY by construction: it must run as root on the host, and the only way
+# an admin bot reaches the host is via the audited host-sudo broker
+# (`host-sudo graceful-restart-pod-bot <user>`). Ordinary tenant bots have no
+# host-sudo, so they cannot invoke this.
+#
+# Behaviour mirrors the legacy host helper `graceful-restart-bot` but for pods:
+# it waits until Claude has been continuously idle for IDLE_THRESHOLD_SEC, then
+# runs `systemctl restart claude-pod@<user>.service`. Idle is detected by reading
+# the bot's tmux pane FROM INSIDE its container (the pod sets
+# TMUX_TMPDIR=$HOME/.claude, session "claude") and matching the spinner-glyph
+# line Claude Code prints while working — same regex as the live-status plugin.
+# Idle is measured by wall clock (probe every ~PROBE_SEC), not by tick count,
+# because each podman-exec probe has variable latency.
+#
+# Usage:
+#   graceful-restart-pod-bot list
+#   graceful-restart-pod-bot <user>           # schedule restart, daemonises
+#   graceful-restart-pod-bot <user> status    # is one pending? how long left?
+#   graceful-restart-pod-bot <user> cancel     # cancel pending restart
+#
+# Env overrides (mainly for testing): IDLE_THRESHOLD_SEC, HARD_TIMEOUT_SEC.
+
+set -euo pipefail
+
+STATE_DIR=/run/graceful-restart-pod-bot
+LOG_DIR=/var/log/graceful-restart-pod-bot
+HOME_ROOT=/home                                  # tenant home = $HOME_ROOT/<user>
+PROBE_SEC="${PROBE_SEC:-2}"                      # probe cadence (podman exec is ~0.2-1s)
+IDLE_THRESHOLD_SEC="${IDLE_THRESHOLD_SEC:-300}"  # 5 minutes (override for tests)
+HARD_TIMEOUT_SEC="${HARD_TIMEOUT_SEC:-3600}"     # 60 min — force restart anyway
+
+# Spinner glyph regex used by claude-plugins-official telegram plugin (server.ts).
+# A line with one of these glyphs followed by text ending in "…" => Claude busy.
+SPINNER_GLYPHS='*·✢✺✷✶✱✸✻✽'
+
+require_root() {
+  if [ "$EUID" -ne 0 ]; then
+    echo "graceful-restart-pod-bot: must run as root (via host-sudo)" >&2
+    exit 1
+  fi
+}
+
+validate_user() {
+  local u="$1"
+  if ! [[ "$u" =~ ^[a-z][a-z0-9_-]{0,31}$ ]]; then
+    echo "graceful-restart-pod-bot: invalid user name '$u'" >&2
+    exit 1
+  fi
+  # Template instance must be loadable (resolves template instances, unlike
+  # list-unit-files).
+  if ! systemctl cat "claude-pod@${u}.service" >/dev/null 2>&1; then
+    echo "graceful-restart-pod-bot: no claude-pod@${u}.service unit" >&2
+    exit 1
+  fi
+  if ! podman container exists "claude-${u}" 2>/dev/null; then
+    echo "graceful-restart-pod-bot: container claude-${u} not running" >&2
+    exit 1
+  fi
+}
+
+cmd_list() {
+  # Print bot users that have an active/enabled claude-pod@<user>.service.
+  systemctl list-units --type=service --all --no-legend 'claude-pod@*' 2>/dev/null \
+    | awk '{print $1}' \
+    | sed -e 's|^claude-pod@||' -e 's|\.service$||' \
+    | sort -u
+}
+
+watcher_capture_pane() {
+  # Capture last 60 lines of the bot's tmux 'claude' session FROM INSIDE the
+  # container. tmux socket lives at $HOME/.claude (TMUX_TMPDIR), which podman
+  # exec does not inherit — so we pass it explicitly. exec runs as the tenant uid.
+  local u="$1"
+  podman exec -e "TMUX_TMPDIR=${HOME_ROOT}/${u}/.claude" "claude-${u}" \
+    tmux capture-pane -p -S -60 -t claude 2>/dev/null || true
+}
+
+is_busy() {
+  local u="$1"
+  local pane
+  pane="$(watcher_capture_pane "$u")"
+  if [ -z "$pane" ]; then
+    # Empty capture => couldn't read the pane (session/container down). Treat as
+    # not-busy so we don't block forever.
+    echo 0
+    return
+  fi
+  if printf '%s' "$pane" | grep -qE "[${SPINNER_GLYPHS}][[:space:]]+[^…]*…"; then
+    echo 1
+  else
+    echo 0
+  fi
+}
+
+cmd_run_watcher() {
+  # Internal: long-lived watcher, daemonised by cmd_restart.
+  local u="$1"
+  local state_file="$STATE_DIR/${u}.state"
+  local log_file="$LOG_DIR/${u}.log"
+
+  exec >>"$log_file" 2>&1
+  echo "[$(date -Is)] watcher start pid=$$ user=$u idle_target=${IDLE_THRESHOLD_SEC}s hard_cap=${HARD_TIMEOUT_SEC}s"
+
+  # Idle is measured by WALL CLOCK, not tick count: each `podman exec` probe
+  # takes a variable ~0.2–1s, so a fixed-rate tick assumption would badly
+  # mis-count. We track the last timestamp we saw "busy"; idle_sec = now - that.
+  local start_ts last_busy_ts now last_log busy_now idle_sec
+  start_ts=$(date +%s)
+  last_busy_ts=$start_ts       # require a full idle window even if idle from the start
+  last_log=0
+
+  while :; do
+    now=$(date +%s)
+    if [ $((now - start_ts)) -ge "$HARD_TIMEOUT_SEC" ]; then
+      echo "[$(date -Is)] HARD TIMEOUT reached (${HARD_TIMEOUT_SEC}s) — forcing restart anyway"
+      break
+    fi
+
+    busy_now=$(is_busy "$u")
+    if [ "$busy_now" = "1" ]; then
+      last_busy_ts=$now
+    fi
+    idle_sec=$((now - last_busy_ts))
+
+    printf 'pid=%d\nstart_ts=%d\nidle_sec=%d\nbusy=%s\n' \
+      "$$" "$start_ts" "$idle_sec" "$busy_now" > "$state_file"
+
+    if [ $((now - last_log)) -ge 30 ]; then
+      echo "[$(date -Is)] tick busy=$busy_now idle_sec=${idle_sec}s target=${IDLE_THRESHOLD_SEC}s"
+      last_log=$now
+    fi
+
+    if [ "$idle_sec" -ge "$IDLE_THRESHOLD_SEC" ]; then
+      echo "[$(date -Is)] idle threshold reached (${idle_sec}s ≥ ${IDLE_THRESHOLD_SEC}s) — restarting"
+      break
+    fi
+
+    sleep "$PROBE_SEC"
+  done
+
+  /bin/systemctl restart "claude-pod@${u}.service"
+  local rc=$?
+  echo "[$(date -Is)] systemctl restart claude-pod@${u}.service rc=$rc"
+  rm -f "$state_file"
+}
+
+cmd_restart() {
+  local u="$1"
+  validate_user "$u"
+
+  install -d -m 0755 "$STATE_DIR" "$LOG_DIR"
+
+  local state_file="$STATE_DIR/${u}.state"
+  if [ -f "$state_file" ]; then
+    local existing_pid
+    existing_pid=$(awk -F= '/^pid=/{print $2}' "$state_file" 2>/dev/null || true)
+    if [ -n "${existing_pid:-}" ] && kill -0 "$existing_pid" 2>/dev/null; then
+      echo "graceful-restart-pod-bot: $u already has a pending restart (pid=$existing_pid)" >&2
+      echo "Use '$0 $u status' or '$0 $u cancel'." >&2
+      exit 2
+    fi
+    rm -f "$state_file"
+  fi
+
+  # Daemonise the watcher. Pass thresholds through so a test override survives
+  # into the detached process.
+  IDLE_THRESHOLD_SEC="$IDLE_THRESHOLD_SEC" HARD_TIMEOUT_SEC="$HARD_TIMEOUT_SEC" PROBE_SEC="$PROBE_SEC" \
+    setsid nohup "$0" __watch "$u" </dev/null >/dev/null 2>&1 &
+  disown 2>/dev/null || true
+
+  sleep 0.3
+
+  echo "Graceful restart scheduled for claude-pod@${u}.service."
+  echo "  Triggers after ${IDLE_THRESHOLD_SEC}s of continuous idle, or ${HARD_TIMEOUT_SEC}s hard cap."
+  echo "  Status: $0 $u status"
+  echo "  Cancel: $0 $u cancel"
+  echo "  Log:    $LOG_DIR/${u}.log"
+}
+
+cmd_status() {
+  local u="$1"
+  validate_user "$u"
+  local state_file="$STATE_DIR/${u}.state"
+  if [ ! -f "$state_file" ]; then
+    echo "No pending restart for $u."
+    exit 0
+  fi
+  local pid start_ts idle_sec busy
+  pid=$(awk -F= '/^pid=/{print $2}' "$state_file")
+  start_ts=$(awk -F= '/^start_ts=/{print $2}' "$state_file")
+  idle_sec=$(awk -F= '/^idle_sec=/{print $2}' "$state_file")
+  busy=$(awk -F= '/^busy=/{print $2}' "$state_file")
+  local now elapsed remaining
+  now=$(date +%s)
+  elapsed=$((now - start_ts))
+  remaining=$((IDLE_THRESHOLD_SEC - idle_sec))
+  if ! kill -0 "$pid" 2>/dev/null; then
+    echo "State file is stale (watcher pid=$pid no longer running). Cleaning up."
+    rm -f "$state_file"
+    exit 0
+  fi
+  echo "Pending restart for claude-pod@${u}.service:"
+  echo "  Watcher pid:     $pid"
+  echo "  Elapsed:         ${elapsed}s (hard cap ${HARD_TIMEOUT_SEC}s)"
+  echo "  Currently busy:  $busy"
+  echo "  Continuous idle: ${idle_sec}s / ${IDLE_THRESHOLD_SEC}s target"
+  if [ "$remaining" -gt 0 ]; then
+    echo "  Earliest restart: in ~${remaining}s of continuous idle"
+  else
+    echo "  About to restart now."
+  fi
+}
+
+cmd_cancel() {
+  local u="$1"
+  validate_user "$u"
+  local state_file="$STATE_DIR/${u}.state"
+  if [ ! -f "$state_file" ]; then
+    echo "No pending restart for $u to cancel."
+    exit 0
+  fi
+  local pid
+  pid=$(awk -F= '/^pid=/{print $2}' "$state_file" 2>/dev/null || true)
+  if [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null; then
+    kill "$pid"
+    sleep 0.3
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+    echo "Cancelled pending restart for $u (watcher pid=$pid)."
+  else
+    echo "Watcher pid in state file is not running; cleaning up stale state."
+  fi
+  rm -f "$state_file"
+}
+
+main() {
+  case "${1:-}" in
+    list)
+      cmd_list
+      ;;
+    __watch)
+      require_root
+      [ -n "${2:-}" ] || { echo "usage: __watch <user>" >&2; exit 1; }
+      cmd_run_watcher "$2"
+      ;;
+    -h|--help|help|"")
+      cat <<EOF
+Usage: graceful-restart-pod-bot list
+       graceful-restart-pod-bot <user>
+       graceful-restart-pod-bot <user> status
+       graceful-restart-pod-bot <user> cancel
+
+Admin-only (root via host-sudo). Schedule a graceful restart for a
+claude-pod@<user>.service. Waits until Claude has been continuously idle for
+${IDLE_THRESHOLD_SEC}s (5 min) before restarting; hard cap ${HARD_TIMEOUT_SEC}s
+(60 min). Idle detection: podman exec tmux capture-pane every ~${PROBE_SEC}s
+(wall-clock), spinner-glyph regex. Env overrides: IDLE_THRESHOLD_SEC,
+HARD_TIMEOUT_SEC, PROBE_SEC.
+EOF
+      ;;
+    *)
+      require_root
+      local user="$1"
+      local sub="${2:-restart}"
+      case "$sub" in
+        restart) cmd_restart "$user" ;;
+        status)  cmd_status "$user" ;;
+        cancel)  cmd_cancel "$user" ;;
+        *)
+          echo "graceful-restart-pod-bot: unknown subcommand '$sub'" >&2
+          exit 1
+          ;;
+      esac
+      ;;
+  esac
+}
+
+main "$@"
