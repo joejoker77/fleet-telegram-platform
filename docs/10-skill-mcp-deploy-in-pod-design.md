@@ -71,9 +71,63 @@ git-HEAD restore model already works.)
 
 ## Recommendation & next step
 
-Go with **Option A** (control-plane-driven, reuses M8). Next step is to scope the cp-api
-reconcile routine + the `users.yaml` allow-list parsing + the rebaseline hook, then build behind
-a per-tenant flag and validate on the vitaliy pilot before switching any host timer off.
+Go with **Option A** (control-plane-driven, reuses M8). ✅ CONFIRMED by Vitaliy 2026-06-16.
 
-**Open question for Vitaliy:** confirm Option A (control-plane-driven) vs Option B (in each
-pod). The rest of the design assumes A.
+---
+
+## Implementation spec (reconciler fully reverse-engineered 2026-06-16)
+
+Read both canonical reconcilers (`deploy/deploy-skills`, `control-plane/install/deploy-mcp.v2.4`).
+The cp-api reconcile must reproduce, **per pod tenant**:
+
+### Skills (from `deploy-skills`)
+1. Source: claude-bot-skills `skills/` at `main`. (Host uses an SSH-key git clone into
+   `~/.claude/skills-repo`; cp-api instead **fetches over HTTPS via the scoped proxy token** —
+   no SSH, no per-pod clone.)
+2. Allow-list: every dir under `skills/`, minus those whose `users.yaml > skills.<slug>.users`
+   list excludes the tenant. (No entry ⇒ allowed for everyone.)
+3. Apply: `rsync -a --delete` each allowed skill → `~/.claude/skills/<slug>/` (chown tenant);
+   **remove** any skill dir present but no longer allowed / no longer in the repo.
+
+### MCP (from `deploy-mcp.v2.4`)
+1. Source: `mcp/<slug>/template.json` + `users.yaml` `mcp:` section.
+2. Allow-list: same rule via `mcp.<slug>.users`.
+3. Per slug: take `mcp_stanza` (or whole template if flat). Resolve placeholders:
+   - `${USER_CONFIG:key}` ← `users.yaml > mcp.<slug>.user_config.<user>.<key>`. **Missing ⇒ skip the MCP.**
+   - `${SECRET:name}` ← **literal marker `${ONECLI:name}`** (NEVER the real value). Also verify
+     the secret is BOUND to the tenant's OneCLI agent; **not bound ⇒ skip the MCP**. Binding check:
+     agent UUID for identifier `<user>-bot` → its bound secret IDs → cross-ref `onecli secrets list`
+     → strip the `<user>-<slug>-` prefix mcp-set-secret prepends → bare name must match template.
+4. Managed-set merge into `settings.json` `mcpServers`: track managed slugs in state
+   (host: `/var/lib/mcp-deploy/<user>.managed.json`); remove previously-managed slugs no longer
+   resolved; add/update resolved ones; **leave non-managed entries (e.g. shellfirm) untouched**.
+   Atomic write, chown tenant, 0600. On change → graceful restart (now `graceful-restart-pod-bot`).
+5. The deploy-time judge/scanner GATE is **deprecated (ADR-004)** — deploy reconciles CI-vetted
+   content; do NOT re-scan here.
+
+### Integration wrinkles to solve (NEW work — flagged)
+- **W1 — settings.json vs settings-guard (the real one):** `~/.claude` is a git repo; the host
+  `agentshield-settings-guard@<user>.path` restores `settings.json` from git HEAD + alerts on any
+  unexpected change. cp-api is a *container* — it can write the shared volume but **cannot** run
+  the host-side `agentshield-settings-rebaseline` / commit-to-HEAD. So a cp-api write would be
+  reverted. Resolution: a tiny **host-side apply hook** (same pattern as `cp-secretd`: cp-api
+  sends the staged settings change over a local socket; the host helper commits it to `~/.claude`
+  HEAD + rebaselines the guard). This keeps secrets/host-trust on the host and lets cp-api drive.
+- **W2 — OneCLI agent/secret queries from cp-api:** the binding check needs
+  `onecli agents list` / `agents secrets --id` / `secrets list`. Confirm cp-api's OneCLI client
+  can run these (M6 wired secret *binding*; need *read* of agent secret sets too).
+- **W3 — reconcile trigger:** a periodic per-tenant reconcile (interval or DB-event). NOT an LLM
+  call → complies with the no-recurring-LLM rule (the host already runs these on 10-min timers).
+
+### Phased build plan (rollback-first, pilot-validated)
+1. cp-api reconcile **core** (fetch + allow-list + resolve) with a **dry-run** that logs the
+   computed skills set + mcpServers diff for a tenant — no writes. Validate on vitaliy vs the
+   current host-deployed state (must match byte-for-byte intent).
+2. Add the apply path + **W1 host apply-hook**; write skills; write settings.json via the hook;
+   confirm the settings-guard does NOT revert. Validate on vitaliy.
+3. Wire the reconcile trigger; run cp-api path and host timer in parallel on vitaliy, diff.
+4. Per bot at cutover: disable host `skill-deploy@`/`mcp-deploy@` timers (runbook step). Rollback
+   = re-enable host timers.
+
+**Open question for Vitaliy:** W1 approach — a small host apply-hook (recommended, mirrors
+cp-secretd; keeps the settings-guard intact) is the cleanest. Confirm before I build phase 2.
