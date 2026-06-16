@@ -50,6 +50,13 @@ export const approvalStatus = pgEnum("approval_status", [
   "denied",
   "expired",
 ]);
+// M8.1 marketplace: lifecycle of an artifact version through publish.
+export const artifactStatus = pgEnum("artifact_status", [
+  "draft", // created locally, not yet scanned/published
+  "scanning", // scan in flight
+  "published", // scan-pass + merged into the marketplace repo
+  "rejected", // scan-fail or denied
+]);
 
 // ───────────────────────── tables ─────────────────────────
 export const users = pgTable("users", {
@@ -96,19 +103,27 @@ export const sessions = pgTable("sessions", {
   lastMessageAt: timestamp("last_message_at", { withTimezone: true }),
 });
 
-export const artifacts = pgTable("artifacts", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  ownerUserId: uuid("owner_user_id").references(() => users.id),
-  type: artifactType("type").notNull(),
-  name: text("name").notNull(),
-  visibility: text("visibility").notNull().default("private"), // public/private/selective
-});
+export const artifacts = pgTable(
+  "artifacts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    ownerUserId: uuid("owner_user_id").references(() => users.id),
+    type: artifactType("type").notNull(),
+    name: text("name").notNull(),
+    description: text("description"), // M8.1: short marketplace blurb
+    visibility: text("visibility").notNull().default("private"), // public/private/selective
+  },
+  // M8.1: one artifact per (owner, type, name) — re-publishing adds a version, not a row.
+  (t) => [uniqueIndex("artifacts_owner_type_name_key").on(t.ownerUserId, t.type, t.name)],
+);
 
 export const artifactVersions = pgTable("artifact_versions", {
   id: uuid("id").primaryKey().defaultRandom(),
   artifactId: uuid("artifact_id").references(() => artifacts.id, { onDelete: "cascade" }),
   version: text("version").notNull(),
+  status: artifactStatus("status").notNull().default("draft"), // M8.1 publish lifecycle
   gitRef: text("git_ref"),
+  scanSummary: jsonb("scan_summary"), // M8.1: worst-verdict + per-scanner rollup
   provenance: jsonb("provenance"),
   publishedAt: timestamp("published_at", { withTimezone: true }),
 });
