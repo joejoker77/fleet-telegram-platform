@@ -71,7 +71,9 @@ RUN chmod 0755 /opt/platform/entrypoint.sh /opt/platform/session-ctl /opt/platfo
  # M7.5: deterministic multi-account tool execution (account-aware execute path)
  && ln -sf /opt/platform/bin/composio-exec /usr/local/bin/composio-exec \
  # M7.5: host-root bridge for admins (inert unless make-admin.sh provisioned the key)
- && ln -sf /opt/platform/bin/host-sudo /usr/local/bin/host-sudo
+ && ln -sf /opt/platform/bin/host-sudo /usr/local/bin/host-sudo \
+ # M8.1: pod-side GitHub publisher for the artifact marketplace (PAT injected by proxy)
+ && ln -sf /opt/platform/bin/registry-publish /usr/local/bin/registry-publish
 
 # Sanity: fail the build early if a core tool is missing.
 RUN claude --version && bun --version && code-server --version && node --version \

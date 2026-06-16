@@ -1,0 +1,220 @@
+#!/usr/bin/env node
+// registry-publish — M8.1 pod-side GitHub publisher for the artifact marketplace.
+//
+//   registry-publish --type skill --name my-skill --version 1.0.0 \
+//                    --repo joejoker77/claude-bot-skills --owner-username vitaliy \
+//                    [--source <abs path>] [--merge] [--dry-run]
+//
+// WHY POD-SIDE: the GitHub PAT (OneCLI secret vitaliy-github-github_pat, host
+// api.github.com) is injected by the pod's egress proxy. cp-api runs host-side
+// and does NOT get the token, so cp-api owns scan+approval+registry-DB and
+// DISPATCHES the git I/O here (session-task supervisor pattern). The raw token
+// never exists in this process — curl's CONNECT to api.github.com is MITM'd by
+// the proxy, which adds Authorization. We shell out to curl (it honours
+// HTTPS_PROXY; Node's global fetch/undici would bypass the proxy).
+//
+// Output: a single JSON object on stdout describing the result (branch, commit,
+// PR). Exit 0 on success, non-zero on failure (with {ok:false,error} JSON).
+//
+// Publish flow (Git Data API → atomic multi-file commit → PR; merge is left to
+// the repo's CI auto-merge unless --merge is passed):
+//   1. resolve default branch + base commit/tree sha
+//   2. create blobs for each artifact file
+//   3. create a tree on top of the base tree, then a commit
+//   4. create a branch ref → that commit
+//   5. open a PR (the repo's signature-scanner / gates run on it)
+//   6. (--merge) squash-merge via API (admin); else leave for CI auto-merge
+"use strict";
+const { execFileSync } = require("node:child_process");
+const fs = require("node:fs");
+const path = require("node:path");
+
+// ── arg parsing ──────────────────────────────────────────────────────────
+function parseArgs(argv) {
+  const a = {};
+  for (let i = 0; i < argv.length; i++) {
+    const k = argv[i];
+    if (!k.startsWith("--")) continue;
+    const key = k.slice(2);
+    const next = argv[i + 1];
+    if (next === undefined || next.startsWith("--")) {
+      a[key] = true;
+    } else {
+      a[key] = next;
+      i++;
+    }
+  }
+  return a;
+}
+const args = parseArgs(process.argv.slice(2));
+
+function die(error, extra = {}) {
+  process.stdout.write(JSON.stringify({ ok: false, error, ...extra }) + "\n");
+  process.exit(1);
+}
+
+const TYPE = args.type;
+const NAME = args.name;
+const VERSION = args.version || "0.0.0";
+const REPO = args.repo || "joejoker77/claude-bot-skills";
+const OWNER_USERNAME = args["owner-username"] || process.env.USER || "unknown";
+const DRY_RUN = !!args["dry-run"];
+const DO_MERGE = !!args.merge;
+
+const VALID_TYPES = ["skill", "subagent", "command", "workflow"];
+if (!VALID_TYPES.includes(TYPE)) die(`--type must be one of ${VALID_TYPES.join("|")}`);
+if (!NAME || !/^[a-z0-9][a-z0-9._-]*$/i.test(NAME)) die("--name required, [a-z0-9._-]");
+if (!/^[\w.-]+\/[\w.-]+$/.test(REPO)) die("--repo must be owner/name");
+
+// ── (type,name) → source path in the tenant .claude + destination in the repo ─
+// Source defaults under $HOME/.claude; --source overrides (cp-api passes an
+// absolute path it resolved against the tenant home).
+const HOME = process.env.HOME || `/home/${OWNER_USERNAME}`;
+const CLAUDE = path.join(HOME, ".claude");
+function layout(type, name) {
+  switch (type) {
+    case "skill":
+      return { src: path.join(CLAUDE, "skills", name), destDir: `skills/${name}`, dir: true };
+    case "subagent":
+      return { src: path.join(CLAUDE, "agents", `${name}.md`), destDir: `agents/${name}.md`, dir: false };
+    case "command":
+      return { src: path.join(CLAUDE, "commands", `${name}.md`), destDir: `commands/${name}.md`, dir: false };
+    case "workflow":
+      // A compiled workflow is a command file (+ optional agents/), authored by
+      // the WorkflowBuilder (M5.9). MVP publishes the command file under workflows/.
+      return { src: path.join(CLAUDE, "commands", `${name}.md`), destDir: `workflows/${name}.md`, dir: false };
+    default:
+      die("unreachable type");
+  }
+}
+const lay = args.source ? { src: args.source, destDir: defaultDest(TYPE, NAME), dir: fs.existsSync(args.source) && fs.statSync(args.source).isDirectory() } : layout(TYPE, NAME);
+function defaultDest(type, name) {
+  return type === "skill" ? `skills/${name}` : type === "subagent" ? `agents/${name}.md` : type === "command" ? `commands/${name}.md` : `workflows/${name}.md`;
+}
+
+// ── collect files (relative repo path → utf8/base64 content) ────────────────
+const MAX_BYTES = 512 * 1024;
+let total = 0;
+const files = []; // {repoPath, b64}
+function addFile(absPath, repoPath) {
+  const buf = fs.readFileSync(absPath);
+  total += buf.length;
+  if (total > MAX_BYTES) die(`artifact exceeds ${MAX_BYTES} bytes`);
+  files.push({ repoPath, b64: buf.toString("base64") });
+}
+if (!fs.existsSync(lay.src)) die(`source not found: ${lay.src}`);
+if (lay.dir) {
+  const walk = (dir, prefix) => {
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (ent.name === "node_modules" || ent.name === ".git") continue;
+      const abs = path.join(dir, ent.name);
+      const rel = prefix ? `${prefix}/${ent.name}` : ent.name;
+      if (ent.isDirectory()) walk(abs, rel);
+      else addFile(abs, `${lay.destDir}/${rel}`);
+    }
+  };
+  walk(lay.src, "");
+} else {
+  addFile(lay.src, lay.destDir);
+}
+if (!files.length) die("no files collected");
+
+// ── GitHub REST via curl (proxy injects the PAT) ───────────────────────────
+const API = "https://api.github.com";
+function gh(method, urlPath, body) {
+  const url = urlPath.startsWith("http") ? urlPath : API + urlPath;
+  const cargs = [
+    "-sS", "-X", method, url,
+    "-H", "Accept: application/vnd.github+json",
+    "-H", "X-GitHub-Api-Version: 2022-11-28",
+    "-H", "User-Agent: fleet-registry-publish",
+    "-w", "\n__HTTP__%{http_code}",
+  ];
+  if (body !== undefined) {
+    cargs.push("-H", "Content-Type: application/json", "--data-binary", "@-");
+  }
+  let out;
+  try {
+    out = execFileSync("curl", cargs, {
+      input: body !== undefined ? JSON.stringify(body) : undefined,
+      encoding: "utf8",
+      maxBuffer: 8 * 1024 * 1024,
+    });
+  } catch (e) {
+    die(`curl failed: ${e.message}`);
+  }
+  const m = out.lastIndexOf("\n__HTTP__");
+  const code = m >= 0 ? parseInt(out.slice(m + 9), 10) : 0;
+  const text = m >= 0 ? out.slice(0, m) : out;
+  let json = null;
+  try { json = text ? JSON.parse(text) : null; } catch { /* non-json */ }
+  return { code, json, text };
+}
+function ok(r, ...codes) {
+  const allow = codes.length ? codes : [200, 201];
+  if (!allow.includes(r.code)) {
+    die(`GitHub ${r.code}: ${(r.json && r.json.message) || r.text.slice(0, 200)}`, { httpCode: r.code });
+  }
+  return r.json;
+}
+
+// branch name: deterministic, no Date.now (sandbox-safe) — derive from version + a short content hash
+const crypto = require("node:crypto");
+const contentSig = crypto.createHash("sha256").update(files.map((f) => f.repoPath + f.b64).join("")).digest("hex").slice(0, 8);
+const branch = `mp/${OWNER_USERNAME}/${TYPE}-${NAME}-${VERSION}-${contentSig}`.replace(/[^a-zA-Z0-9/_.-]/g, "-");
+
+// ── dry-run: report what WOULD happen, no writes ────────────────────────────
+const repoInfo = ok(gh("GET", `/repos/${REPO}`));
+const defaultBranch = repoInfo.default_branch;
+if (DRY_RUN) {
+  process.stdout.write(JSON.stringify({
+    ok: true, dryRun: true, repo: REPO, defaultBranch, branch,
+    files: files.map((f) => ({ path: f.repoPath, bytes: Buffer.from(f.b64, "base64").length })),
+    totalBytes: total, perms: repoInfo.permissions,
+  }) + "\n");
+  process.exit(0);
+}
+
+// ── 1. base ref + base tree ─────────────────────────────────────────────────
+const baseRef = ok(gh("GET", `/repos/${REPO}/git/ref/heads/${defaultBranch}`));
+const baseSha = baseRef.object.sha;
+const baseCommit = ok(gh("GET", `/repos/${REPO}/git/commits/${baseSha}`));
+const baseTree = baseCommit.tree.sha;
+
+// ── 2. blobs ────────────────────────────────────────────────────────────────
+const treeEntries = files.map((f) => {
+  const blob = ok(gh("POST", `/repos/${REPO}/git/blobs`, { content: f.b64, encoding: "base64" }));
+  return { path: f.repoPath, mode: "100644", type: "blob", sha: blob.sha };
+});
+
+// ── 3. tree + commit ─────────────────────────────────────────────────────────
+const tree = ok(gh("POST", `/repos/${REPO}/git/trees`, { base_tree: baseTree, tree: treeEntries }));
+const commitMsg = `marketplace: publish ${TYPE}/${NAME}@${VERSION} (by ${OWNER_USERNAME})`;
+const commit = ok(gh("POST", `/repos/${REPO}/git/commits`, { message: commitMsg, tree: tree.sha, parents: [baseSha] }));
+
+// ── 4. branch ref ────────────────────────────────────────────────────────────
+ok(gh("POST", `/repos/${REPO}/git/refs`, { ref: `refs/heads/${branch}`, sha: commit.sha }), 201);
+
+// ── 5. PR (repo CI scanners gate it) ─────────────────────────────────────────
+const pr = ok(gh("POST", `/repos/${REPO}/pulls`, {
+  title: `[marketplace] ${TYPE}/${NAME}@${VERSION}`,
+  head: branch,
+  base: defaultBranch,
+  body: `Automated marketplace publish.\n\n- type: ${TYPE}\n- name: ${NAME}\n- version: ${VERSION}\n- author: ${OWNER_USERNAME}\n- files: ${files.length}\n\nScanned by the platform gate before this PR was opened; the repo's CI scanners run again here.`,
+}), 201);
+
+// ── 6. optional force-merge (admin); default = leave for CI auto-merge ───────
+let merged = false;
+let mergeState = "left-for-ci";
+if (DO_MERGE) {
+  const mr = gh("PUT", `/repos/${REPO}/pulls/${pr.number}/merge`, { merge_method: "squash" });
+  if (mr.code === 200) { merged = true; mergeState = "squash-merged"; }
+  else { mergeState = `merge-deferred(${mr.code}:${(mr.json && mr.json.message) || ""})`; }
+}
+
+process.stdout.write(JSON.stringify({
+  ok: true, repo: REPO, branch, defaultBranch,
+  commitSha: commit.sha, prNumber: pr.number, prUrl: pr.html_url,
+  gitRef: branch, merged, mergeState,
+  files: files.map((f) => f.repoPath),
+}) + "\n");
