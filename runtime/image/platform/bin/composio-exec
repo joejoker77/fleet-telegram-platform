@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# composio-exec — M7.5: execute ONE Composio tool with EXPLICIT connected-account
+# selection (alias or connected_account_id), via the tool-router execute endpoint.
+#
+#   composio-exec --user-id <chat_id> --tool GMAIL_FETCH_EMAILS \
+#                 --account work --args '{"query":"is:unread","max_results":3}'
+#
+# WHY THIS EXISTS: the mcp__composio__ meta-tools do NOT forward a per-call
+# `account` selector — they silently use the most-recently-connected account.
+# For a user with >1 account of the same toolkit that risks acting on the WRONG
+# one with no error. This helper drives POST /api/v3.1/tool_router/session/{id}
+# /execute with a top-level `account` field, which IS honoured (alias or ca_id).
+#
+# --account is OPTIONAL: omit for single-account toolkits. composio-session
+# creates require_explicit_selection sessions, so omitting --account on a toolkit
+# that has 2+ ACTIVE accounts returns a selection error (safe — never silent).
+#
+# KEY-LESS BY DESIGN: runs in the pod; the OneCLI egress proxy injects the
+# platform x-api-key for *.composio.dev. The raw key never exists in the pod.
+set -euo pipefail
+
+BASE="https://backend.composio.dev"
+UID_ARG="" TOOL="" ACCOUNT="" ARGS="{}" SESSION=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --user-id) UID_ARG="${2:-}"; shift 2;;
+    --tool)    TOOL="${2:-}"; shift 2;;
+    --account) ACCOUNT="${2:-}"; shift 2;;
+    --args)    ARGS="${2:-}"; shift 2;;
+    --session) SESSION="${2:-}"; shift 2;;   # reuse an existing trs_ id (optional)
+    -h|--help) sed -n '2,16p' "$0"; exit 0;;
+    *) echo "unknown arg: $1" >&2; exit 2;;
+  esac
+done
+case "$UID_ARG" in (*[!0-9]*|"") echo "ERROR: --user-id must be the numeric telegram chat_id" >&2; exit 2;; esac
+[ -n "$TOOL" ] || { echo "ERROR: --tool required (e.g. GMAIL_FETCH_EMAILS)" >&2; exit 2; }
+case "$TOOL" in (*[!A-Z0-9_]*) echo "ERROR: --tool must be a tool slug (A-Z 0-9 _), e.g. GMAIL_FETCH_EMAILS" >&2; exit 2;; esac
+case "$ACCOUNT" in (*[!a-zA-Z0-9_-]*) echo "ERROR: --account must be an alias or connected_account_id (a-z 0-9 _ -)" >&2; exit 2;; esac
+printf '%s' "$ARGS" | jq -e . >/dev/null 2>&1 || { echo "ERROR: --args must be valid JSON (default '{}')" >&2; exit 2; }
+
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+
+# fresh tool-router session unless the caller pinned one (--session reuses it)
+SID="$SESSION"
+if [ -z "$SID" ]; then
+  SID="$(composio-session --user-id "$UID_ARG" 2>/dev/null | sed -n 's#.*/tool_router/\(trs_[^/]*\)/mcp#\1#p')"
+fi
+[ -n "$SID" ] || { echo "ERROR: could not obtain a tool-router session id" >&2; exit 1; }
+
+jq -n --arg t "$TOOL" --argjson a "$ARGS" --arg acct "$ACCOUNT" \
+  '{tool_slug:$t, arguments:$a} + (if $acct=="" then {} else {account:$acct} end)' > "$TMP/req.json"
+
+HTTP="$(curl -sS -o "$TMP/res.json" -w '%{http_code}' -X POST \
+  "$BASE/api/v3.1/tool_router/session/$SID/execute" \
+  -H 'content-type: application/json' --data-binary @"$TMP/req.json")"
+case "$HTTP" in
+  (2*) cat "$TMP/res.json";;
+  (*)  echo "ERROR: tool_router execute HTTP $HTTP: $(cat "$TMP/res.json")" >&2; exit 1;;
+esac
