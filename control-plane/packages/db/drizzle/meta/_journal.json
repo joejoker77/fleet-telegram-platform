@@ -29,6 +29,13 @@
       "when": 1781606505081,
       "tag": "0003_curvy_steel_serpent",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1781617729746,
+      "tag": "0004_installs_cascade",
+      "breakpoints": true
     }
   ]
 }

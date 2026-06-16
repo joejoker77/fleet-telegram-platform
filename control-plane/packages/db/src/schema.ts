@@ -145,7 +145,10 @@ export const installs = pgTable(
   "installs",
   {
     userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
-    artifactVersionId: uuid("artifact_version_id").references(() => artifactVersions.id),
+    // cascade: unpublishing an artifact (→ its versions) must clear install rows
+    // that pin those versions; otherwise the FK blocks DELETE /registry/items/:id
+    // with a 500 once anyone has imported it. Installed files on disk are untouched.
+    artifactVersionId: uuid("artifact_version_id").references(() => artifactVersions.id, { onDelete: "cascade" }),
     installedAt: timestamp("installed_at", { withTimezone: true }).notNull().defaultNow(),
     pinnedVersion: text("pinned_version"),
   },

@@ -59,7 +59,9 @@ let fails = 0;
 const ok = (c, m) => (c ? console.log(`  ✓ ${m}`) : (fails++, console.error(`  ✗ ${m}`)));
 const j = async (r) => ({ status: r.status, body: await r.json().catch(() => ({})) });
 const post = (p, body) => fetch(`${api}${p}`, { method: "POST", headers: H, body: JSON.stringify(body) }).then(j);
-const del = (p) => fetch(`${api}${p}`, { method: "DELETE", headers: H }).then(j);
+// DELETE carries no body — sending content-type:application/json with an empty
+// body makes Fastify reject it (400 FST_ERR_CTP_EMPTY_JSON_BODY). Auth header only.
+const del = (p) => fetch(`${api}${p}`, { method: "DELETE", headers: { authorization: H.authorization } }).then(j);
 const get = (p) => fetch(`${api}${p}`, { headers: H }).then(j);
 
 console.log("PHASE A — safe (no GitHub mutation)");
