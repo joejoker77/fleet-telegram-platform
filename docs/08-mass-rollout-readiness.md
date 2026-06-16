@@ -21,19 +21,20 @@ Migration tooling already in repo and correct: `runtime/install/migrate-prep.sh`
 
 ## BLOCK A — finish / include in the build BEFORE mass rollout
 
-### A1. graceful-restart → pod-aware  *(user-flagged; CONFIRMED real)*
+### A1. graceful-restart → pod-aware  *(user-flagged; CONFIRMED real)* — DECIDED 2026-06-16
 `/usr/local/sbin/graceful-restart-bot` (host, **not in repo**, dated May 18) is fully
 host-specific: it targets `claude-tg@<user>` and detects "busy" by reading the tenant's
 **host-side tmux pane** (`sudo -u <user> tmux capture-pane -t claude`). For pod tenants
 the unit is `claude-pod@` and tmux runs *inside* the container — so it neither finds the
 unit nor sees activity.
-- **Action:** add `graceful-restart-pod-bot <user>` (target `claude-pod@`, read idle via
-  `podman exec claude-<user> tmux capture-pane …` reusing the same spinner-glyph logic, or
-  via the entrypoint's session-state). Bring the helper **into the repo** (it's currently
-  unversioned). Used by `stabilization/apply.sh:47`, so operators will reach for it.
-- **Decision:** build the pod helper, **or** accept "pod restart is non-graceful, the
-  entrypoint supervisor recovers in ~20s" and document that. (Recommend: build it — graceful
-  restart matters when a bot is mid-task.)
+- **DECISION (Vitaliy):** build an **admin-only** command `graceful-restart-pod-bot <user>`:
+  - available to admins only (gated by the host-sudo broker — ordinary bots don't have it);
+  - restarts the pod of **any** specified user on demand;
+  - waits for **5 min of continuous inactivity** (idle read from the target's in-container
+    tmux via `podman exec claude-<user> tmux capture-pane -p -S -60 -t claude`, same
+    spinner-glyph logic as the old script) + a hard cap (~60 min) so it never blocks forever;
+  - then `systemctl restart claude-pod@<user>`.
+  Port the old mechanism to pod + bind to the admin tier. Bring the helper **into the repo**.
 
 ### A2. skill-deploy / mcp-deploy model for pod tenants  *(CONFIRMED real)*
 Host timers `skill-deploy@<user>.timer` / `mcp-deploy@<user>.timer` still run for
@@ -41,16 +42,22 @@ already-migrated bots (verified: dmrudenko's fire every ~10 min) and rsync into 
 pod's shared `~/.claude` volume. It "works" by shared-volume side effect, but:
 - `mcp-deploy` reconciles `settings.json`, which the pod's `agentshield-settings-guard@<user>.path`
   watches and can revert to golden → host write vs pod guard can fight.
-- **Action / Decision:** pick one model and make it explicit —
-  (a) **keep** host timers writing the shared volume (simplest; then ensure the settings-guard
-  golden tolerates deploy-mcp's writes), or (b) **move** skill/mcp deploy into the pod. Verify a
-  host `mcp-deploy` settings.json write is NOT reverted by the pod guard before trusting it.
+- **DECISION (Vitaliy):** **move skill/mcp deploy into the pod** (no functional difference for
+  the user). Caveat to design around: `settings.json` is watched by the host
+  `agentshield-settings-guard@<user>.path` — pod-side deploy writes to settings.json must be
+  reconciled with the guard (rebaseline the golden after a legit deploy) or the guard reverts
+  them. Then disable the host `skill-deploy@`/`mcp-deploy@` timers for migrated bots.
 
 ### A3. Sequenced migration runbook for the 6 bots  *(missing)*
 Tooling exists but there's no ordered operator runbook.
-- **Action:** write `docs/09-mass-migration-runbook.md`: order (low-traffic first; note
-  per-bot specifics — e.g. viveanne has an iCloud mount), per-bot steps (prep → cutover →
-  verify → soak), rollback + incident response (bot goes silent), and a soak gap between bots.
+- **Action:** write `docs/09-mass-migration-runbook.md`: order (Vitaliy: order doesn't matter),
+  per-bot steps (prep → cutover → verify → soak), rollback + incident response (bot goes silent),
+  and a soak gap between bots.
+- **viveanne per-bot prep (iCloud):** her iCloud is a host-side rclone **FUSE mount** in her
+  home. A container gets its own mount namespace, so the host mount does NOT appear inside her
+  pod automatically → after migration her bot loses iCloud unless we explicitly propagate the
+  mount into the pod (bind with rshared propagation) or re-establish the rclone mount in the
+  pod context. Add this as an extra prep step for viveanne only; the other 5 need nothing special.
 
 ### A4. Post-cutover integration smoke  *(gap)*
 `migrate-cutover.sh` verifies the channel is up but does **not** verify the migrated bot's
@@ -109,9 +116,11 @@ this box is the throwaway. Keep `project_fleet_dev_teardown` current as items la
 
 ---
 
-## Open decisions for Vitaliy
-1. **graceful-restart** (A1): build `graceful-restart-pod-bot`, or accept non-graceful pod
-   restart + document?
-2. **skill/mcp deploy** (A2): keep host timers → shared volume, or move deploy into the pod?
-3. **Migration order** (A3): confirm order / any bot to do first or last (traffic, iCloud, risk).
-4. Build the helpers + runbook now, or stage them as the rollout proceeds?
+## Decisions — RESOLVED 2026-06-16 (Vitaliy)
+1. **graceful-restart** (A1): build it — admin-only `graceful-restart-pod-bot <user>`, restarts
+   any user's pod, waits 5 min idle, hard cap, then restart. ✅ decided.
+2. **skill/mcp deploy** (A2): move deploy **into the pod**; reconcile with host settings-guard;
+   then disable host timers for migrated bots. ✅ decided.
+3. **Migration order** (A3): doesn't matter; viveanne needs iCloud-mount prep. ✅ decided.
+4. Build now vs stage: proposed building A1 now + designing A2 + writing the runbook —
+   awaiting Vitaliy's "го".
