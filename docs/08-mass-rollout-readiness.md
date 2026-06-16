@@ -21,7 +21,13 @@ Migration tooling already in repo and correct: `runtime/install/migrate-prep.sh`
 
 ## BLOCK A — finish / include in the build BEFORE mass rollout
 
-### A1. graceful-restart → pod-aware  *(user-flagged; CONFIRMED real)* — DECIDED 2026-06-16
+### A1. graceful-restart → pod-aware  *(user-flagged)* — ✅ DONE 2026-06-16 (commit 52e65da)
+**Shipped + verified live.** `runtime/install/graceful-restart-pod-bot` (+ `-install.sh`),
+installed at `/usr/local/sbin/`. Admin-only (root via host-sudo). Waits 5 min idle (hard cap
+60 min), idle read via `podman exec … tmux capture-pane`, **wall-clock** accounting (fixed a
+tick-rate bug — podman exec latency broke the 10Hz assumption). e2e proven on cptest (5s
+threshold → restart at +5s, rc=0). list/status/cancel. Original spec below.
+
 `/usr/local/sbin/graceful-restart-bot` (host, **not in repo**, dated May 18) is fully
 host-specific: it targets `claude-tg@<user>` and detects "busy" by reading the tenant's
 **host-side tmux pane** (`sudo -u <user> tmux capture-pane -t claude`). For pod tenants
