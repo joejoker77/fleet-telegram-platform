@@ -144,8 +144,14 @@ ACTIVE_FILE="$RUN_DIR/active-session"
 # their OWN request/result pair so they can't race the switch contract.
 TASK_REQ="$RUN_DIR/session-task.json"
 TASK_RES="$RUN_DIR/session-task.result.json"
+# M8.1 marketplace publish: cp-api writes a job here (it lacks the GitHub PAT —
+# the token is injected by THIS pod's egress proxy), the supervisor runs the
+# pod-side registry-publish helper and writes the result. Own request/result
+# pair so it can't race the switch/checkpoint contracts.
+REGISTRY_REQ="$RUN_DIR/registry-task.json"
+REGISTRY_RES="$RUN_DIR/registry-task.result.json"
 # a request that survived a pod restart is stale — never execute it blind
-rm -f "$SWITCH_REQ" "$SWITCH_RES" "$TASK_REQ" "$TASK_RES"
+rm -f "$SWITCH_REQ" "$SWITCH_RES" "$TASK_REQ" "$TASK_RES" "$REGISTRY_REQ" "$REGISTRY_RES"
 
 session_dir() { # name → absolute dir on stdout; empty = invalid name
   case "$1" in
@@ -570,6 +576,26 @@ if [ "${DISABLE_TELEGRAM_CHANNEL:-0}" != "1" ]; then
   done
 fi
 
+# M8.1 marketplace publish executor. Unlike switch/checkpoint it does NOT touch
+# the pane/plugin — it just runs the GitHub publish helper (curl-bounded, the
+# proxy injects the PAT) and writes the result. Single writer per file; the
+# helper echoes back requestId so cp-api can correlate its dispatch.
+process_registry_request() {
+  local req
+  req="$REGISTRY_REQ"
+  [ -f "$req" ] || return 0
+  # run the helper reading the request JSON; capture its single-line JSON result
+  /opt/platform/bin/registry-publish --request "$req" > "$REGISTRY_RES.tmp" 2>/dev/null \
+    || true
+  # the helper always emits a JSON object (ok:true/false); if it produced nothing
+  # (e.g. killed), synthesize a failure so cp-api's poll terminates fast.
+  if [ ! -s "$REGISTRY_RES.tmp" ]; then
+    printf '{"ok":false,"error":"registry-publish produced no output"}\n' > "$REGISTRY_RES.tmp"
+  fi
+  mv -f "$REGISTRY_RES.tmp" "$REGISTRY_RES"
+  rm -f "$req"
+}
+
 # Phase 2 — steady state. Exit (→ Restart) if claude OR the channel drops, the
 # latter only after CHAN_FLAP_GRACE of continuous absence to ride out flaps.
 # M5.7: each tick also executes a pending session-switch request. The respawn
@@ -585,6 +611,11 @@ while tmux has-session -t "$SESSION" 2>/dev/null; do
     # M5.8 checkpoint/rewind tasks; a rewind respawns the pane like a switch
     process_task_request
     down=0
+  fi
+  # M8.1: marketplace publish job (no pane respawn → no channel disruption, so
+  # we do NOT reset `down`). curl in the helper is --max-time bounded.
+  if [ -f "$REGISTRY_REQ" ]; then
+    process_registry_request
   fi
   if [ "${DISABLE_TELEGRAM_CHANNEL:-0}" != "1" ] && ! channel_alive; then
     down=$((down + 5))

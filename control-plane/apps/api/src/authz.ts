@@ -17,6 +17,7 @@ export class AuthError extends Error {
 export interface AuthCtx {
   userId: string;
   osUsername: string;
+  isAdmin: boolean;
 }
 
 export async function requireAuth(
@@ -36,7 +37,7 @@ export async function requireAuth(
   }
 
   const rows = await getDb()
-    .select({ osUsername: schema.users.osUsername, status: schema.users.status })
+    .select({ osUsername: schema.users.osUsername, status: schema.users.status, isAdmin: schema.users.isAdmin })
     .from(schema.users)
     .where(eq(schema.users.id, sub))
     .limit(1);
@@ -45,5 +46,5 @@ export async function requireAuth(
   if (u.status === "suspended" || u.status === "deleted") {
     throw new AuthError(`tenant ${u.status}`, 403);
   }
-  return { userId: sub, osUsername: u.osUsername };
+  return { userId: sub, osUsername: u.osUsername, isAdmin: u.isAdmin };
 }

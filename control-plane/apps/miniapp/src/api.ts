@@ -400,3 +400,68 @@ export interface UsageSummary {
 export function usageSummary(token: string, days = 30): Promise<UsageSummary> {
   return request(`/usage/summary?days=${days}`, {}, token);
 }
+
+// ── M8.1 artifact marketplace (mirrors apps/api registry-routes.ts) ──
+
+export type ArtifactType = "skill" | "subagent" | "command" | "workflow";
+
+export interface RegistryItem {
+  id: string;
+  type: ArtifactType;
+  name: string;
+  description: string | null;
+  visibility: string; // public | private
+  ownerUserId: string;
+  ownerUsername: string | null;
+  mine: boolean;
+}
+
+export interface RegistryVersion {
+  id: string;
+  artifactId: string;
+  version: string;
+  status: string; // draft | scanning | published | rejected
+  gitRef: string | null;
+  scanSummary: unknown;
+  provenance: unknown;
+  publishedAt: string | null;
+}
+
+export function registryItems(
+  token: string,
+  type?: ArtifactType,
+  visibility?: string,
+): Promise<{ items: RegistryItem[] }> {
+  const q = new URLSearchParams();
+  if (type) q.set("type", type);
+  if (visibility) q.set("visibility", visibility);
+  const qs = q.toString();
+  return request(`/registry/items${qs ? `?${qs}` : ""}`, {}, token);
+}
+
+export function registryItem(
+  token: string,
+  id: string,
+): Promise<{ artifact: RegistryItem; versions: RegistryVersion[]; mine: boolean }> {
+  return request(`/registry/items/${id}`, {}, token);
+}
+
+/** Publish: admins get { published, prUrl }; non-admins get { approvalId } (confirm in 🛂). */
+export function registryPublish(
+  token: string,
+  body: { type: ArtifactType; name: string; version: string; visibility?: string; description?: string },
+): Promise<{ published?: boolean; versionId?: string; prUrl?: string; gitRef?: string; approvalId?: string; ttlSeconds?: number; verdict: string }> {
+  return request("/registry/publish", { method: "POST", body: JSON.stringify(body) }, token);
+}
+
+/** Import always returns an approval (crosses the trust boundary); confirm in 🛂. */
+export function registryImport(
+  token: string,
+  artifactVersionId: string,
+): Promise<{ approvalId: string; ttlSeconds: number; verdict: string }> {
+  return request("/registry/import", { method: "POST", body: JSON.stringify({ artifactVersionId }) }, token);
+}
+
+export function registryDelete(token: string, id: string): Promise<{ ok: boolean }> {
+  return request(`/registry/items/${id}`, { method: "DELETE" }, token);
+}

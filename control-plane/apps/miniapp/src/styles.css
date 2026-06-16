@@ -671,3 +671,16 @@ button.ghost {
   margin-top: 12px;
   font-size: 11px;
 }
+
+/* M8.1 marketplace */
+.mp-body { padding: 8px 12px; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; }
+.mp-body label { display: flex; flex-direction: column; gap: 4px; font-size: 0.9em; }
+.mp-body label.row { flex-direction: row; align-items: center; gap: 8px; }
+.mp-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.mp-row { display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  padding: 8px 10px; border: 1px solid var(--border, #2a2a2a); border-radius: 8px; cursor: pointer; }
+.mp-row small { max-width: 45%; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.badge { display: inline-block; font-size: 0.72em; padding: 1px 6px; margin-left: 6px;
+  border-radius: 999px; background: var(--accent, #2d6cdf); color: #fff; vertical-align: middle; }
+.badge.muted { background: #555; }
+button.danger { background: #b3261e; color: #fff; }

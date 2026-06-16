@@ -18,6 +18,14 @@ import { registerIdeRoutes } from "./ide-routes.js";
 import { registerSessionRoutes } from "./session-routes.js";
 import { registerIntegrationRoutes } from "./integration-routes.js";
 import {
+  registerRegistryRoutes,
+  makePublishApply,
+  makeImportApply,
+  REGISTRY_PUBLISH_KIND,
+  REGISTRY_IMPORT_KIND,
+  type RegistryDeps,
+} from "./registry-routes.js";
+import {
   applyMcpConnect,
   deleteStagedSecret,
   MCP_APPROVAL_KIND,
@@ -65,8 +73,27 @@ const mcpGateDeps = {
   auditSocket: config.auditSocket,
   secretdSocket: config.secretdSocket,
 };
+// M8.1 marketplace: cp-api owns scan+approval+DB; the pod executes the GitHub
+// publish (it holds the PAT). Built before registerApprovalRoutes so the
+// publish/import approval-apply handlers can close over it.
+const registryDeps: RegistryDeps = {
+  redis,
+  jwtSecret: config.jwtSecret,
+  homeRoot: config.tenantHomeRoot,
+  judgeUrl: config.judgeUrl,
+  auditSocket: config.auditSocket,
+  approvals: approvalsDeps,
+  repo: config.registryRepo,
+};
+const publishApply = makePublishApply(registryDeps);
+const importApply = makeImportApply(registryDeps);
+
 type McpApprovalPayload = { name?: string; stanza?: McpStanza; osUsername?: string; secret?: SecretMeta };
 registerApprovalRoutes(app, approvalsDeps, {
+  // M8.1: a non-admin's allowed publish dispatches the pod git-write + records
+  // the version; an allowed import re-fetches the pinned files and installs them.
+  [REGISTRY_PUBLISH_KIND]: { apply: publishApply },
+  [REGISTRY_IMPORT_KIND]: { apply: importApply },
   // M5.5: an allowed mcp.connect approval is applied synchronously in the
   // answer handler. The payload was authored by POST /mcp/connect; apply
   // re-validates it before touching tenant files. M5.5b: a staged secret is
@@ -132,6 +159,10 @@ registerIntegrationRoutes(app, {
   botToken: config.botToken,
   tenantHomeRoot: config.tenantHomeRoot,
 });
+
+// M8.1 artifact marketplace: catalog / publish (scan → admin-now|approval) /
+// import (re-scan → approval → install) / unpublish.
+registerRegistryRoutes(app, registryDeps);
 
 // POST /auth/session — verify Telegram initData, resolve the tenant, issue a JWT.
 app.post("/auth/session", async (req, reply) => {
@@ -345,14 +376,6 @@ app.get("/usage/summary", async (req, reply) => {
 
   return reply.send({ days: [...byDay.values()], byModel, last5h });
 });
-
-// Still-stubbed surface (later M5/M5.5 increments). /fs/*, /approvals, /live,
-// /sessions are implemented above.
-for (const route of ["/registry/items"] as const) {
-  app.get(route, async (_req, reply) =>
-    reply.code(501).send({ error: "not implemented yet", route }),
-  );
-}
 
 async function main(): Promise<void> {
   await app.listen({ port: config.port, host: config.host });
