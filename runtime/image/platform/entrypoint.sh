@@ -472,6 +472,18 @@ tmux kill-session -t "$SESSION" 2>/dev/null || true
 TMUX_CFG="$(mktemp)"; trap 'rm -f "$TMUX_CFG"' EXIT
 echo "set-option -g history-limit 100000" > "$TMUX_CFG"
 mkdir -p "$TELEGRAM_STATE_DIR/logs"
+
+# Rotate the previous session transcript on every boot — exactly as the old host
+# launcher did. The telegram plugin appends to session_current.txt (reopening per
+# write, so it never holds the fd open); on each bot start we rename a non-empty
+# session_current.txt to session_<UTC-timestamp>.txt — the rotation moment, which
+# is how the historical archives were named (e.g. session_20260610_080002.txt) —
+# so the new session begins a fresh file. This restores per-session archives + a
+# bounded current file (lost in the host→pod migration); the session-restore block
+# below reseeds prior context from the freshly-rotated archive via ROT_LATEST.
+SESS_LOG="$TELEGRAM_STATE_DIR/logs/session_current.txt"
+[ -s "$SESS_LOG" ] && mv -f "$SESS_LOG" "$TELEGRAM_STATE_DIR/logs/session_$(date -u +%Y%m%d_%H%M%S).txt"
+
 launch_claude "$ACTIVE_DIR" boot
 set_session_state "${ACTIVE_NAME:-default}" starting
 arm_readiness_watch "${ACTIVE_NAME:-default}"
