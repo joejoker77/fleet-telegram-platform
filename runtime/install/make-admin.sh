@@ -53,7 +53,61 @@ else
   echo "  WARN: cl_egress table not loaded — add the :22 input rule when egress is set"
 fi
 
-log "5) is_admin=true in control-plane"
+log "5) relax cross-tenant shellfirm guard (admin may read/list other homes via host-sudo)"
+# An admin bot must be able to read/write tenants' home dirs to moderate them.
+# Other homes aren't mounted in the pod, so this access flows ONLY through the
+# audited host-sudo broker. We neutralize exactly two pod-side rules
+# (read_other_bot_home + list_root_home). Secret-file guards (.ssh keys,
+# */credentials, vault, /etc/shadow) and destructive rules stay live for admins.
+# Reversible: unmake-admin.sh runs the same helper with `restore`.
+SFPOL="/home/$U/work/.shellfirm.yaml"
+if [ -f "$SFPOL" ]; then
+  cp -a "$SFPOL" "$SFPOL.preadmin" 2>/dev/null || true
+  python3 "$RT/install/admin-shellfirm-relax.py" "$SFPOL" relax | sed 's/^/  /'
+else
+  echo "  WARN: $SFPOL absent — relax skipped (tenant gets the default policy on next boot)"
+fi
+
+log "6) make the admin capability self-documenting in the tenant's CLAUDE.md"
+# A fresh, zero-context session only knows what loads unconditionally at start.
+# CLAUDE.md is injected in full every session, so this is how a brand-new session
+# learns it has host-root. Marker-delimited + idempotent; unmake-admin strips it.
+CLAUDEMD="/home/$U/work/CLAUDE.md"
+ADMARK="<!-- BEGIN ADMIN-CAPABILITY (managed by make-admin.sh) -->"
+if [ ! -f "$CLAUDEMD" ]; then
+  echo "  WARN: $CLAUDEMD absent — awareness block skipped"
+elif grep -qF "$ADMARK" "$CLAUDEMD"; then
+  echo "  CLAUDE.md already documents the admin capability — skip"
+else
+  cat >> "$CLAUDEMD" <<'ADMINEOF'
+
+<!-- BEGIN ADMIN-CAPABILITY (managed by make-admin.sh) -->
+## Host admin capability (you are an admin bot)
+
+You have **root on the host** through a controlled SSH bridge. Run a privileged
+host command with:
+
+    host-sudo <command...>
+
+- It connects over an SSH key pinned to a forced-command broker; the command runs
+  as **root on the host** and is **WORM-audited**. Your pod itself stays unprivileged.
+- **Normal** commands run immediately. **Destructive** ones (`rm -rf`, `mkfs`, `dd`,
+  `reboot`/`shutdown`, `authorized_keys`/`sudoers` edits, …) are **blocked** in
+  phase 1 (Telegram approval comes in phase 2). Don't try to route around the block.
+- As an admin you MAY **read and write other tenants' home dirs** (`/home/<user>/…`)
+  to moderate and support them — but only via `host-sudo` (other homes aren't mounted
+  in your pod, so every such access goes through the audited broker). Reading raw
+  **secret files** (ssh keys, `*/credentials`, the OneCLI vault, `/etc/shadow`) stays
+  blocked even for you — secrets live in the vault, not in files you read.
+- Invoke any script through the broker by its **executable path**, not `sudo bash …`
+  — the pod guard blocks `sudo`+shell as privilege escalation.
+<!-- END ADMIN-CAPABILITY (managed by make-admin.sh) -->
+ADMINEOF
+  chown "$U:$U" "$CLAUDEMD" 2>/dev/null || true
+  echo "  appended admin-capability block to $CLAUDEMD"
+fi
+
+log "7) is_admin=true in control-plane"
 podman exec -i cp-postgres psql -U cplane -d control_plane -v ON_ERROR_STOP=1 \
   -c "update users set is_admin=true where os_username='$U';" 2>&1 | sed 's/^/  /' || echo "  (cp DB update skipped)"
 
