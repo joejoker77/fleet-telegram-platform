@@ -42,6 +42,22 @@ const db = getDb();
 
 await app.register(websocket);
 
+// JSON parser that ALSO retains the raw bytes (req.rawBody) so the GitHub push
+// webhook can recompute X-Hub-Signature-256 over the exact payload. Semantically
+// identical to Fastify's default JSON parser (buffer → utf8 → JSON.parse); empty
+// body → undefined (handlers already tolerate `req.body ?? {}`).
+app.addContentTypeParser("application/json", { parseAs: "buffer" }, (req, body, done) => {
+  const buf = body as Buffer;
+  req.rawBody = buf;
+  if (buf.length === 0) return done(null, undefined);
+  try {
+    done(null, JSON.parse(buf.toString("utf8")));
+  } catch (err) {
+    (err as Error & { statusCode?: number }).statusCode = 400;
+    done(err as Error, undefined);
+  }
+});
+
 app.get("/healthz", async () => ({ ok: true }));
 
 // M5.1 authoring file API (boundary-1 — own .claude sandbox, audited, no judge).
@@ -156,7 +172,11 @@ registerSessionRoutes(app, {
 
 // A2 deploy reconcile: admin-only HTTP trigger (manual/CI) for the control-plane
 // skills+mcp reconcile that replaces the host skill-deploy@/mcp-deploy@ timers.
-registerDeployRoutes(app, { redis, jwtSecret: config.jwtSecret });
+registerDeployRoutes(app, {
+  redis,
+  jwtSecret: config.jwtSecret,
+  githubWebhookSecret: config.githubWebhookSecret,
+});
 
 // M6.2 Composio integrations: public OAuth-callback landing + notify + audit.
 registerIntegrationRoutes(app, {

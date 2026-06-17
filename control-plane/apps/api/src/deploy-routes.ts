@@ -10,12 +10,23 @@
 //     ref    — repo ref to reconcile against (default "main")
 import type { FastifyInstance } from "fastify";
 import type { Redis } from "ioredis";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { requireAuth, AuthError } from "./authz.js";
 import { reconcileTenant, reconcileAllTenants } from "./deploy-reconcile.js";
+
+// The JSON content-type parser in index.ts stashes the raw bytes here so we can
+// recompute the GitHub HMAC (parsed JSON re-serialized would not byte-match).
+declare module "fastify" {
+  interface FastifyRequest {
+    rawBody?: Buffer;
+  }
+}
 
 export interface DeployRoutesDeps {
   redis: Redis;
   jwtSecret: Uint8Array;
+  // GitHub push-webhook HMAC secret; empty → the webhook route is dormant (503).
+  githubWebhookSecret: string;
 }
 
 export function registerDeployRoutes(app: FastifyInstance, deps: DeployRoutesDeps): void {
@@ -39,5 +50,40 @@ export function registerDeployRoutes(app: FastifyInstance, deps: DeployRoutesDep
     }
     const tenants = await reconcileAllTenants({ ref, apply });
     return reply.send({ apply, ref, tenants });
+  });
+
+  // GitHub push webhook (repo-change trigger). Configure the repo webhook with
+  // content-type application/json + the shared secret. On a push to the default
+  // branch we ACK fast (202) and sweep every active tenant in the background —
+  // GitHub expects a sub-10s response and a multi-tenant apply can take seconds.
+  app.post("/deploy/webhook/github", async (req, reply) => {
+    if (!deps.githubWebhookSecret) return reply.code(503).send({ error: "webhook not configured" });
+    const raw = req.rawBody;
+    if (!raw || raw.length === 0) return reply.code(400).send({ error: "no raw body (content-type must be application/json)" });
+
+    // constant-time compare of X-Hub-Signature-256
+    const sig = String(req.headers["x-hub-signature-256"] ?? "");
+    const expected = "sha256=" + createHmac("sha256", deps.githubWebhookSecret).update(raw).digest("hex");
+    const a = Buffer.from(sig);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !timingSafeEqual(a, b)) return reply.code(401).send({ error: "bad signature" });
+
+    const event = String(req.headers["x-github-event"] ?? "");
+    if (event === "ping") return reply.send({ ok: true, pong: true });
+    if (event !== "push") return reply.send({ ok: true, ignored: event });
+
+    const body = (req.body ?? {}) as { ref?: string };
+    const branch = (body.ref ?? "").replace(/^refs\/heads\//, "");
+    if (branch !== "main") return reply.send({ ok: true, ignoredBranch: branch });
+
+    // ack fast, reconcile in the background (fire-and-forget; errors logged)
+    reply.code(202).send({ ok: true, scheduled: true });
+    reconcileAllTenants({ ref: "main", apply: true })
+      .then((tenants) => {
+        req.log.info({ changed: tenants.filter((t) => t.changed).map((t) => t.user) }, "deploy webhook reconcile done");
+      })
+      .catch((e) => {
+        req.log.error({ err: String(e) }, "deploy webhook reconcile failed");
+      });
   });
 }

@@ -18,6 +18,13 @@ function fileOrEnv(envName: string): string {
   return reqEnv(envName);
 }
 
+// Like fileOrEnv but returns "" when neither is set (an optional credential).
+function fileOrEnvOptional(envName: string): string {
+  const filePath = process.env[`${envName}_FILE`];
+  if (filePath) return fs.readFileSync(filePath, "utf8").trim();
+  return process.env[envName] ?? "";
+}
+
 export interface Config {
   port: number;
   host: string;
@@ -48,6 +55,11 @@ export interface Config {
   // M8.1 marketplace store repo (owner/name). Publish dispatches to the pod
   // (which holds the PAT); import reads this repo's public contents.
   registryRepo: string;
+  // A2 GitHub push-webhook HMAC secret (inbound verification — cp-api needs the
+  // raw value to recompute X-Hub-Signature-256, so it's a LOCAL credential like
+  // jwtSecret/botToken, NOT an OneCLI outbound-injection secret). Empty = the
+  // /deploy/webhook/github route is dormant (503) until the operator wires it.
+  githubWebhookSecret: string;
 }
 
 export function loadConfig(): Config {
@@ -67,5 +79,6 @@ export function loadConfig(): Config {
     secretdSocket: process.env.SECRETD_SOCKET ?? "/run/cp-secretd/secretd.sock",
     ideUrl: (process.env.IDE_URL ?? "https://ide.ai-assistant.gg").replace(/\/$/, ""),
     registryRepo: process.env.REGISTRY_REPO ?? "joejoker77/claude-bot-skills",
+    githubWebhookSecret: fileOrEnvOptional("GITHUB_WEBHOOK_SECRET"),
   };
 }
