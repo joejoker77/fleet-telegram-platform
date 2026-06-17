@@ -175,6 +175,7 @@ registerSessionRoutes(app, {
 registerDeployRoutes(app, {
   redis,
   jwtSecret: config.jwtSecret,
+  auditSocket: config.auditSocket,
   githubWebhookSecret: config.githubWebhookSecret,
 });
 

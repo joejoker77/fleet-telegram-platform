@@ -303,6 +303,14 @@ export async function reconcileMcp(opts: { user: string; ref?: string; boundPlac
 // Replaces the host skill-deploy@/mcp-deploy@ timers: one entry point that runs
 // BOTH halves per tenant, isolating failures so one bad tenant/half can't abort
 // the sweep.
+//
+// RESTART-ON-CHANGE = variant A (decided 2026-06-17): an apply WRITES the tenant's
+// skills/settings.json and does NOT force a restart. The new MCP/skill is picked up
+// on the next session start — exactly how the product's own user-facing MCP-connect
+// (applyMcpConnect/mcp-gate) behaves. The host deploy-mcp force-restarted; the pod
+// product deliberately does not (forcing a respawn would interrupt the user mid-turn).
+// The trigger layer emits a `deploy.reconcile.applied` audit event when an apply
+// changes files, so the change is observable without a restart.
 export interface TenantReconcileResult {
   user: string;
   skills?: ReconcileResult;

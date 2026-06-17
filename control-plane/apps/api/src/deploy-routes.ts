@@ -12,7 +12,31 @@ import type { FastifyInstance } from "fastify";
 import type { Redis } from "ioredis";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { requireAuth, AuthError } from "./authz.js";
-import { reconcileTenant, reconcileAllTenants } from "./deploy-reconcile.js";
+import { sendAudit } from "./audit.js";
+import { reconcileTenant, reconcileAllTenants, type TenantReconcileResult } from "./deploy-reconcile.js";
+
+// Variant-A observability: emit one audit event per tenant whose apply WROTE
+// changes (skills and/or mcp). No restart is forced — the change is picked up on
+// the next session start; this event is how it's observable in the meantime.
+async function auditApplied(auditSocket: string, ref: string, tenants: TenantReconcileResult[]): Promise<void> {
+  for (const t of tenants) {
+    const wroteSkills = t.skills?.applied === true;
+    const wroteMcp = t.mcp?.applied === true;
+    if (!wroteSkills && !wroteMcp) continue;
+    await sendAudit(auditSocket, {
+      userId: null,
+      kind: "deploy.reconcile.applied",
+      actor: "cp-api",
+      payload: {
+        user: t.user,
+        ref,
+        skills: wroteSkills ? { added: t.skills!.added, removed: t.skills!.removed } : null,
+        mcp: wroteMcp ? { added: t.mcp!.added, updated: t.mcp!.updated, removed: t.mcp!.removed } : null,
+        note: "files updated; picked up on next session start (variant A — no forced restart)",
+      },
+    }).catch(() => {});
+  }
+}
 
 // The JSON content-type parser in index.ts stashes the raw bytes here so we can
 // recompute the GitHub HMAC (parsed JSON re-serialized would not byte-match).
@@ -25,6 +49,7 @@ declare module "fastify" {
 export interface DeployRoutesDeps {
   redis: Redis;
   jwtSecret: Uint8Array;
+  auditSocket: string;
   // GitHub push-webhook HMAC secret; empty → the webhook route is dormant (503).
   githubWebhookSecret: string;
 }
@@ -46,9 +71,11 @@ export function registerDeployRoutes(app: FastifyInstance, deps: DeployRoutesDep
 
     if (typeof body.user === "string" && body.user) {
       const tenant = await reconcileTenant({ user: body.user, ref, apply });
+      if (apply) await auditApplied(deps.auditSocket, ref, [tenant]);
       return reply.send({ apply, ref, tenants: [tenant] });
     }
     const tenants = await reconcileAllTenants({ ref, apply });
+    if (apply) await auditApplied(deps.auditSocket, ref, tenants);
     return reply.send({ apply, ref, tenants });
   });
 
@@ -79,7 +106,8 @@ export function registerDeployRoutes(app: FastifyInstance, deps: DeployRoutesDep
     // ack fast, reconcile in the background (fire-and-forget; errors logged)
     reply.code(202).send({ ok: true, scheduled: true });
     reconcileAllTenants({ ref: "main", apply: true })
-      .then((tenants) => {
+      .then(async (tenants) => {
+        await auditApplied(deps.auditSocket, "main", tenants);
         req.log.info({ changed: tenants.filter((t) => t.changed).map((t) => t.user) }, "deploy webhook reconcile done");
       })
       .catch((e) => {
