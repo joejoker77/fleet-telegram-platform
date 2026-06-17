@@ -89,7 +89,14 @@ is_busy() {
     echo 0
     return
   fi
-  if printf '%s' "$pane" | grep -qE "[${SPINNER_GLYPHS}][[:space:]]+[^…]*…"; then
+  # Anchor to line start: a REAL spinner line begins with the glyph
+  # ("✻ Herding… (…)"). Without the anchor the telegram message line shown in the
+  # pane ("← telegram · <user>: <text truncated>…") false-matches forever — it
+  # contains "·" (a glyph, used as the separator) + a trailing "…", so the bot
+  # reads busy=1 even when idle and the restart never fires (caught testing on
+  # the vitaliy pilot 2026-06-17). The telegram line starts with "←", so anchoring
+  # excludes it while still matching the glyph-led spinner.
+  if printf '%s' "$pane" | grep -qE "^[[:space:]]*[${SPINNER_GLYPHS}][[:space:]]+[^…]*…"; then
     echo 1
   else
     echo 0
