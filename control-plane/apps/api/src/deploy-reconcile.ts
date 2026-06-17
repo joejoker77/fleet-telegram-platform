@@ -14,6 +14,8 @@
 // Runnable via the project's tsx:  tsx deploy-reconcile.ts <user> [--apply] [--ref <ref>]
 import fs from "node:fs";
 import path from "node:path";
+import { eq } from "drizzle-orm";
+import { getDb, schema } from "@fleet/db";
 
 const HOME_ROOT = process.env.TENANT_HOME_ROOT || "/home";
 const REPO = process.env.REGISTRY_REPO || "joejoker77/claude-bot-skills";
@@ -152,6 +154,111 @@ export async function reconcileSkills(opts: { user: string; ref?: string; apply?
   return { user, ref, available, allowed, installedNow, added, removed, matchesLive, applied: apply && !matchesLive };
 }
 
+// ── MCP path ─────────────────────────────────────────────────────────────────
+// Bound-secret check reads secret_bindings (the cp-api DB, backfilled by
+// secret-bindings-backfill.py) — NO onecli in cp-api, NO privileged vault creds
+// (option (c)). Mirrors deploy-mcp.v2.4: ${USER_CONFIG} from users.yaml,
+// ${SECRET:name} -> literal ${ONECLI:name} marker (never the value) + the secret
+// must be bound, else the MCP is skipped.
+const USER_CONFIG_RE = /\$\{USER_CONFIG:([a-z0-9_]+)\}/g;
+const SECRET_RE = /\$\{SECRET:([a-z0-9_-]+)\}/g;
+
+// secret_bindings.placeholder values (full OneCLI names `<user>-<slug>-<name>`) for a tenant.
+export async function getBoundPlaceholders(user: string): Promise<Set<string>> {
+  const db = getDb();
+  const rows = await db
+    .select({ placeholder: schema.secretBindings.placeholder })
+    .from(schema.secretBindings)
+    .innerJoin(schema.users, eq(schema.users.id, schema.secretBindings.userId))
+    .where(eq(schema.users.osUsername, user));
+  return new Set(rows.map((r) => r.placeholder));
+}
+
+// bare secret names bound for (user, slug): strip the `<user>-<slug>-` prefix.
+function boundBareNames(user: string, slug: string, placeholders: Set<string>): Set<string> {
+  const prefix = `${user}-${slug}-`;
+  const out = new Set<string>();
+  for (const p of placeholders) if (p.startsWith(prefix)) out.add(p.slice(prefix.length));
+  return out;
+}
+
+// users.yaml mcp.<slug>.user_config.<user> -> {key: value}. Minimal parse of the
+// 4-level block; returns {} when the mcp section is empty/absent (current state).
+export function parseMcpUserConfig(yamlText: string, slug: string, user: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  let inMcp = false, curSlug: string | null = null, inUcfg = false, curUser: string | null = null;
+  for (const raw of yamlText.split("\n")) {
+    if (raw.trim() === "" || raw.trim().startsWith("#")) continue;
+    const indent = raw.length - raw.trimStart().length;
+    const line = raw.trim();
+    if (indent === 0) { inMcp = (line.split(":")[0] ?? "").trim() === "mcp"; curSlug = null; inUcfg = false; curUser = null; continue; }
+    if (!inMcp) continue;
+    if (indent === 2 && line.endsWith(":")) { curSlug = line.slice(0, -1).trim(); inUcfg = false; curUser = null; continue; }
+    if (curSlug !== slug) continue;
+    if (indent === 4) { inUcfg = line === "user_config:"; curUser = null; continue; }
+    if (inUcfg && indent === 6 && line.endsWith(":")) { curUser = line.slice(0, -1).trim(); continue; }
+    if (inUcfg && curUser === user && indent === 8) {
+      const i = line.indexOf(":");
+      if (i > 0) out[line.slice(0, i).trim()] = line.slice(i + 1).trim().replace(/^["']|["']$/g, "");
+    }
+  }
+  return out;
+}
+
+function resolveStanza(node: unknown, userConfig: Record<string, string>, bareSecrets: Set<string>, miss: { cfg: string[]; sec: string[] }): unknown {
+  if (Array.isArray(node)) return node.map((n) => resolveStanza(n, userConfig, bareSecrets, miss));
+  if (node && typeof node === "object") {
+    const o: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(node)) o[k] = resolveStanza(v, userConfig, bareSecrets, miss);
+    return o;
+  }
+  if (typeof node === "string") {
+    let s = node.replace(USER_CONFIG_RE, (_m, k: string) => {
+      if (!(k in userConfig)) { if (!miss.cfg.includes(k)) miss.cfg.push(k); return _m; }
+      return userConfig[k]!;
+    });
+    s = s.replace(SECRET_RE, (_m, name: string) => {
+      if (!bareSecrets.has(name) && !miss.sec.includes(name)) miss.sec.push(name);
+      return `\${ONECLI:${name}}`;
+    });
+    return s;
+  }
+  return node;
+}
+
+export interface McpResult {
+  user: string; ref: string; available: string[]; allowed: string[];
+  wouldManage: string[]; skipped: Record<string, { missing_config?: string[]; missing_secrets?: string[] }>;
+  liveMcpServers: string[];
+}
+
+export async function reconcileMcp(opts: { user: string; ref?: string; boundPlaceholders?: Set<string> }): Promise<McpResult> {
+  const { user } = opts;
+  const ref = opts.ref || "main";
+  const entries = await listDir(REPO, ref, "mcp");
+  const available = entries.filter((e) => e.type === "dir").map((e) => e.name).sort();
+  const yamlText = await fetchText(REPO, ref, "users.yaml");
+  const allowed = allowedFor(available, parseSectionUsers(yamlText, "mcp"), user);
+  const bound = opts.boundPlaceholders ?? (await getBoundPlaceholders(user));
+
+  const wouldManage: string[] = [];
+  const skipped: McpResult["skipped"] = {};
+  for (const slug of allowed) {
+    let tpl: { mcp_stanza?: unknown };
+    try { tpl = JSON.parse(await fetchText(REPO, ref, `mcp/${slug}/template.json`)); }
+    catch (e) { skipped[slug] = {}; continue; }
+    const stanza = tpl.mcp_stanza ?? tpl;
+    const miss = { cfg: [] as string[], sec: [] as string[] };
+    resolveStanza(stanza, parseMcpUserConfig(yamlText, slug, user), boundBareNames(user, slug, bound), miss);
+    if (miss.cfg.length || miss.sec.length) skipped[slug] = { missing_config: miss.cfg, missing_secrets: miss.sec };
+    else wouldManage.push(slug);
+  }
+  const sp = path.join(HOME_ROOT, user, ".claude", "settings.json");
+  let live: string[] = [];
+  if (fs.existsSync(sp)) { try { live = Object.keys(JSON.parse(fs.readFileSync(sp, "utf8")).mcpServers || {}).sort(); } catch { /* */ } }
+  return { user, ref, available, allowed, wouldManage, skipped, liveMcpServers: live };
+}
+
 // CLI: tsx deploy-reconcile.ts <user> [--apply] [--ref <ref>]
 const isMain = import.meta.url === `file://${process.argv[1]}`;
 if (isMain) {
@@ -160,8 +267,12 @@ if (isMain) {
   const apply = args.includes("--apply");
   const refIdx = args.indexOf("--ref");
   const ref = refIdx >= 0 ? args[refIdx + 1] : "main";
-  if (!user) { console.error("usage: deploy-reconcile.ts <user> [--apply] [--ref <ref>]"); process.exit(2); }
-  reconcileSkills({ user, ref, apply })
+  if (!user) { console.error("usage: deploy-reconcile.ts <user> [--mcp] [--apply] [--ref <ref>] [--bound a,b]"); process.exit(2); }
+  const mcp = args.includes("--mcp");
+  const boundIdx = args.indexOf("--bound");
+  const boundPlaceholders = boundIdx >= 0 ? new Set((args[boundIdx + 1] || "").split(",").filter(Boolean)) : undefined;
+  const run = mcp ? reconcileMcp({ user, ref, boundPlaceholders }) : reconcileSkills({ user, ref, apply });
+  run
     .then((r) => { console.log(JSON.stringify(r, null, 2)); })
     .catch((e) => { console.error("reconcile failed:", e?.message || e); process.exit(1); });
 }
