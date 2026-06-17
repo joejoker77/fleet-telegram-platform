@@ -13,10 +13,43 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { scanArtifact, httpJudgeClient, type ScanResult } from "@fleet/scanners";
+import { getDb, schema } from "@fleet/db";
+import { and, eq } from "drizzle-orm";
 import { sendAudit } from "./audit.js";
 import { callSecretd } from "./secretd.js";
 
 const execFileP = promisify(execFile);
+
+// A2(c) populate-on-bind: keep `secret_bindings` (the deploy-reconcile bound-secret
+// source of truth) in sync as the productized mcp-installer binds/unbinds vault
+// secrets — so it stays accurate without re-running the one-time backfill.
+// placeholder = the full OneCLI secret name the reconcile reads. Best-effort: a DB
+// hiccup must NEVER fail the connect/disconnect — the host secret-bindings-backfill.py
+// re-sync remains the safety net (and is the only sync for the legacy mcp-set-secret
+// path, which is slated for elimination). Idempotent (delete the (user,placeholder)
+// row, then insert).
+async function upsertSecretBinding(userId: string, placeholder: string, host: string): Promise<void> {
+  try {
+    const db = getDb();
+    await db
+      .delete(schema.secretBindings)
+      .where(and(eq(schema.secretBindings.userId, userId), eq(schema.secretBindings.placeholder, placeholder)));
+    await db.insert(schema.secretBindings).values({ userId, placeholder, host });
+  } catch {
+    /* projection is best-effort; backfill re-syncs from OneCLI */
+  }
+}
+
+async function removeSecretBinding(userId: string, placeholder: string): Promise<void> {
+  try {
+    const db = getDb();
+    await db
+      .delete(schema.secretBindings)
+      .where(and(eq(schema.secretBindings.userId, userId), eq(schema.secretBindings.placeholder, placeholder)));
+  } catch {
+    /* best-effort */
+  }
+}
 
 export const MCP_APPROVAL_KIND = "mcp.connect";
 export const MCP_TTL_SECONDS = 600;
@@ -390,6 +423,8 @@ export async function applyMcpConnect(
       actor: "cp-api",
       payload: { name: args.secret.name, hostPattern: args.secret.hostPattern },
     }).catch(() => {});
+    // A2(c): record the binding in the reconcile's source of truth.
+    await upsertSecretBinding(args.userId, args.secret.name, args.secret.hostPattern);
   }
 
   try {
@@ -469,11 +504,15 @@ export async function disconnectMcp(
     // helper absent (pre-M5.5b deploys) degrades silently — deleted stays false.
     let secretDeleted = false;
     if (SECRET_MCP_NAME_RE.test(args.name)) {
+      const secretName = secretNameFor(args.osUsername, args.name);
       const del = await callSecretd(deps.secretdSocket, {
         verb: "delete_secret",
-        name: secretNameFor(args.osUsername, args.name),
+        name: secretName,
       });
       secretDeleted = del.ok && del.deleted === true;
+      // A2(c): drop the binding from the reconcile's source of truth (idempotent,
+      // independent of del.deleted — clears any stale row).
+      await removeSecretBinding(args.userId, secretName);
     }
 
     await sendAudit(deps.auditSocket, {
