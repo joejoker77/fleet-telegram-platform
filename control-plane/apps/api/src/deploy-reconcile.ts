@@ -359,19 +359,38 @@ export async function reconcileAllTenants(opts: { ref?: string; apply?: boolean 
   return out;
 }
 
-// CLI: tsx deploy-reconcile.ts <user> [--apply] [--ref <ref>]
+// CLI: tsx deploy-reconcile.ts <user> [--all|--mcp] [--apply] [--ref <ref>] [--bound a,b]
+//   --all  run BOTH halves via reconcileTenant (what provisioning + post-cutover
+//          verification use; default with no flag = skills only, --mcp = mcp only)
 const isMain = import.meta.url === `file://${process.argv[1]}`;
 if (isMain) {
+  // Run as a one-off inside the cp-api container (podman exec) for provisioning /
+  // post-cutover verification: a fresh process doesn't inherit the systemd-injected
+  // service env, so the MCP half's DB read (getBoundPlaceholders) would fail.
+  // Recover DATABASE_URL from PID 1 (the api server). No-op when already set / not
+  // in-container.
+  if (!process.env.DATABASE_URL) {
+    try {
+      for (const kv of fs.readFileSync("/proc/1/environ", "utf8").split("\0")) {
+        if (kv.startsWith("DATABASE_URL=")) { process.env.DATABASE_URL = kv.slice("DATABASE_URL=".length); break; }
+      }
+    } catch { /* not in-container / no access — getDb will error clearly */ }
+  }
   const args = process.argv.slice(2);
   const user = args.find((a) => !a.startsWith("--"));
   const apply = args.includes("--apply");
   const refIdx = args.indexOf("--ref");
   const ref = refIdx >= 0 ? args[refIdx + 1] : "main";
-  if (!user) { console.error("usage: deploy-reconcile.ts <user> [--mcp] [--apply] [--ref <ref>] [--bound a,b]"); process.exit(2); }
+  if (!user) { console.error("usage: deploy-reconcile.ts <user> [--all|--mcp] [--apply] [--ref <ref>] [--bound a,b]"); process.exit(2); }
+  const all = args.includes("--all");
   const mcp = args.includes("--mcp");
   const boundIdx = args.indexOf("--bound");
   const boundPlaceholders = boundIdx >= 0 ? new Set((args[boundIdx + 1] || "").split(",").filter(Boolean)) : undefined;
-  const run = mcp ? reconcileMcp({ user, ref, boundPlaceholders, apply }) : reconcileSkills({ user, ref, apply });
+  const run = all
+    ? reconcileTenant({ user, ref, apply })
+    : mcp
+      ? reconcileMcp({ user, ref, boundPlaceholders, apply })
+      : reconcileSkills({ user, ref, apply });
   run
     .then((r) => { console.log(JSON.stringify(r, null, 2)); })
     .catch((e) => { console.error("reconcile failed:", e?.message || e); process.exit(1); });
