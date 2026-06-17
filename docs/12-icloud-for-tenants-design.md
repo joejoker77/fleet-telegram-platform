@@ -67,7 +67,54 @@ step stays with admins. The pod-bind fix is needed regardless and also restores 
 4. Keep the cross-bot off-limits rule (each user's `~/icloud` is private to that bot) — append to
    other tenants' CLAUDE.md as today.
 
-## DECISION — A confirmed (Vitaliy 2026-06-17)
+## REFINED DESIGN — credential-split (Vitaliy 2026-06-17)
+Vitaliy's privacy objection (correct): an admin must NOT see/handle a user's Apple ID + password
++ 2FA — that contradicts the app's confidentiality promise. The privileged HOST work and the
+CREDENTIAL entry are **split**:
+
+- **Plumbing step (no creds, privileged):** create `~/icloud`, install the (dormant) rclone mount
+  unit, ensure the `:rslave` propagation (already global in claude-pod-run). Can be run by an admin
+  on request **OR baked into `provision-tenant.sh` for everyone** (recommended — then NO admin
+  action is needed per user; the scaffolding sits dormant until the user authenticates). No creds
+  ever touched here.
+- **Auth step (creds, USER-self-service):** the user's OWN bot skill collects Apple ID + password
+  + 2FA **in the user's own chat** — the admin never sees them.
+
+Technical reality that shapes WHERE auth runs (verified 2026-06-17): rclone is **not** in the pod
+image; the pod's egress is proxy-locked (rclone→Apple uncertain in-pod); and the mount must stay
+host-side (FUSE-in-pod breaks hardening). So the rclone Apple-auth runs **host-side via a small
+socket auth-helper** (the cp-secretd pattern): the user's bot streams the creds + relays the 2FA
+prompt over a local socket to the helper, which runs as root on the host (where rclone + Apple
+network + the mount live), authenticates, and **stores the secret in OneCLI** (vault storage — the
+persistent secret is rclone's `trust_token`; the password isn't persisted after first auth). At
+mount time a host step materializes a transient config from OneCLI (tmpfs), so no plaintext
+credential persists. The helper starts the mount → it propagates into the pod via the `:rslave`
+bind (done). **The admin-human never sees the creds (user→bot→host-helper→OneCLI); the bot process
+never persists them.** Note: OneCLI here is the secret STORE (not the HTTP-proxy injector — rclone's
+SRP auth isn't a header injection), which is a valid vault use.
+
+The one NEW host component (the auth-helper) is a **justified bootstrap** — same reasoning as
+cp-secretd: the credential handling MUST be host-side given rclone/network/mount are host-side, and
+this is exactly what keeps the admin OUT of the user's credentials. Not ad-hoc sprawl.
+
+Alternative considered & rejected: put rclone in every pod image + open egress to Apple for all
+pods + still write a host-readable config — more attack surface, doesn't avoid the host mount.
+
+### Revised work items
+1. `claude-pod-run` `:rslave` propagation — ✅ DONE 2026-06-17 (commit c173caa; dmrudenko restored).
+2. **Plumbing**: bake dormant iCloud scaffolding into `provision-tenant.sh` (recommended) or an
+   admin `icloud-prepare <user>` — no creds.
+3. **Auth-helper** (host, socket-activated, cp-secretd pattern): receives user creds from the bot,
+   runs rclone Apple-auth + 2FA relay, stores trust_token in OneCLI, materializes transient config
+   at mount, starts the mount.
+4. **User skill** `icloud-connect` (in the bot): collect Apple ID + password + 2FA in the user's
+   chat, stream to the auth-helper, relay 2FA, report success. Fix the stale "app-specific" wording.
+5. Productize: templated `rclone-icloud-mount@` + helper into `install.sh`; retire static units.
+
+Open sub-choice for Vitaliy: plumbing **baked into provisioning for all** (zero admin step, max
+self-service) vs **admin-gated on request**. Recommend baked-in (matches "available to all").
+
+## (superseded) earlier DECISION — A confirmed (Vitaliy 2026-06-17)
 **Variant A (admin-only provisioning skill).** Also: this must be **documented into the rollout
 plan BEFORE migrating all users to pods** (Vitaliy) — because any user who has/wants iCloud must
 not lose Mac-file access at cutover (dmrudenko already did). Integrated into `docs/08` (Block A
