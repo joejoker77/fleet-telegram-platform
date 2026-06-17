@@ -71,6 +71,19 @@ CFG_ARGS=()
 SSH_ARGS=()
 [ -d "$HOME_DIR/.ssh" ] && SSH_ARGS+=(-v "$HOME_DIR/.ssh:$HOME_DIR/.ssh")
 
+# ~/icloud: if the tenant has an active iCloud FUSE mount on the host, propagate
+# it INTO the pod. The rclone mount lives on the HOST (rclone-<user>-mount /
+# rclone-icloud-mount@<user>; --allow-other + --uid/--gid <tenant> so the pod uid
+# can read it). FUSE inside the pod would need SYS_ADMIN and break the hardening,
+# so we bind the host mountpoint with :rslave. Make the source rshared first so
+# rclone REMOUNTS (e.g. its own restart) propagate into the running container.
+# No-op for users without iCloud (most). See docs/12.
+ICLOUD_ARGS=()
+if mountpoint -q "$HOME_DIR/icloud" 2>/dev/null; then
+  mount --make-rshared "$HOME_DIR/icloud" 2>/dev/null || true
+  ICLOUD_ARGS=(-v "$HOME_DIR/icloud:$HOME_DIR/icloud:rslave")
+fi
+
 # ~/.config must be a mounted volume: the pod rootfs is --read-only, and the
 # entrypoint's M4.1 shellfirm seed writes ~/.config/shellfirm/settings.yaml.
 # Without the mount the mkdir hits the RO overlay and the entrypoint dies
@@ -130,6 +143,6 @@ exec /usr/bin/podman run --rm --name "claude-$U" \
   -v "$HOME_DIR/work:$HOME_DIR/work" \
   -v "$HOME_DIR/.config:$HOME_DIR/.config" \
   -v "$HOME_DIR/.local:$HOME_DIR/.local" \
-  "${CFG_ARGS[@]}" "${SSH_ARGS[@]}" "${AUDIT_ARGS[@]}" "${IDE_ARGS[@]}" \
+  "${CFG_ARGS[@]}" "${SSH_ARGS[@]}" "${ICLOUD_ARGS[@]}" "${AUDIT_ARGS[@]}" "${IDE_ARGS[@]}" \
   -w "$HOME_DIR/work" \
   "$IMAGE"
