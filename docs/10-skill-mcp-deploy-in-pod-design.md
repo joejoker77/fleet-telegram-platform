@@ -105,19 +105,35 @@ The cp-api reconcile must reproduce, **per pod tenant**:
 5. The deploy-time judge/scanner GATE is **deprecated (ADR-004)** — deploy reconciles CI-vetted
    content; do NOT re-scan here.
 
-### Integration wrinkles to solve (NEW work — flagged)
-- **W1 — settings.json vs settings-guard (the real one):** `~/.claude` is a git repo; the host
-  `agentshield-settings-guard@<user>.path` restores `settings.json` from git HEAD + alerts on any
-  unexpected change. cp-api is a *container* — it can write the shared volume but **cannot** run
-  the host-side `agentshield-settings-rebaseline` / commit-to-HEAD. So a cp-api write would be
-  reverted. Resolution: a tiny **host-side apply hook** (same pattern as `cp-secretd`: cp-api
-  sends the staged settings change over a local socket; the host helper commits it to `~/.claude`
-  HEAD + rebaselines the guard). This keeps secrets/host-trust on the host and lets cp-api drive.
-- **W2 — OneCLI agent/secret queries from cp-api:** the binding check needs
-  `onecli agents list` / `agents secrets --id` / `secrets list`. Confirm cp-api's OneCLI client
-  can run these (M6 wired secret *binding*; need *read* of agent secret sets too).
-- **W3 — reconcile trigger:** a periodic per-tenant reconcile (interval or DB-event). NOT an LLM
-  call → complies with the no-recurring-LLM rule (the host already runs these on 10-min timers).
+### Integration wrinkles — RESOLVED/REFINED 2026-06-17
+- **W1 — settings-guard: DISSOLVED (was a false alarm).** Verified the guard
+  (`/usr/local/sbin/agentshield-settings-guard`): `PROTECTED = ("permissions","hooks")` ONLY;
+  it restores *those keys* from a root golden and **passes everything else (incl. `mcpServers`,
+  `enabledMcpjsonServers`, `model`) through UNTOUCHED** — deploy-mcp already writes mcpServers
+  freely. So cp-api writing `mcpServers` needs **NO host hook, NO guard-into-image, NO
+  coordination** — just don't touch permissions/hooks. The earlier "host apply-hook" idea is
+  dropped (it would've been needless host sprawl).
+- **W2 — OneCLI from cp-api: REAL gap (MCP path only).** Verified: cp-api has **no `onecli`
+  binary** and its code doesn't call OneCLI; all OneCLI ops (M6 vault, agent/secret create+bind)
+  run **host-side as root**. So the MCP bound-secret check (`onecli agents secrets` / `secrets
+  list`) can't run inside cp-api via the CLI. Needs one of: (a) cp-api queries the OneCLI **HTTP
+  API** (127.0.0.1:10255 gateway) for the agent's bound secrets — cleanest, no new host script,
+  but cp-api needs API creds/route; (b) a small **host helper** exposes the bound-secret set to
+  cp-api (another host component — weigh vs the canon). **The SKILLS path has NO OneCLI dependency
+  → fully clean in cp-api.**
+- **W3 — reconcile trigger:** periodic per-tenant reconcile (interval or DB-event). NOT an LLM
+  call → complies with the no-recurring-LLM rule (host already runs these on 10-min timers).
+
+### Phase-2 build order (refined)
+1. **Skills reconcile + apply in cp-api** (CLEAN — no OneCLI, no settings.json, no guard): fetch
+   `skills/` + `users.yaml` from claude-bot-skills via the scoped token (generalize M8's GitHub
+   fetch), compute allow-list (logic validated in Phase-1, commit 72a566d), write/remove
+   `~/.claude/skills/<slug>`. Needs a YAML parser in cp-api (none today → add `yaml` dep or parse
+   the small known structure). Idempotent vs the host timer so it can run in parallel pre-cutover.
+2. **MCP reconcile + apply** — same core, plus settings.json `mcpServers` merge (managed-set;
+   leave permissions/hooks + non-managed like shellfirm untouched) and the **W2** OneCLI
+   bound-secret check (decide a vs b first).
+3. Reconcile trigger; parallel-run diff vs host; per-bot disable host `skill-deploy@`/`mcp-deploy@`.
 
 ### Phased build plan (rollback-first, pilot-validated)
 1. cp-api reconcile **core** (fetch + allow-list + resolve) with a **dry-run** that logs the
