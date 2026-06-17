@@ -67,7 +67,10 @@ step stays with admins. The pod-bind fix is needed regardless and also restores 
 4. Keep the cross-bot off-limits rule (each user's `~/icloud` is private to that bot) — append to
    other tenants' CLAUDE.md as today.
 
-## Open question for Vitaliy
-Confirm **A (admin-only skill)** vs **B (full self-service)**. Recommendation is A. Either way I'd
-start with the `claude-pod-run` propagation fix (it's required for any in-pod iCloud and restores
-dmrudenko now).
+## DECISION — A confirmed (Vitaliy 2026-06-17)
+**Variant A (admin-only provisioning skill).** Also: this must be **documented into the rollout
+plan BEFORE migrating all users to pods** (Vitaliy) — because any user who has/wants iCloud must
+not lose Mac-file access at cutover (dmrudenko already did). Integrated into `docs/08` (Block A
+work item), `docs/09` (per-bot runbook step), and `docs/11` (rclone mount = justified bootstrap +
+the admin skill). Start with the `claude-pod-run` `:rslave` propagation fix — required for any
+in-pod iCloud and it restores dmrudenko now.

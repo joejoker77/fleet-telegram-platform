@@ -89,6 +89,16 @@ silently — the user sees nothing in Telegram.
 
 ---
 
+### A7. iCloud for tenants — pod propagation + admin skill  *(decided 2026-06-17, `docs/12`)*
+The pod runtime doesn't bind `~/icloud`, so a host rclone FUSE mount is invisible in the pod →
+migrating an iCloud user loses Mac-file access (dmrudenko already lost it; viveanne deferred for
+this). **Pre-rollout work items:** (1) `claude-pod-run` conditional `:rslave` bind of `~/icloud`
+(restores dmrudenko; prerequisite for any in-pod iCloud); (2) admin-only `icloud-connect <user>`
+skill (Apple ID + regular password + 2FA via Telegram → host rclone config → templated mount →
+graceful pod restart); (3) productize `rclone-icloud-mount@<user>` into install.sh (justified
+bootstrap), retire static units. Provisioning = ADMIN-ONLY (Variant A); "available to all" = anyone
+can request. Must be documented before mass migration (this section + runbook step + canon = done).
+
 ## BLOCK B — clean up / delete AFTER all bots are on the pod
 
 Extends the running teardown list in memory `project_fleet_dev_teardown`. Two layers:

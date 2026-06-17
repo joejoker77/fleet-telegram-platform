@@ -82,6 +82,7 @@ suspend/resume/quarantine. Currently host timers. **Target: CTRL-PLANE; ELIMINAT
 | `cp-secretd` + `@.service`/`.socket` | in-pod MCP token injection over a host socket |
 | `host-sudo-broker` (+ `make-admin.sh`/`unmake-admin.sh`) | admin bridge — host gate is the point (audited forced-command) |
 | cp-* control-plane containers + secrets (`m1.2`, `m1.5`, `m4.1` judge) | the control plane itself |
+| `rclone-icloud-mount@<user>` + `setup-icloud-rclone`/`enable-icloud-mount` | per-user iCloud FUSE mount (host; FUSE-in-pod breaks hardening) → `:rslave`-propagated into the pod; provisioned by the admin-only skill (`docs/12`). rclone.conf stays host-only (out of pod). |
 
 ## H. IMAGE — already correctly in the product (keep; verify install.sh wires them)
 `runtime/image/platform/bin/{composio-connect,composio-exec,composio-session,host-sudo,registry-publish}`;
@@ -92,8 +93,11 @@ session/tmux, log-rotation, liveness watchdog, MCP-approval seeding, checkpoints
 `onecli` (separate self-hosted vault product), OneCLI/LiteLLM gateways, Caddy/reverse-proxy;
 `composio-proxy`/`composio-mcp-bridge`/`composio-tunnel` (+services) → **review: likely superseded by
 the OneCLI-injection path (M6); confirm then ELIMINATE if legacy**; third-party tools (`bun`, `cloudflared`,
-`docker-compose`, `composer`, `ct2-*`, numpy/torch/pdf/playwright/fastapi/etc.); `drop-file`,
-`setup-icloud-rclone`/`enable-icloud-mount` (small user-facing utilities — keep, install.sh-managed).
+`docker-compose`, `composer`, `ct2-*`, numpy/torch/pdf/playwright/fastapi/etc.); `drop-file` (small utility — keep, install.sh-managed).
+**iCloud** (`rclone-icloud-mount@<user>` + `setup-icloud-rclone`/`enable-icloud-mount`) is now its
+own decision — see §G + `docs/12`: the rclone mount is a **justified BOOTSTRAP** (per-user data
+infra), provisioning is an **admin-only skill** (Variant A), and `claude-pod-run` must `:rslave`-
+propagate `~/icloud` into the pod.
 
 ## J. CRUFT — delete now (no value)
 All `*.bak*` under `/usr/local/{bin,sbin}`: `claude-tg-launcher.bak.*` (×8), `deploy-mcp.bak.v21`,

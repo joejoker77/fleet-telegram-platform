@@ -8,6 +8,13 @@ readiness analysis in `08-mass-rollout-readiness.md`.
 **viveanne is DEFERRED** — her iCloud is a host FUSE mount that won't appear inside her
 pod without extra prep; wait for Vitaliy's iCloud instructions before touching her.
 
+**iCloud prerequisite (decided 2026-06-17, `docs/12`):** the pod runtime does NOT yet propagate
+`~/icloud` into the container, so migrating an iCloud user loses their Mac-file access (already
+happened to dmrudenko). **Before migrating any user who has/wants iCloud**, the `claude-pod-run`
+`:rslave` propagation fix MUST be in place; provisioning is an admin-only skill. For the 5 here,
+check per-bot (step 1) — none currently has an active iCloud mount (only dmrudenko + viveanne do),
+so this gates viveanne specifically, but verify each.
+
 **Golden rules**
 - Run every command **from the operator's own terminal / the admin (vitaliy) session via
   host-sudo — NEVER from inside the target bot's own session.** `migrate-cutover.sh` has a
@@ -46,6 +53,9 @@ For each `<user>` (with its `<telegram_id>`):
 ### 1. Pre-checks
 - Bot healthy on host: `systemctl is-active claude-tg@<user>` = active; `bot.pid` alive.
 - Know its `<telegram_id>` (from the bot registry or `users` table).
+- **iCloud?** Does the user have an active mount (`systemctl is-active rclone-<user>-mount` or
+  `rclone-icloud-mount@<user>`)? If YES, the `claude-pod-run` `:rslave` propagation fix (`docs/12`)
+  must be deployed first, or they lose Mac-file access at cutover. If NO, nothing extra.
 
 ### 2. Prep (safe, no live impact, idempotent)
 ```
@@ -82,6 +92,11 @@ instance → no 409) → verify ≤90s (container running, `polling as @`, no 40
   - n8n / any service the bot uses.
 - (Once A2 lands) **disable the now-redundant host deploy timers** for this bot:
   `systemctl disable --now skill-deploy@<user>.timer mcp-deploy@<user>.timer`.
+
+### 5b. iCloud (only if the user has it)
+If step 1 flagged an iCloud mount: confirm the user sees their files **inside the pod** (the host
+mount is propagated via the `:rslave` bind). If absent, the propagation fix isn't deployed —
+stop and fix it before declaring the migration done. (dmrudenko needs this applied retroactively.)
 
 ### 6. Soak
 Leave it running and watch (`journalctl -u claude-pod@<user> -f`, and that it answers). Canary:
