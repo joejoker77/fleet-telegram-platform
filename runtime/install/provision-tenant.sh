@@ -35,6 +35,13 @@ log "OS account + .claude/work scaffold for $USER_NAME"
 id "$USER_NAME" >/dev/null 2>&1 || useradd --create-home --shell /usr/sbin/nologin "$USER_NAME"
 install -d -o "$USER_NAME" -g "$USER_NAME" "/home/$USER_NAME/.claude" "/home/$USER_NAME/work"
 
+# 1b) dormant iCloud scaffold (docs/12) — every tenant gets the mount point so the
+# capability is "available to all" by default. It stays empty/inert until the USER
+# authenticates via their own bot skill (creds -> host auth-helper -> OneCLI -> mount);
+# claude-pod-run :rslave-propagates ~/icloud into the pod once it's actually mounted.
+# 0700 tenant-owned matches the rclone mount unit's ExecStartPre expectations.
+install -d -o "$USER_NAME" -g "$USER_NAME" -m 0700 "/home/$USER_NAME/icloud"
+
 # 2) control-plane DB: users + containers
 log "registering tenant in control-plane DB"
 psql_cp <<SQL
