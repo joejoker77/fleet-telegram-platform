@@ -230,11 +230,13 @@ export interface McpResult {
   user: string; ref: string; available: string[]; allowed: string[];
   wouldManage: string[]; skipped: Record<string, { missing_config?: string[]; missing_secrets?: string[] }>;
   liveMcpServers: string[];
+  added: string[]; updated: string[]; removed: string[]; matchesLive: boolean; applied: boolean;
 }
 
-export async function reconcileMcp(opts: { user: string; ref?: string; boundPlaceholders?: Set<string> }): Promise<McpResult> {
+export async function reconcileMcp(opts: { user: string; ref?: string; boundPlaceholders?: Set<string>; apply?: boolean }): Promise<McpResult> {
   const { user } = opts;
   const ref = opts.ref || "main";
+  const apply = !!opts.apply;
   const entries = await listDir(REPO, ref, "mcp");
   const available = entries.filter((e) => e.type === "dir").map((e) => e.name).sort();
   const yamlText = await fetchText(REPO, ref, "users.yaml");
@@ -243,20 +245,57 @@ export async function reconcileMcp(opts: { user: string; ref?: string; boundPlac
 
   const wouldManage: string[] = [];
   const skipped: McpResult["skipped"] = {};
+  const resolved: Record<string, unknown> = {}; // slug -> resolved mcp_stanza (value, keyed by slug in settings.json)
   for (const slug of allowed) {
     let tpl: { mcp_stanza?: unknown };
     try { tpl = JSON.parse(await fetchText(REPO, ref, `mcp/${slug}/template.json`)); }
     catch (e) { skipped[slug] = {}; continue; }
     const stanza = tpl.mcp_stanza ?? tpl;
     const miss = { cfg: [] as string[], sec: [] as string[] };
-    resolveStanza(stanza, parseMcpUserConfig(yamlText, slug, user), boundBareNames(user, slug, bound), miss);
+    const r = resolveStanza(stanza, parseMcpUserConfig(yamlText, slug, user), boundBareNames(user, slug, bound), miss);
     if (miss.cfg.length || miss.sec.length) skipped[slug] = { missing_config: miss.cfg, missing_secrets: miss.sec };
-    else wouldManage.push(slug);
+    else { wouldManage.push(slug); resolved[slug] = r; }
   }
+
+  // ── merge into settings.json (mirrors host deploy-mcp). The managed NAMESPACE is
+  // `available` — every repo-driven MCP key lives there (mcp-installer routes new
+  // MCPs through the repo), so we own exactly those keys. Image-injected servers
+  // (e.g. shellfirm) are NOT in `available` → left untouched. This makes the managed
+  // set stateless (no /var/lib/mcp-deploy/<user>.managed.json), per the product canon.
+  // permissions/hooks and any non-`available` mcpServers entry are never touched.
   const sp = path.join(HOME_ROOT, user, ".claude", "settings.json");
+  let settings: Record<string, unknown> = {};
   let live: string[] = [];
-  if (fs.existsSync(sp)) { try { live = Object.keys(JSON.parse(fs.readFileSync(sp, "utf8")).mcpServers || {}).sort(); } catch { /* */ } }
-  return { user, ref, available, allowed, wouldManage, skipped, liveMcpServers: live };
+  if (fs.existsSync(sp)) {
+    try { settings = JSON.parse(fs.readFileSync(sp, "utf8")); } catch { settings = {}; }
+  }
+  const mcpServers: Record<string, unknown> = (settings.mcpServers as Record<string, unknown>) || {};
+  live = Object.keys(mcpServers).sort();
+  const managedNs = new Set(available);
+
+  const removed: string[] = [];
+  const added: string[] = [];
+  const updated: string[] = [];
+  for (const key of Object.keys(mcpServers)) {
+    if (managedNs.has(key) && !(key in resolved)) { delete mcpServers[key]; removed.push(key); }
+  }
+  for (const [slug, stanza] of Object.entries(resolved)) {
+    if (!(slug in mcpServers)) { mcpServers[slug] = stanza; added.push(slug); }
+    else if (JSON.stringify(mcpServers[slug]) !== JSON.stringify(stanza)) { mcpServers[slug] = stanza; updated.push(slug); }
+  }
+  const matchesLive = added.length === 0 && updated.length === 0 && removed.length === 0;
+
+  let applied = false;
+  if (apply && !matchesLive && fs.existsSync(sp)) {
+    settings.mcpServers = mcpServers;
+    const { uid, gid } = tenantIds(path.join(HOME_ROOT, user));
+    const tmp = `${sp}.mcp-tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(settings, null, 2), { mode: 0o600 });
+    try { fs.chownSync(tmp, uid, gid); } catch { /* best-effort */ }
+    fs.renameSync(tmp, sp);
+    applied = true;
+  }
+  return { user, ref, available, allowed, wouldManage, skipped, liveMcpServers: live, added: added.sort(), updated: updated.sort(), removed: removed.sort(), matchesLive, applied };
 }
 
 // CLI: tsx deploy-reconcile.ts <user> [--apply] [--ref <ref>]
@@ -271,7 +310,7 @@ if (isMain) {
   const mcp = args.includes("--mcp");
   const boundIdx = args.indexOf("--bound");
   const boundPlaceholders = boundIdx >= 0 ? new Set((args[boundIdx + 1] || "").split(",").filter(Boolean)) : undefined;
-  const run = mcp ? reconcileMcp({ user, ref, boundPlaceholders }) : reconcileSkills({ user, ref, apply });
+  const run = mcp ? reconcileMcp({ user, ref, boundPlaceholders, apply }) : reconcileSkills({ user, ref, apply });
   run
     .then((r) => { console.log(JSON.stringify(r, null, 2)); })
     .catch((e) => { console.error("reconcile failed:", e?.message || e); process.exit(1); });
