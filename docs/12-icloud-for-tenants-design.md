@@ -111,8 +111,9 @@ pods + still write a host-readable config — more attack surface, doesn't avoid
    chat, stream to the auth-helper, relay 2FA, report success. Fix the stale "app-specific" wording.
 5. Productize: templated `rclone-icloud-mount@` + helper into `install.sh`; retire static units.
 
-Open sub-choice for Vitaliy: plumbing **baked into provisioning for all** (zero admin step, max
-self-service) vs **admin-gated on request**. Recommend baked-in (matches "available to all").
+Sub-choice — DECIDED 2026-06-17 (Vitaliy): **bake plumbing into provisioning for all, by default.**
+Every tenant gets the dormant iCloud scaffolding at provision time; no admin step per user; the
+user activates it themselves via the auth skill whenever they want. Work item 2 → `provision-tenant.sh`.
 
 ## (superseded) earlier DECISION — A confirmed (Vitaliy 2026-06-17)
 **Variant A (admin-only provisioning skill).** Also: this must be **documented into the rollout
