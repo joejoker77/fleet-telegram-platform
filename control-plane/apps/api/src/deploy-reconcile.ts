@@ -298,6 +298,59 @@ export async function reconcileMcp(opts: { user: string; ref?: string; boundPlac
   return { user, ref, available, allowed, wouldManage, skipped, liveMcpServers: live, added: added.sort(), updated: updated.sort(), removed: removed.sort(), matchesLive, applied };
 }
 
+// ── orchestrator ─────────────────────────────────────────────────────────────
+// What the trigger layer (admin route, GitHub push webhook, bind flow) calls.
+// Replaces the host skill-deploy@/mcp-deploy@ timers: one entry point that runs
+// BOTH halves per tenant, isolating failures so one bad tenant/half can't abort
+// the sweep.
+export interface TenantReconcileResult {
+  user: string;
+  skills?: ReconcileResult;
+  mcp?: McpResult;
+  changed: boolean; // anything added/removed/updated across either half
+  error?: string;
+}
+
+// Active tenants: a linux user exists and the tenant isn't suspended/deleted.
+export async function listTenants(): Promise<string[]> {
+  const db = getDb();
+  const rows = await db
+    .select({ os: schema.users.osUsername, status: schema.users.status })
+    .from(schema.users);
+  return rows
+    .filter((r) => r.os && r.status !== "suspended" && r.status !== "deleted")
+    .map((r) => r.os as string)
+    .sort();
+}
+
+export async function reconcileTenant(opts: { user: string; ref?: string; apply?: boolean }): Promise<TenantReconcileResult> {
+  const out: TenantReconcileResult = { user: opts.user, changed: false };
+  try {
+    out.skills = await reconcileSkills(opts);
+    if (!out.skills.matchesLive) out.changed = true;
+  } catch (e) {
+    out.error = `skills: ${(e as Error).message}`;
+  }
+  try {
+    out.mcp = await reconcileMcp(opts);
+    if (!out.mcp.matchesLive) out.changed = true;
+  } catch (e) {
+    out.error = (out.error ? out.error + "; " : "") + `mcp: ${(e as Error).message}`;
+  }
+  return out;
+}
+
+// Sequential on purpose — a handful of pilot tenants, and serial keeps us well
+// under the unauthenticated-ish GitHub content API rate limits (the scoped token
+// is injected by the egress proxy). Parallelize + cache the repo listing later if
+// the tenant count grows.
+export async function reconcileAllTenants(opts: { ref?: string; apply?: boolean }): Promise<TenantReconcileResult[]> {
+  const users = await listTenants();
+  const out: TenantReconcileResult[] = [];
+  for (const user of users) out.push(await reconcileTenant({ user, ...opts }));
+  return out;
+}
+
 // CLI: tsx deploy-reconcile.ts <user> [--apply] [--ref <ref>]
 const isMain = import.meta.url === `file://${process.argv[1]}`;
 if (isMain) {

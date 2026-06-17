@@ -17,6 +17,7 @@ import { registerMcpRoutes } from "./mcp-routes.js";
 import { registerIdeRoutes } from "./ide-routes.js";
 import { registerSessionRoutes } from "./session-routes.js";
 import { registerIntegrationRoutes } from "./integration-routes.js";
+import { registerDeployRoutes } from "./deploy-routes.js";
 import {
   registerRegistryRoutes,
   makePublishApply,
@@ -152,6 +153,10 @@ registerSessionRoutes(app, {
   auditSocket: config.auditSocket,
   homeRoot: config.tenantHomeRoot,
 });
+
+// A2 deploy reconcile: admin-only HTTP trigger (manual/CI) for the control-plane
+// skills+mcp reconcile that replaces the host skill-deploy@/mcp-deploy@ timers.
+registerDeployRoutes(app, { redis, jwtSecret: config.jwtSecret });
 
 // M6.2 Composio integrations: public OAuth-callback landing + notify + audit.
 registerIntegrationRoutes(app, {
