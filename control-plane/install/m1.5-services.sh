@@ -120,6 +120,18 @@ podman rm -f cp-api >/dev/null 2>&1 || true
 # m5.5b-secretd.sh). Dir-bind: the socket appears when the helper is installed;
 # absent helper only degrades secretSpec connects (clear error), nothing else.
 mkdir -p /run/cp-secretd
+# A2: GitHub push-webhook HMAC secret (INBOUND verification → a LOCAL credential
+# like JWT, NOT OneCLI). Referenced ONLY if the operator created it
+# (`openssl rand -hex 32 | podman secret create cp_github_webhook_secret -`).
+# Absent ⇒ /deploy/webhook/github stays dormant (503), nothing else changes — so
+# m1.5 stays runnable on a box without it.
+WH_SECRET_ARG=""
+WH_EXPORT=""
+if podman secret inspect cp_github_webhook_secret >/dev/null 2>&1; then
+  WH_SECRET_ARG="--secret cp_github_webhook_secret"
+  WH_EXPORT="export GITHUB_WEBHOOK_SECRET_FILE=/run/secrets/cp_github_webhook_secret;"
+  log "github webhook secret present → wiring it into cp-api"
+fi
 # -v /home:/home (NOT a single tenant): cp-api is the MULTI-TENANT control plane —
 # it reads/writes every tenant's ~/.claude + ~/work (fs API, mcp-gate) and each
 # bot's .env token for multi-bot Mini App initData verification. Single-tenant
@@ -130,7 +142,7 @@ podman run -d --name cp-api --network host \
   -v cp-audit-run:/run/audit \
   -v /run/cp-secretd:/run/cp-secretd \
   -v /home:/home \
-  --secret "$PG_SECRET" --secret "$BOT_SECRET" --secret "$JWT_SECRET" \
+  --secret "$PG_SECRET" --secret "$BOT_SECRET" --secret "$JWT_SECRET" $WH_SECRET_ARG \
   --restart=unless-stopped \
   "$NODE_IMAGE" \
   sh -c 'set -e;
@@ -140,6 +152,7 @@ podman run -d --name cp-api --network host \
     command -v git >/dev/null 2>&1 || apk add --no-cache git >/dev/null 2>&1 || true;
     export HOST=127.0.0.1 PORT='"$API_PORT"' REDIS_URL=redis://127.0.0.1:6380 AUDIT_SOCKET=/run/audit/collector.sock TENANT_HOME_ROOT=/home;
     export TELEGRAM_BOT_TOKEN_FILE=/run/secrets/'"$BOT_SECRET"' JWT_SECRET_FILE=/run/secrets/'"$JWT_SECRET"';
+    '"$WH_EXPORT"'
     export TELEGRAM_BOT_USERNAME='"$BOT_USERNAME"';
     export DATABASE_URL="postgres://cplane:$(cat /run/secrets/'"$PG_SECRET"')@127.0.0.1:5433/control_plane";
     exec node_modules/.bin/tsx apps/api/src/index.ts' >/dev/null
