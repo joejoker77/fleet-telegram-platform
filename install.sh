@@ -143,14 +143,33 @@ phase_authoring() {
 }
 
 # ── PHASE: integrations (external service keys → OneCLI vault) ────────────────
-# These are OPTIONAL per deployment. Each prompts (described) inside its own
-# script today; here we describe + feed the value so the run is non-interactive.
+# OPTIONAL. Each key is described (English), then fed NON-interactively (over stdin)
+# to its own proven staging script, which encodes the correct host/header/format
+# into OneCLI (Exa: x-api-key@mcp.exa.ai; Composio: two hosts; GitHub PAT: Basic
+# base64). Blank => that integration is skipped. Idempotent: a key already staged
+# is left as-is. NOTE: the staging scripts currently bind to the pilot agent
+# (vitaliy-bot); per-additional-tenant binding is a follow-up.
+onecli_secret_exists() { # NAME — true if a OneCLI secret with this name exists
+  command -v /usr/local/bin/onecli >/dev/null 2>&1 || return 1
+  HOME=/root /usr/local/bin/onecli secrets list 2>/dev/null | grep -q "\"name\"[: ]*\"$1\""
+}
 phase_integrations() {
-  info "integrations are optional; skipping any whose key is not provided"
-  # GitHub PAT (skill/MCP sharing + marketplace), Exa, Composio — wire per deployment.
-  # (Left as explicit operator steps for now: run git-pat-vault.sh / m6.1 / m6.2,
-  #  each prints its own English description before reading the key.)
-  info "run when ready: git-pat-vault.sh ; m6.1-exa-vault.sh ; m6.2-composio-vault.sh"
+  prompt_secret_optional EXA_API_KEY \
+    "Exa API key for the web-search / deep-research MCP (mcp.exa.ai). Staged in OneCLI and injected as the 'x-api-key' header on egress, so the key never sits in the pod's .mcp.json. Blank to skip."
+  prompt_secret_optional COMPOSIO_API_KEY \
+    "Composio platform API key for external-app connectors (Gmail, Slack, Drive, etc.). Staged as two OneCLI secrets (backend.composio.dev + mcp.composio.dev) and proxy-injected; users connect their own accounts via OAuth. Blank to skip."
+  prompt_secret_optional GITHUB_PAT \
+    "GitHub Personal Access Token for skill/MCP sharing + the artifact marketplace (push branches + open PRs to the registry repo over HTTPS). Staged in OneCLI as Basic base64('x-access-token:<PAT>') on github.com. Blank to skip."
+
+  _stage() { # SCRIPT  KEY_VALUE  EXISTING_SECRET_NAME  [extra args...]
+    local script="$1" val="$2" sname="$3"; shift 3
+    if [ -z "$val" ]; then info "skip $(basename "$script") — no key provided"; return 0; fi
+    if [ "$DRY_RUN" != "1" ] && onecli_secret_exists "$sname"; then info "$sname already staged — keeping"; return 0; fi
+    run_cmd_stdin "$val" bash "$RT_INSTALL/$script" "$@"
+  }
+  _stage m6.1-exa-vault.sh      "${EXA_API_KEY:-}"      "vitaliy-exa-api"
+  _stage m6.2-composio-vault.sh "${COMPOSIO_API_KEY:-}" "vitaliy-composio-api"
+  _stage git-pat-vault.sh       "${GITHUB_PAT:-}"       "vitaliy-git-fleet-platform"
 }
 
 # ── PHASE: artifact marketplace ───────────────────────────────────────────────

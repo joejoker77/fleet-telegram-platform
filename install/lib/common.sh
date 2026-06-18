@@ -58,6 +58,27 @@ prompt_param() {
   printf -v "$__var" '%s' "$__val"
 }
 
+# prompt_secret_optional VARNAME "DESCRIPTION" — like prompt_secret, but an empty
+# value is ALLOWED (the operator presses Enter to skip this optional integration).
+prompt_secret_optional() {
+  local __var="$1" __desc="${2:?prompt_secret_optional: DESCRIPTION is mandatory (install rule #1)}"
+  _describe "$__var" "$__desc"
+  [ "${DRY_RUN:-0}" = "1" ] && { info "(dry-run — optional secret; would prompt, blank = skip)"; return 0; }
+  if [ -n "${!__var:-}" ]; then info "(value supplied via environment)"; return 0; fi
+  local __val=""
+  printf '    Enter value (hidden), or press Enter to SKIP this integration: '
+  read -rs __val; echo
+  printf -v "$__var" '%s' "$__val"
+}
+
+# run_cmd_stdin VALUE CMD... — run CMD with VALUE fed on stdin (for sub-scripts that
+# read a secret via `read -rs`); honors DRY_RUN (prints the command, value hidden).
+run_cmd_stdin() {
+  local __val="$1"; shift
+  if [ "${DRY_RUN:-0}" = "1" ]; then info "would run (secret on stdin): $*"; return 0; fi
+  printf '%s\n' "$__val" | "$@"
+}
+
 # describe_generated NAME "DESCRIPTION" — announce an auto-generated secret (no prompt),
 # still explaining what it is and why (rule #1) so the operator understands what was created.
 describe_generated() { _describe "$1" "$2"; info "(auto-generated during install — you are not asked for it)"; }
