@@ -9,11 +9,17 @@
 # own pod. Flip /etc/agentshield/autosuspend.conf ENFORCE=1 + daemon-reload to arm.
 # Resume an enforced suspend with: tenant-resume <user>.
 #
-# Run as root. Idempotent. Pilot: vitaliy only. Rollback: m4.4-auto-suspend-rollback.sh
+# Run as root. Idempotent. Per-tenant (enabled for the bootstrap tenant, if any).
+# Rollback: m4.4-auto-suspend-rollback.sh
 set -euo pipefail
 
-SRC=/home/vitaliy/work/fleet-platform/control-plane/install
-USERS=("vitaliy")
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+SRC="$ROOT/control-plane/install"
+# Per-tenant scope: the bootstrap admin tenant (if any). Empty on a
+# platform-only greenfield install (no tenant yet) — handled below.
+TENANT="${BOOTSTRAP_ADMIN_USER:-}"
+USERS=()
+[ -n "$TENANT" ] && USERS=("$TENANT")
 
 log() { printf '\n== %s ==\n' "$*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -35,6 +41,15 @@ else
 fi
 
 systemctl daemon-reload
+
+if [ ${#USERS[@]} -eq 0 ]; then
+  echo
+  echo "✅ M4.4 auto-suspend binaries + units + default config installed (platform-wide)."
+  echo "   No tenant set (BOOTSTRAP_ADMIN_USER empty) — skipping per-tenant timer enable."
+  echo "   The monitor timer is enabled per tenant at add-user time."
+  exit 0
+fi
+
 for u in "${USERS[@]}"; do
   systemctl enable --now "auto-suspend-monitor@$u.timer"
   systemctl is-active "auto-suspend-monitor@$u.timer" >/dev/null && echo "  timer active for $u" || die "timer not active for $u"
@@ -42,5 +57,5 @@ done
 
 echo
 echo "✅ M4.4 auto-suspend installed for: ${USERS[*]} (ENFORCE=$(. /etc/agentshield/autosuspend.conf 2>/dev/null; echo "${ENFORCE:-0}"))"
-echo "   Validate detection (alert-only, no freeze): bash $SRC/m4.4-accept.sh vitaliy"
+echo "   Validate detection (alert-only, no freeze): bash $SRC/m4.4-accept.sh ${USERS[0]}"
 echo "   Arm enforcement: set ENFORCE=1 in /etc/agentshield/autosuspend.conf && systemctl daemon-reload"

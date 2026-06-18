@@ -11,12 +11,16 @@
 #
 # No timers, no recurring anything, ZERO LLM calls. The helper runs only when
 # cp-api connects (user-triggered MCP connect with a secret).
-# Pilot: vitaliy only. DEV artifact → project_fleet_dev_teardown.
+# The helper itself is platform-wide; the per-tenant agent check + smoke test
+# are scoped to the bootstrap tenant (if any). DEV artifact → project_fleet_dev_teardown.
 set -euo pipefail
 
-RT=/home/vitaliy/work/fleet-platform/runtime
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+RT="$ROOT/runtime"
 ONECLI=/usr/local/bin/onecli
 SOCK_DIR=/run/cp-secretd
+# Per-tenant scope: bootstrap admin tenant (if any). Empty on greenfield install.
+TENANT="${BOOTSTRAP_ADMIN_USER:-}"
 
 log() { printf '\n== %s ==\n' "$*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -34,12 +38,17 @@ for flag in --name --value --host-pattern --header-name --value-format; do
   echo "$HELP" | grep -q -- "$flag" || die "onecli secrets create lacks '$flag' — CLI changed; adjust cp-secretd.py"
 done
 "$ONECLI" agents list >/dev/null 2>&1 || die "onecli agents list failed"
-AID="$("$ONECLI" agents list 2>/dev/null | python3 -c "
+if [ -n "$TENANT" ]; then
+  AID="$("$ONECLI" agents list 2>/dev/null | python3 -c "
 import json,sys
+ident=sys.argv[1]
 d=json.load(sys.stdin); rows=d.get('data',d) if isinstance(d,dict) else d
-print(next((a['id'] for a in rows if a.get('identifier')=='vitaliy-bot'),''))")"
-[ -n "$AID" ] || die "agent vitaliy-bot not provisioned (m2.4)"
-echo "agent vitaliy-bot uuid=$AID"
+print(next((a['id'] for a in rows if a.get('identifier')==ident),''))" "$TENANT-bot")"
+  [ -n "$AID" ] || die "agent $TENANT-bot not provisioned (m2.4)"
+  echo "agent $TENANT-bot uuid=$AID"
+else
+  echo "no tenant set (BOOTSTRAP_ADMIN_USER empty) — skipping per-tenant agent check"
+fi
 
 # ---- group + runtime dir -----------------------------------------------------
 log "group + socket dir"
@@ -88,9 +97,13 @@ PY
 SMOKE1="$(smoke '{"verb":"secret_exists","name":"evil-name"}' || true)"
 echo "  bad name  -> $SMOKE1"
 echo "$SMOKE1" | grep -q '"ok": false' || die "helper accepted a non-convention name"
-SMOKE2="$(smoke '{"verb":"secret_exists","name":"vitaliy-mcp-smoketest"}' || true)"
-echo "  good name -> $SMOKE2"
-echo "$SMOKE2" | grep -q '"ok": true' || die "helper failed a valid secret_exists (onecli reachable?)"
+if [ -n "$TENANT" ]; then
+  SMOKE2="$(smoke "{\"verb\":\"secret_exists\",\"name\":\"$TENANT-mcp-smoketest\"}" || true)"
+  echo "  good name -> $SMOKE2"
+  echo "$SMOKE2" | grep -q '"ok": true' || die "helper failed a valid secret_exists (onecli reachable?)"
+else
+  echo "  good name -> skipped (no tenant set; per-tenant convention check runs at add-user time)"
+fi
 
 log "DONE"
 echo "socket: $SOCK_DIR/secretd.sock (root:cp-secret 0660)"

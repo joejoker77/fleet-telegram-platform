@@ -7,8 +7,9 @@
 # productized install.sh at end of dev (see memory project_fleet_dev_teardown).
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
 IMAGE=claude-user:latest
-CTX=/home/vitaliy/work/fleet-platform/runtime/image
+CTX="$ROOT/runtime/image"
 
 log() { printf '\n== %s ==\n' "$*"; }
 [ "$(id -u)" -eq 0 ] || { echo "run as root"; exit 1; }

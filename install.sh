@@ -61,14 +61,70 @@ BOOTSTRAP_ADMIN_TG="${BOOTSTRAP_ADMIN_TG:-}"
 preflight() {
   [ "$DRY_RUN" = "1" ] || require_root
   local c
+  # Missing prerequisites are no longer fatal here — the 'deps' phase installs
+  # them (this is a one-command-on-a-fresh-host installer). Just report.
   for c in podman openssl jq curl git; do
-    if ! command -v "$c" >/dev/null 2>&1; then
-      [ "$DRY_RUN" = "1" ] && warn "missing '$c' (tolerated for dry-run; required for a real run)" || die "required command '$c' not found"
-    fi
+    command -v "$c" >/dev/null 2>&1 || warn "missing '$c' — the 'deps' phase will install it"
   done
-  command -v corepack >/dev/null 2>&1 || warn "corepack/node not found — control-plane needs pnpm-installed node_modules (run 'corepack pnpm install' in control-plane/ as the repo owner)"
-  [ -d "$HERE/control-plane/node_modules" ] || warn "control-plane/node_modules missing — services run TypeScript via tsx and need deps installed"
+  command -v corepack >/dev/null 2>&1 || warn "corepack/node not found — the 'deps' phase installs Node 22 + corepack"
+  [ -d "$HERE/control-plane/node_modules" ] || warn "control-plane/node_modules missing — the 'deps' phase runs pnpm install"
   info "host: $(uname -sr)$(command -v podman >/dev/null 2>&1 && printf '; podman: %s' "$(podman --version)")"
+}
+
+# ── PHASE: dependencies bootstrap ─────────────────────────────────────────────
+# Makes the install truly one-command on a FRESH host: install every prerequisite
+# (podman, jq, curl, git, openssl, Node 22 + corepack) and the control-plane
+# node_modules. Idempotent — skips whatever is already present. Debian/Ubuntu apt
+# + NodeSource for Node; on other distros it warns and relies on preexisting tools.
+pkg_for() { case "$1" in podman) echo podman;; openssl) echo openssl;; jq) echo jq;; curl) echo curl;; git) echo git;; esac; }
+phase_deps() {
+  if [ "$DRY_RUN" = "1" ]; then
+    info "would install missing prerequisites: podman, jq, curl, git, openssl, Node 22 + corepack, and control-plane node_modules (pnpm) — via apt + NodeSource"
+    return 0
+  fi
+  require_root
+  if ! command -v apt-get >/dev/null 2>&1; then
+    warn "apt-get not found (non-Debian host) — skipping auto-install; ensure podman/jq/curl/git/openssl/node22/corepack are present"
+  else
+    local need=() c
+    for c in podman openssl jq curl git; do
+      command -v "$c" >/dev/null 2>&1 || need+=("$(pkg_for "$c")")
+    done
+    if [ "${#need[@]}" -gt 0 ]; then
+      info "installing OS packages: ${need[*]}"
+      DEBIAN_FRONTEND=noninteractive apt-get update -qq
+      DEBIAN_FRONTEND=noninteractive apt-get install -y "${need[@]}"
+    else
+      info "OS packages already present (podman jq curl git openssl)"
+    fi
+    # Node 22 + corepack — services run via tsx and need node >= 20.
+    local nodemajor; nodemajor="$( (command -v node >/dev/null 2>&1 && node -p 'process.versions.node.split(".")[0]') 2>/dev/null || echo 0)"
+    if [ "${nodemajor:-0}" -lt 20 ]; then
+      info "installing Node.js 22 (NodeSource)"
+      curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+      DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
+    else
+      info "Node.js present (v$(node -p process.versions.node))"
+    fi
+  fi
+  command -v corepack >/dev/null 2>&1 || npm install -g corepack >/dev/null 2>&1 || true
+  corepack enable >/dev/null 2>&1 || true
+  # control-plane node_modules (services run TypeScript via tsx). Use the pnpm
+  # version pinned in package.json (corepack's default may mismatch and error).
+  if [ ! -d "$HERE/control-plane/node_modules" ]; then
+    local pnpmver pnpm owner
+    pnpmver="$(grep -oE 'pnpm@[0-9.]+' "$HERE/control-plane/package.json" 2>/dev/null | head -1 | cut -d@ -f2)"
+    pnpm="corepack pnpm${pnpmver:+@$pnpmver}"
+    owner="$(stat -c %U "$HERE")"
+    info "installing control-plane dependencies ($pnpm) as $owner"
+    if [ "$owner" = "root" ]; then
+      ( cd "$HERE/control-plane" && COREPACK_ENABLE_DOWNLOAD_PROMPT=0 $pnpm install --silent )
+    else
+      sudo -u "$owner" -H bash -lc "cd '$HERE/control-plane' && COREPACK_ENABLE_DOWNLOAD_PROMPT=0 $pnpm install --silent"
+    fi
+  else
+    info "control-plane node_modules already present"
+  fi
 }
 
 # ── PHASE: secrets ────────────────────────────────────────────────────────────
@@ -181,6 +237,7 @@ phase_verify() {
 log "fleet-platform installer"
 [ "$DRY_RUN" = "1" ] && info "DRY-RUN: no changes will be made; describing the plan + every secret."
 preflight
+run_phase deps          phase_deps
 run_phase secrets       phase_secrets
 run_phase stores        phase_stores
 run_phase services      phase_services

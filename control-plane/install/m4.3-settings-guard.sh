@@ -5,7 +5,7 @@
 # provide (that one only auto-reverts on NEW high/critical SCANNER findings — a
 # removed deny rule / disabled hook is not a finding, so it was never restored).
 #
-# What it installs (PILOT: vitaliy only — only that .path unit is enabled):
+# What it installs (per-tenant — only the bootstrap tenant's .path unit is enabled):
 #   /usr/local/sbin/agentshield-settings-guard        (root, the enforcer)
 #   /usr/local/sbin/agentshield-settings-rebaseline   (root, adopt a new baseline)
 #   /etc/systemd/system/agentshield-settings-guard@.{path,service}
@@ -18,8 +18,13 @@
 # Run as root. Idempotent. Rollback: m4.3-settings-guard-rollback.sh.
 set -euo pipefail
 
-SRC=/home/vitaliy/work/fleet-platform/control-plane/install
-USERS=("vitaliy")   # pilot scope
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+SRC="$ROOT/control-plane/install"
+# Per-tenant scope: the bootstrap admin tenant (if any). Empty on a
+# platform-only greenfield install (no tenant yet) — handled below.
+TENANT="${BOOTSTRAP_ADMIN_USER:-}"
+USERS=()
+[ -n "$TENANT" ] && USERS=("$TENANT")
 
 log() { printf '\n== %s ==\n' "$*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -39,6 +44,14 @@ install -d -m 0755 /etc/agentshield
 
 systemctl daemon-reload
 
+if [ ${#USERS[@]} -eq 0 ]; then
+  echo
+  echo "✅ M4.3 settings-guard binaries + units installed (platform-wide)."
+  echo "   No tenant set (BOOTSTRAP_ADMIN_USER empty) — skipping per-tenant baseline/enable."
+  echo "   The guard is enabled per tenant at add-user time."
+  exit 0
+fi
+
 for u in "${USERS[@]}"; do
   [ -f "/home/$u/.claude/settings.json" ] || { echo "skip $u: no settings.json"; continue; }
   log "baselining + enabling guard for $u"
@@ -49,5 +62,5 @@ done
 
 echo
 echo "✅ M4.3 settings-guard installed for: ${USERS[*]}"
-echo "   Verify with: bash $SRC/m4.3-tamper-test.sh vitaliy   (expect ✅ PASS now)"
+echo "   Verify with: bash $SRC/m4.3-tamper-test.sh ${USERS[0]}   (expect ✅ PASS now)"
 echo "   Authorized edits: touch /etc/agentshield/operator-override.flag; edit; agentshield-settings-rebaseline <user>; rm flag"

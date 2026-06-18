@@ -13,15 +13,28 @@
 set -euo pipefail
 
 ACTION="${1:-apply}"
-REPO="${REPO:-/home/vitaliy/work/fleet-platform}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+REPO="${REPO:-$ROOT}"
 PG_USER=cplane
 PG_DB=control_plane
 PG_PORT=5433
-TENANT_USER="${TENANT_USER:-vitaliy}"   # unprivileged user that owns the repo / runs drizzle
+# repo owner runs drizzle: root on greenfield, the unprivileged tenant on the pilot
+OWNER="${TENANT_USER:-$(stat -c %U "$ROOT")}"
+# tenant for per-tenant references (pod unit instance); empty on platform-only installs
+TENANT="${BOOTSTRAP_ADMIN_USER:-}"
 
 log() { printf '\n== %s ==\n' "$*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
 [ "$(id -u)" -eq 0 ] || die "run as root"
+
+# run a shell command as the repo owner: directly when root, else via sudo -u
+run_as_owner() {
+  if [ "$OWNER" = root ]; then
+    bash -lc "$1"
+  else
+    sudo -u "$OWNER" -H bash -lc "$1"
+  fi
+}
 command -v podman >/dev/null 2>&1 || die "podman not found"
 podman ps --format '{{.Names}}' | grep -qx cp-postgres || die "cp-postgres container not running"
 
@@ -33,8 +46,8 @@ psql_cp() { podman exec -i cp-postgres psql -U "$PG_USER" -d "$PG_DB" -v ON_ERRO
 
 case "$ACTION" in
   apply)
-    log "applying migration 0003 (as $TENANT_USER, against 127.0.0.1:$PG_PORT)"
-    sudo -u "$TENANT_USER" -H bash -lc "cd '$REPO' \
+    log "applying migration 0003 (as $OWNER, against 127.0.0.1:$PG_PORT)"
+    run_as_owner "cd '$REPO' \
       && export COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
       && export DATABASE_URL='postgres://$PG_USER:$PW@127.0.0.1:$PG_PORT/$PG_DB' \
       && corepack pnpm --filter @fleet/db exec drizzle-kit migrate"
@@ -51,7 +64,13 @@ DONE (control-plane side). STILL REQUIRED for the full feature, separately:
   1. Pod image rebuild so registry-publish lands on PATH AND the entrypoint
      registry-task executor ships:
         bash runtime/install/m2.1-build-image.sh
-        systemctl restart claude-pod@vitaliy     # ⚠️ restarts the bot session
+NOTE
+    if [ -n "$TENANT" ]; then
+      echo "        systemctl restart claude-pod@$TENANT     # ⚠️ restarts the bot session"
+    else
+      echo "        systemctl restart claude-pod@<tenant>    # ⚠️ restarts the bot session (per tenant)"
+    fi
+    cat <<'NOTE'
   2. Mini App frontend deploy (📦 Marketplace screen):
         (cd control-plane/apps/miniapp && pnpm build)
         cp -a control-plane/apps/miniapp/dist/. /var/www/miniapp/dist/

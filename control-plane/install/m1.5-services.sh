@@ -16,7 +16,8 @@
 # Pilot: vitaliy only. All artifacts tracked for teardown (project_fleet_dev_teardown).
 set -euo pipefail
 
-REPO=/home/vitaliy/work/fleet-platform/control-plane
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+REPO="$ROOT/control-plane"
 NODE_IMAGE=docker.io/library/node:22-alpine
 PG_SECRET=cp_pg_password
 BOT_SECRET=cp_bot_token
@@ -25,8 +26,8 @@ API_PORT=8080
 SRV_AUDIT=/srv/audit
 # M5.1: tenant whose sandbox the authoring fs API serves (GET /fs/tree, PUT
 # /fs/file). The home is bind-mounted into cp-api; fs-safety.ts confines paths.
-# Pilot: vitaliy only.
-TENANT=vitaliy
+# Defaults to the bootstrap admin (if any); empty on a platform-only install.
+TENANT="${BOOTSTRAP_ADMIN_USER:-}"
 # M5.4b: bot username (no @) for Mini App deep links in approval notifications.
 # Optional — empty means notifications go out without the url-button.
 BOT_USERNAME="${TELEGRAM_BOT_USERNAME:-}"
@@ -40,14 +41,14 @@ command -v podman >/dev/null 2>&1 || die "podman not installed (run m1.2-stores.
 podman container exists cp-postgres || die "cp-postgres not found (run m1.2-stores.sh first)"
 podman container exists cp-redis    || die "cp-redis not found (run m1.2-stores.sh first)"
 podman secret inspect "$PG_SECRET" >/dev/null 2>&1 || die "$PG_SECRET secret missing (m1.2)"
-[ -d "$REPO/node_modules" ] || die "node_modules missing in $REPO — run 'corepack pnpm install' as vitaliy"
-[ -e "$REPO/apps/api/node_modules/@fleet/scanners" ] || die "@fleet/scanners not linked into apps/api — run 'corepack pnpm install' as vitaliy (m5.1 dep)"
+[ -d "$REPO/node_modules" ] || die "node_modules missing in $REPO — run 'corepack pnpm install' in $REPO"
+[ -e "$REPO/apps/api/node_modules/@fleet/scanners" ] || die "@fleet/scanners not linked into apps/api — run 'corepack pnpm install' in $REPO (m5.1 dep)"
 
 # ---- secrets ---------------------------------------------------------------
 # Bot token: prompt silently, store as podman secret. Used for LOCAL initData
 # HMAC verification (not an outbound call) → local credential, not OneCLI.
 if ! podman secret inspect "$BOT_SECRET" >/dev/null 2>&1; then
-  printf 'Paste the vitaliy Telegram bot token (hidden), then Enter: ' >&2
+  printf 'Paste the Telegram bot token (hidden), then Enter: ' >&2
   read -rs BOT_TOKEN; echo >&2
   [ -n "${BOT_TOKEN:-}" ] || die "empty bot token"
   printf '%s' "$BOT_TOKEN" | podman secret create "$BOT_SECRET" - >/dev/null
@@ -114,7 +115,12 @@ podman run -d --name cp-audit-collector --network host \
 # the container with extra mounts and the 2026-06-11 m1.5 re-run silently
 # dropped them (FileTree/PUT /fs broke). Every later increment lands HERE.
 log "starting cp-api (127.0.0.1:${API_PORT})"
-[ -d "/home/${TENANT}/.claude" ] || die "tenant sandbox /home/${TENANT}/.claude missing"
+# cp-api serves ALL tenants via the /home mount; a specific tenant sandbox is only
+# meaningful on the pilot. On a platform-only / greenfield install (no bootstrap
+# admin yet) there is no tenant to check — note rather than fail.
+if [ -n "$TENANT" ] && [ ! -d "/home/${TENANT}/.claude" ]; then
+  echo "note: tenant sandbox /home/${TENANT}/.claude missing — cp-api still serves tenants added later via add-user.sh"
+fi
 podman rm -f cp-api >/dev/null 2>&1 || true
 # /run/cp-secretd: cp-secretd activation socket (M5.5b, runtime/install/
 # m5.5b-secretd.sh). Dir-bind: the socket appears when the helper is installed;

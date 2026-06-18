@@ -7,7 +7,8 @@
 # DEV scaffolding (teardown).
 set -euo pipefail
 
-RT=/home/vitaliy/work/fleet-platform/runtime
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+RT="$ROOT/runtime"
 FWD_UNIT=/etc/systemd/system/cl-egress-forwarder.service
 ENV_FILE=/etc/cl-egress.env
 NFT_FILE=/etc/cl-egress.nft

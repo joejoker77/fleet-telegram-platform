@@ -2,8 +2,8 @@
 # M1.2 — control-plane data stores on Podman: PostgreSQL + Redis, isolated on
 # 127.0.0.1. Then apply migrations + seed.
 #
-# WHY run as root on the host (not from the bot): the vitaliy bot's systemd unit
-# uses ProtectSystem=strict (ReadWritePaths=/home/vitaliy only), so the bot's
+# WHY run as root on the host (not from the bot): a tenant bot's systemd unit
+# uses ProtectSystem=strict (ReadWritePaths=/home/<tenant> only), so the bot's
 # process tree sees /usr /var /etc /opt as read-only even with sudo — it cannot
 # install packages, create users, or run rootful podman. This script is the
 # host-side step; the bot then builds the services (M1.3/M1.4) in the repo and
@@ -21,7 +21,10 @@ REDIS_PORT=6380
 PG_USER=cplane
 PG_DB=control_plane
 SECRET=cp_pg_password
-REPO=/home/vitaliy/work/fleet-platform/control-plane
+# Repo root derived from THIS script's location ($ROOT/control-plane/install/…),
+# so the installer is portable to any path/host (no hardcoded /home/<user>).
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+REPO="$ROOT/control-plane"
 PG_IMAGE=docker.io/library/postgres:18-alpine
 REDIS_IMAGE=docker.io/library/redis:7-alpine
 
@@ -97,14 +100,22 @@ if [ -z "$ready" ]; then
 fi
 
 # 9) migrations + seed — drizzle-kit/tsx invoked directly via `pnpm exec`
-#    (package.json wrappers call bare `pnpm`, not on PATH here).
-log "applying migrations + seed (as vitaliy, against 127.0.0.1:${PG_PORT})"
-sudo -u vitaliy -H bash -lc "cd '${REPO}' \
+#    (package.json wrappers call bare `pnpm`, not on PATH here). Run as the repo
+#    OWNER: root on a greenfield install (repo cloned by root) or the tenant user
+#    on the pilot host (repo in their home) — auto-detected, so this is portable.
+OWNER="$(stat -c %U "$REPO")"
+log "applying migrations + seed (as ${OWNER}, against 127.0.0.1:${PG_PORT})"
+MIGRATE_CMD="cd '${REPO}' \
   && export COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
   && export DATABASE_URL='postgres://${PG_USER}:${PW}@127.0.0.1:${PG_PORT}/${PG_DB}' \
   && corepack pnpm install --silent \
   && corepack pnpm --filter @fleet/db exec drizzle-kit migrate \
   && corepack pnpm --filter @fleet/db exec tsx src/seed.ts"
+if [ "$OWNER" = "root" ]; then
+  bash -lc "$MIGRATE_CMD"
+else
+  sudo -u "$OWNER" -H bash -lc "$MIGRATE_CMD"
+fi
 unset PW
 
 log "status"
