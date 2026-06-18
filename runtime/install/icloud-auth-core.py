@@ -27,6 +27,9 @@ AP.add_argument("user"); AP.add_argument("apple_id")
 AP.add_argument("--twofa-file", required=True, help="path polled for the 2FA code (one line)")
 AP.add_argument("--timeout", type=int, default=240, help="overall seconds (2FA codes expire fast)")
 AP.add_argument("--rclone", default="/usr/bin/rclone")
+AP.add_argument("--sms", action="store_true",
+                help="use the trusted-phone SMS path: send 'sms' at the 2FA prompt, then relay the SMS code "
+                     "(required for accounts whose 2FA demands phone verification — Apple 412s the device code)")
 A = AP.parse_args()
 
 if os.geteuid() != 0:
@@ -62,7 +65,13 @@ def read_2fa(path, deadline):
     return ""
 
 def main():
-    cmd = [A.rclone, "--config", CONF, "config", "create", REMOTE, "iclouddrive",
+    # Apple throttles/denies the SRP+2FA flow based on the request User-Agent
+    # (rclone forum / issue #8587: default UA → HTTP 400 "Invalid Session Token" /
+    # validate2FACode -21669). A stable browser-like UA makes the requests go through.
+    UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+          "(KHTML, like Gecko) Version/17.4 Safari/605.1.15")
+    cmd = [A.rclone, "--config", CONF, "--user-agent", UA,
+           "config", "create", REMOTE, "iclouddrive",
            f"apple_id={A.apple_id}", f"password={PW}", "service=drive", "--obscure", "--all"]
     pid, fd = pty.fork()
     if pid == 0:  # child
@@ -71,7 +80,7 @@ def main():
     # parent drives the pty
     fl = fcntl.fcntl(fd, fcntl.F_GETFL); fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
     deadline = time.time() + A.timeout
-    buf = ""; sent_2fa = False
+    buf = ""; sent_2fa = False; sms_sent = False
     while time.time() < deadline:
         r, _, _ = select.select([fd], [], [], 1.0)
         if fd in r:
@@ -83,9 +92,13 @@ def main():
         # output stalled → rclone is likely waiting for input; act on the tail
         tail = buf[-400:]
         if RE_2FA.search(tail) and not sent_2fa:
-            code = read_2fa(A.twofa_file, deadline)
-            if not code: log("no 2FA code within timeout — aborting"); break
-            os.write(fd, (code + "\n").encode()); sent_2fa = True; buf = ""
+            if A.sms and not sms_sent:
+                log("requesting an SMS code to the trusted phone number ...")
+                os.write(fd, b"sms\n"); sms_sent = True; buf = ""
+            else:
+                code = read_2fa(A.twofa_file, deadline)
+                if not code: log("no 2FA code within timeout — aborting"); break
+                os.write(fd, (code + "\n").encode()); sent_2fa = True; buf = ""
         elif RE_YESOK.search(tail):
             os.write(fd, b"y\n"); buf = ""
         elif RE_PROMPT_TAIL.search(tail):

@@ -1,5 +1,18 @@
 # iCloud for tenants — design (pod era)
 
+> **UPDATE 2026-06-18 — durable AUTH path proven; helper now native-first.**
+> The earlier belief that "rclone's native SRP+2FA flow is a dead end (Apple 412s valid codes)"
+> is SUPERSEDED. Driven in a single pty process (`icloud-auth-core.py`, sidestepping rclone bug
+> #9324) with a browser-like User-Agent and the user's **regular** Apple ID password, the native
+> flow mints a proper ~30-day device `trust_token` — verified live end-to-end for `vitaliy`
+> (real Drive listed, mount clean, no 421, durable across pod restart). App-specific passwords are
+> REJECTED by Apple's SRP (401 / serviceError -20283) — SRP needs the real account password.
+> `icloud-connect-helper.sh` now tries **1a native (`icloud-auth-core.py`)** first and falls back
+> to **1b browser-cookie (`icloud-browser-auth.py`)** only if Apple 412s native. The browser flow's
+> harvested web-session is short-lived (~45 min) and is the fallback, not the primary. Any remaining
+> "app-specific password" wording in the legacy host `setup-icloud-rclone` is stale — use the regular
+> password. See memory `icloud-self-service-setup`.
+
 Vitaliy 2026-06-17: iCloud isn't only viveanne's — Dmitrii has it too and wants the capability
 **available to all** users. Decide how to organize it: an admin-only skill, self-service, or
 nothing. This design also fixes a **live gap** found while investigating.
