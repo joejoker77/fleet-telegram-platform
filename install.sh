@@ -51,9 +51,11 @@ export DRY_RUN ONLY_PHASE ASSUME_YES
 PLATFORM_MINIAPP_HOST="${PLATFORM_MINIAPP_HOST:-}"
 PLATFORM_IDE_HOST="${PLATFORM_IDE_HOST:-}"
 PLATFORM_REGISTRY_REPO="${PLATFORM_REGISTRY_REPO:-joejoker77/claude-bot-skills}"
-# Comma-separated tenant list, each "<os-username>[:role]" with role = user|admin
-# (default user). Two roles only for this deployment. Empty = provision none now.
-PLATFORM_TENANTS="${PLATFORM_TENANTS:-}"
+# The bootstrap ADMIN this install creates (the platform's first operator). Every
+# other user is added afterwards with add-user.sh (default role user; --is-admin
+# for more admins). Empty => stand up the platform only, add the admin later.
+BOOTSTRAP_ADMIN_USER="${BOOTSTRAP_ADMIN_USER:-}"
+BOOTSTRAP_ADMIN_TG="${BOOTSTRAP_ADMIN_TG:-}"
 
 # ── preflight ────────────────────────────────────────────────────────────────
 preflight() {
@@ -142,65 +144,30 @@ phase_authoring() {
   run_cmd bash "$RT_INSTALL/m5.6-ide.sh"
 }
 
-# ── PHASE: integrations (external service keys → OneCLI vault) ────────────────
-# OPTIONAL. Each key is described (English), then fed NON-interactively (over stdin)
-# to its own proven staging script, which encodes the correct host/header/format
-# into OneCLI (Exa: x-api-key@mcp.exa.ai; Composio: two hosts; GitHub PAT: Basic
-# base64). Blank => that integration is skipped. Idempotent: a key already staged
-# is left as-is. NOTE: the staging scripts currently bind to the pilot agent
-# (vitaliy-bot); per-additional-tenant binding is a follow-up.
-onecli_secret_exists() { # NAME — true if a OneCLI secret with this name exists
-  command -v /usr/local/bin/onecli >/dev/null 2>&1 || return 1
-  HOME=/root /usr/local/bin/onecli secrets list 2>/dev/null | grep -q "\"name\"[: ]*\"$1\""
-}
-phase_integrations() {
-  prompt_secret_optional EXA_API_KEY \
-    "Exa API key for the web-search / deep-research MCP (mcp.exa.ai). Staged in OneCLI and injected as the 'x-api-key' header on egress, so the key never sits in the pod's .mcp.json. Blank to skip."
-  prompt_secret_optional COMPOSIO_API_KEY \
-    "Composio platform API key for external-app connectors (Gmail, Slack, Drive, etc.). Staged as two OneCLI secrets (backend.composio.dev + mcp.composio.dev) and proxy-injected; users connect their own accounts via OAuth. Blank to skip."
-  prompt_secret_optional GITHUB_PAT \
-    "GitHub Personal Access Token for skill/MCP sharing + the artifact marketplace (push branches + open PRs to the registry repo over HTTPS). Staged in OneCLI as Basic base64('x-access-token:<PAT>') on github.com. Blank to skip."
-
-  _stage() { # SCRIPT  KEY_VALUE  EXISTING_SECRET_NAME  [extra args...]
-    local script="$1" val="$2" sname="$3"; shift 3
-    if [ -z "$val" ]; then info "skip $(basename "$script") — no key provided"; return 0; fi
-    if [ "$DRY_RUN" != "1" ] && onecli_secret_exists "$sname"; then info "$sname already staged — keeping"; return 0; fi
-    run_cmd_stdin "$val" bash "$RT_INSTALL/$script" "$@"
-  }
-  _stage m6.1-exa-vault.sh      "${EXA_API_KEY:-}"      "vitaliy-exa-api"
-  _stage m6.2-composio-vault.sh "${COMPOSIO_API_KEY:-}" "vitaliy-composio-api"
-  _stage git-pat-vault.sh       "${GITHUB_PAT:-}"       "vitaliy-git-fleet-platform"
-}
+# (Integrations are NOT a platform-level phase: each tenant's keys are bound to
+#  THAT tenant's OneCLI agent at onboarding by add-user.sh — including the
+#  bootstrap admin created in phase_bootstrap_admin below.)
 
 # ── PHASE: artifact marketplace ───────────────────────────────────────────────
 phase_marketplace() { run_cmd bash "$RT_INSTALL/m8.1-registry.sh"; }
 
-# ── PHASE: provision tenants (2-role RBAC: user | admin) ──────────────────────
-# Roles for this deployment (Vitaliy 2026-06-18 — exactly two; the 4-role model is
-# the separate law-firm fork):
-#   user  — sandboxed pod tenant, NO host access, standard skill/MCP allow-list.
-#   admin — additionally gains a controlled host-root channel via the host-sudo
-#           broker (make-admin.sh; NOPASSWD sudo behind a forced-command gate,
-#           destructive ops blocked/HITL), like the fleet operators.
-phase_tenants() {
-  prompt_param PLATFORM_TENANTS \
-    "Comma-separated list of tenants to provision, each as <os-username>[:role] where role is 'user' (default: sandboxed pod, no host access) or 'admin' (also granted the controlled host-root channel via the host-sudo broker). Example: alice,bob:admin,carol. Leave empty to provision none now (you can run provision-tenant.sh / make-admin.sh later)." \
-    ""
-  [ -n "${PLATFORM_TENANTS:-}" ] || { info "no tenants configured — provision later with provision-tenant.sh (+ make-admin.sh for admins)"; return 0; }
-  local entry name role
-  IFS=',' read -ra _TS <<< "$PLATFORM_TENANTS"
-  for entry in "${_TS[@]}"; do
-    entry="$(printf '%s' "$entry" | tr -d '[:space:]')"; [ -n "$entry" ] || continue
-    name="${entry%%:*}"; role="user"; [ "$entry" = "$name" ] || role="${entry#*:}"
-    case "$role" in user|admin) ;; *) die "tenant '$name': unknown role '$role' (use 'user' or 'admin')";; esac
-    info "provisioning tenant '$name' (role: $role)"
-    run_cmd bash "$RT_INSTALL/provision-tenant.sh" "$name"
-    if [ "$role" = "admin" ]; then
-      info "granting admin host-root channel to '$name' (host-sudo broker)"
-      run_cmd bash "$RT_INSTALL/make-admin.sh" "$name"
-      run_cmd systemctl restart "claude-pod@$name"   # restart so the mounted host-admin key is picked up
-    fi
-  done
+# ── PHASE: bootstrap admin ────────────────────────────────────────────────────
+# install.sh creates exactly ONE user — the bootstrap ADMIN — by handing off to
+# add-user.sh --is-admin (the single onboarding path: provision + token +
+# integrations bound to the agent + host-sudo broker + skills/MCP reconcile).
+# Every other user is added later with add-user.sh (default role user). The bot
+# token collected in phase_secrets is reused as the admin's own bot token (no
+# double prompt).
+phase_bootstrap_admin() {
+  prompt_param BOOTSTRAP_ADMIN_USER \
+    "OS username for the bootstrap ADMIN — the platform's first operator (gets the host-sudo admin channel). Leave empty to stand up the platform only and add the admin later with add-user.sh --is-admin." ""
+  [ -n "${BOOTSTRAP_ADMIN_USER:-}" ] || { info "no bootstrap admin set — add one later: ./add-user.sh <user> <tg_id> --is-admin"; return 0; }
+  prompt_param BOOTSTRAP_ADMIN_TG \
+    "Telegram numeric user id of the bootstrap admin (their Telegram account id; used to bind the bot + Mini App auth)." ""
+  [ -n "${BOOTSTRAP_ADMIN_TG:-}" ] || die "bootstrap admin needs a Telegram user id (BOOTSTRAP_ADMIN_TG)"
+  info "onboarding bootstrap admin '$BOOTSTRAP_ADMIN_USER' via add-user.sh --is-admin"
+  # reuse the bot token from phase_secrets as the admin's tenant token (TENANT_BOT_TOKEN)
+  run_cmd env TENANT_BOT_TOKEN="${PLATFORM_BOT_TOKEN:-}" bash "$HERE/add-user.sh" "$BOOTSTRAP_ADMIN_USER" "$BOOTSTRAP_ADMIN_TG" --is-admin
 }
 
 # ── PHASE: verify ─────────────────────────────────────────────────────────────
@@ -221,8 +188,7 @@ run_phase image         phase_image
 run_phase egress        phase_egress
 run_phase security      phase_security
 run_phase authoring     phase_authoring
-run_phase integrations  phase_integrations
 run_phase marketplace   phase_marketplace
-run_phase tenants       phase_tenants
+run_phase bootstrap_admin phase_bootstrap_admin
 run_phase verify        phase_verify
 log "done."

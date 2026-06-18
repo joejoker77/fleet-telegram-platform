@@ -23,7 +23,7 @@
 # Run as root on the host. Pilot: vitaliy only (M1+ rule).
 set -euo pipefail
 
-USER_NAME=vitaliy
+USER_NAME="${KV_USER:-vitaliy}"   # add-user.sh sets KV_USER to bind for an arbitrary tenant
 AGENT_IDENT="${USER_NAME}-bot"
 SECRET_NAME="${USER_NAME}-git-fleet-platform"
 HOST_PATTERN="github.com"
@@ -69,8 +69,11 @@ print(next((s['id'] for s in rows if s.get('name')=='$SECRET_NAME'),''))")"
 
 # ---- read PAT, create the secret -------------------------------------------
 log "creating secret $SECRET_NAME"
-printf 'Paste the fine-grained GitHub PAT (hidden), then Enter: ' >&2
-read -rs PAT; echo >&2
+PAT="${KV_VALUE:-}"   # non-interactive when KV_VALUE is set (add-user.sh / install.sh)
+if [ -z "$PAT" ]; then
+  printf 'Paste the fine-grained GitHub PAT (hidden), then Enter: ' >&2
+  read -rs PAT; echo >&2
+fi
 [ -n "${PAT:-}" ] || die "empty PAT"
 B64="$(printf 'x-access-token:%s' "$PAT" | base64 -w0)"
 unset PAT

@@ -23,7 +23,7 @@
 # Run as root on the host. Pilot: vitaliy only (M1+ rule).
 set -euo pipefail
 
-USER_NAME=vitaliy
+USER_NAME="${KV_USER:-vitaliy}"   # add-user.sh sets KV_USER to bind for an arbitrary tenant
 AGENT_IDENT="${USER_NAME}-bot"
 SECRET_NAME="${USER_NAME}-exa-api"
 HOST_PATTERN="mcp.exa.ai"
@@ -70,8 +70,11 @@ print(next((s['id'] for s in rows if s.get('name')=='$SECRET_NAME'),''))")"
 
 # ---- read key, create the secret -------------------------------------------
 log "creating secret $SECRET_NAME"
-printf 'Paste the Exa API key (hidden; it is the exaApiKey=... value in /home/%s/work/.mcp.json), then Enter: ' "$USER_NAME" >&2
-read -rs EXA_KEY; echo >&2
+EXA_KEY="${KV_VALUE:-}"   # non-interactive when KV_VALUE is set (add-user.sh / install.sh)
+if [ -z "$EXA_KEY" ]; then
+  printf 'Paste the Exa API key (hidden; it is the exaApiKey=... value in /home/%s/work/.mcp.json), then Enter: ' "$USER_NAME" >&2
+  read -rs EXA_KEY; echo >&2
+fi
 [ -n "${EXA_KEY:-}" ] || die "empty key"
 # NOTE: --value on argv is briefly visible in /proc/*/cmdline; window is ~1s on
 # a root-run one-shot. Same accepted trade-off as git-pat-vault.sh.

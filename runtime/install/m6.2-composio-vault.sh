@@ -17,7 +17,7 @@
 # Run as root on the host. Pilot: vitaliy only (M1+ rule).
 set -euo pipefail
 
-USER_NAME=vitaliy
+USER_NAME="${KV_USER:-vitaliy}"   # add-user.sh sets KV_USER to bind for an arbitrary tenant
 AGENT_IDENT="${USER_NAME}-bot"
 PRESTATE=/etc/cl-egress/${USER_NAME}-composio.prestate
 ONECLI=/usr/local/bin/onecli
@@ -70,8 +70,11 @@ done
 
 # ---- read key, create both secrets ------------------------------------------
 log "creating secrets"
-printf 'Paste the PLATFORM Composio API key (hidden; the headers.x-api-key value from the prototype .mcp.json), then Enter: ' >&2
-read -rs COMPOSIO_KEY; echo >&2
+COMPOSIO_KEY="${KV_VALUE:-}"   # non-interactive when KV_VALUE is set (add-user.sh / install.sh)
+if [ -z "$COMPOSIO_KEY" ]; then
+  printf 'Paste the PLATFORM Composio API key (hidden; the headers.x-api-key value from the prototype .mcp.json), then Enter: ' >&2
+  read -rs COMPOSIO_KEY; echo >&2
+fi
 [ -n "${COMPOSIO_KEY:-}" ] || die "empty key"
 # NOTE: --value on argv is briefly visible in /proc/*/cmdline; window is ~1s on
 # a root-run one-shot. Same accepted trade-off as git-pat-vault.sh / m6.1.
