@@ -115,7 +115,7 @@ phase_deps() {
     local pnpmver pnpm owner
     pnpmver="$(grep -oE 'pnpm@[0-9.]+' "$HERE/control-plane/package.json" 2>/dev/null | head -1 | cut -d@ -f2)"
     pnpm="corepack pnpm${pnpmver:+@$pnpmver}"
-    owner="$(stat -c %U "$HERE")"
+    owner="$(stat -c %U "$HERE" 2>/dev/null)"; id "$owner" >/dev/null 2>&1 || owner=root
     info "installing control-plane dependencies ($pnpm) as $owner"
     if [ "$owner" = "root" ]; then
       ( cd "$HERE/control-plane" && COREPACK_ENABLE_DOWNLOAD_PROMPT=0 $pnpm install --silent )

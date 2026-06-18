@@ -19,7 +19,7 @@ PG_USER=cplane
 PG_DB=control_plane
 PG_PORT=5433
 # repo owner runs drizzle: root on greenfield, the unprivileged tenant on the pilot
-OWNER="${TENANT_USER:-$(stat -c %U "$ROOT")}"
+OWNER="${TENANT_USER:-$(stat -c %U "$ROOT" 2>/dev/null)}"; id "$OWNER" >/dev/null 2>&1 || OWNER=root
 # tenant for per-tenant references (pod unit instance); empty on platform-only installs
 TENANT="${BOOTSTRAP_ADMIN_USER:-}"
 

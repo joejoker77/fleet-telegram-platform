@@ -13,7 +13,7 @@ set -euo pipefail
 
 # Repo root derived from this script's location: <root>/control-plane/install/<name>.sh
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
-OWNER="$(stat -c %U "$ROOT")"   # root on greenfield, the tenant user on the pilot
+OWNER="$(stat -c %U "$ROOT" 2>/dev/null)"; id "$OWNER" >/dev/null 2>&1 || OWNER=root   # root on greenfield, tenant on pilot; unresolvable uid → root
 REPO="$ROOT/control-plane"
 NODE_IMAGE=docker.io/library/node:22-alpine
 PG_SECRET=cp_pg_password

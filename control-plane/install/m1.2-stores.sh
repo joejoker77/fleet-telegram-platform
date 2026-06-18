@@ -103,7 +103,7 @@ fi
 #    (package.json wrappers call bare `pnpm`, not on PATH here). Run as the repo
 #    OWNER: root on a greenfield install (repo cloned by root) or the tenant user
 #    on the pilot host (repo in their home) — auto-detected, so this is portable.
-OWNER="$(stat -c %U "$REPO")"
+OWNER="$(stat -c %U "$REPO" 2>/dev/null)"; id "$OWNER" >/dev/null 2>&1 || OWNER=root
 log "applying migrations + seed (as ${OWNER}, against 127.0.0.1:${PG_PORT})"
 MIGRATE_CMD="cd '${REPO}' \
   && export COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
