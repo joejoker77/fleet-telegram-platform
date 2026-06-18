@@ -51,9 +51,8 @@ export DRY_RUN ONLY_PHASE ASSUME_YES
 PLATFORM_MINIAPP_HOST="${PLATFORM_MINIAPP_HOST:-}"
 PLATFORM_IDE_HOST="${PLATFORM_IDE_HOST:-}"
 PLATFORM_REGISTRY_REPO="${PLATFORM_REGISTRY_REPO:-joejoker77/claude-bot-skills}"
-# Comma-separated tenant list; the simplest form is just os-usernames. Per-user
-# role assignment is layered on later (RBAC config); a fresh install can start
-# with an empty list and provision tenants afterwards.
+# Comma-separated tenant list, each "<os-username>[:role]" with role = user|admin
+# (default user). Two roles only for this deployment. Empty = provision none now.
 PLATFORM_TENANTS="${PLATFORM_TENANTS:-}"
 
 # ── preflight ────────────────────────────────────────────────────────────────
@@ -157,15 +156,31 @@ phase_integrations() {
 # ── PHASE: artifact marketplace ───────────────────────────────────────────────
 phase_marketplace() { run_cmd bash "$RT_INSTALL/m8.1-registry.sh"; }
 
-# ── PHASE: provision tenants ──────────────────────────────────────────────────
+# ── PHASE: provision tenants (2-role RBAC: user | admin) ──────────────────────
+# Roles for this deployment (Vitaliy 2026-06-18 — exactly two; the 4-role model is
+# the separate law-firm fork):
+#   user  — sandboxed pod tenant, NO host access, standard skill/MCP allow-list.
+#   admin — additionally gains a controlled host-root channel via the host-sudo
+#           broker (make-admin.sh; NOPASSWD sudo behind a forced-command gate,
+#           destructive ops blocked/HITL), like the fleet operators.
 phase_tenants() {
-  [ -n "$PLATFORM_TENANTS" ] || { info "no tenants configured (PLATFORM_TENANTS empty) — provision later with provision-tenant.sh"; return 0; }
-  local t
+  prompt_param PLATFORM_TENANTS \
+    "Comma-separated list of tenants to provision, each as <os-username>[:role] where role is 'user' (default: sandboxed pod, no host access) or 'admin' (also granted the controlled host-root channel via the host-sudo broker). Example: alice,bob:admin,carol. Leave empty to provision none now (you can run provision-tenant.sh / make-admin.sh later)." \
+    ""
+  [ -n "${PLATFORM_TENANTS:-}" ] || { info "no tenants configured — provision later with provision-tenant.sh (+ make-admin.sh for admins)"; return 0; }
+  local entry name role
   IFS=',' read -ra _TS <<< "$PLATFORM_TENANTS"
-  for t in "${_TS[@]}"; do
-    t="$(printf '%s' "$t" | tr -d '[:space:]')"; [ -n "$t" ] || continue
-    info "provisioning tenant: $t"
-    run_cmd bash "$RT_INSTALL/provision-tenant.sh" "$t"
+  for entry in "${_TS[@]}"; do
+    entry="$(printf '%s' "$entry" | tr -d '[:space:]')"; [ -n "$entry" ] || continue
+    name="${entry%%:*}"; role="user"; [ "$entry" = "$name" ] || role="${entry#*:}"
+    case "$role" in user|admin) ;; *) die "tenant '$name': unknown role '$role' (use 'user' or 'admin')";; esac
+    info "provisioning tenant '$name' (role: $role)"
+    run_cmd bash "$RT_INSTALL/provision-tenant.sh" "$name"
+    if [ "$role" = "admin" ]; then
+      info "granting admin host-root channel to '$name' (host-sudo broker)"
+      run_cmd bash "$RT_INSTALL/make-admin.sh" "$name"
+      run_cmd systemctl restart "claude-pod@$name"   # restart so the mounted host-admin key is picked up
+    fi
   done
 }
 
