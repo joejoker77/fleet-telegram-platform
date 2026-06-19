@@ -86,17 +86,28 @@ prompt_secret_optional EXA_API_KEY \
 prompt_secret_optional COMPOSIO_API_KEY \
   "Composio platform API key (external-app connectors). Staged as ${USER_NAME}-composio-api/-mcp. Blank to skip."
 prompt_secret_optional GITHUB_PAT \
-  "GitHub PAT for skill/MCP sharing + marketplace. Staged as ${USER_NAME}-git-fleet-platform. Blank to skip."
-_bind() { # SCRIPT  VALUE  EXISTING_SECRET_NAME
-  local script="$1" val="$2" sname="$3" base="${1##*/}"
-  if [ -z "$val" ]; then info "skip $base — no key"; return 0; fi
+  "GitHub PAT for skill/MCP sharing + marketplace. Staged as ${USER_NAME}-git-fleet-platform (git @ github.com) AND ${USER_NAME}-github-github_pat (REST @ api.github.com, for marketplace publish). Blank to skip."
+prompt_secret_optional OPENROUTER_KEY \
+  "OpenRouter API key (voice STT + LLM fallback). Staged as ${USER_NAME}-openrouter-api (Authorization: Bearer @ openrouter.ai). Blank to skip."
+prompt_secret_optional ELEVENLABS_KEY \
+  "ElevenLabs API key (voice STT; note: geo-restricted in some regions). Staged as ${USER_NAME}-elevenlabs-api (xi-api-key @ api.elevenlabs.io). Blank to skip."
+_bind() { # SCRIPT  VALUE  EXISTING_SECRET_NAME  [extra args forwarded to SCRIPT]
+  local script="$1" val="$2" sname="$3" base="${1##*/}"; shift 3
+  if [ -z "$val" ]; then info "skip $base ($sname) — no key"; return 0; fi
   if [ "$DRY_RUN" != "1" ] && onecli_secret_exists "$sname"; then info "$sname already staged — keeping"; return 0; fi
   if [ "$DRY_RUN" = "1" ]; then info "would stage+bind $sname for $USER_NAME via $base"; return 0; fi
-  KV_USER="$USER_NAME" KV_VALUE="$val" bash "$RT_INSTALL/$script"
+  KV_USER="$USER_NAME" KV_VALUE="$val" bash "$RT_INSTALL/$script" "$@"
 }
 _bind m6.1-exa-vault.sh      "${EXA_API_KEY:-}"      "${USER_NAME}-exa-api"
 _bind m6.2-composio-vault.sh "${COMPOSIO_API_KEY:-}" "${USER_NAME}-composio-api"
 _bind git-pat-vault.sh       "${GITHUB_PAT:-}"       "${USER_NAME}-git-fleet-platform"
+# api.github.com (marketplace REST publish) needs the PAT with Authorization: Bearer
+# + RAW token — NOT the Basic/x-access-token form git-pat-vault binds @ github.com.
+# OneCLI host-match is exact-host (it binds backend.composio.dev + mcp.composio.dev
+# separately), so github.com does NOT cover api.github.com → bind it explicitly.
+_bind m-key-vault.sh "${GITHUB_PAT:-}"     "${USER_NAME}-github-github_pat" github-github_pat api.github.com Authorization "Bearer {value}"
+_bind m-key-vault.sh "${OPENROUTER_KEY:-}" "${USER_NAME}-openrouter-api"     openrouter-api    openrouter.ai    Authorization "Bearer {value}"
+_bind m-key-vault.sh "${ELEVENLABS_KEY:-}" "${USER_NAME}-elevenlabs-api"     elevenlabs-api    api.elevenlabs.io xi-api-key   "{value}"
 
 # 5) admin tier (host-sudo broker) if requested
 if [ "$IS_ADMIN" = "1" ]; then

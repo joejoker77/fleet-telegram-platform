@@ -25,7 +25,7 @@ HEADER_NAME="${3:?header-name required (e.g. xi-api-key)}"
 VALUE_FORMAT="${4:-}"
 [ -n "$VALUE_FORMAT" ] || VALUE_FORMAT='{value}'
 
-USER_NAME=vitaliy
+USER_NAME="${KV_USER:-vitaliy}"   # add-user.sh sets KV_USER to bind for an arbitrary tenant
 AGENT_IDENT="${USER_NAME}-bot"
 SECRET_NAME="${USER_NAME}-${SUFFIX}"
 PRESTATE="/etc/cl-egress/${USER_NAME}-${SUFFIX}.prestate"
@@ -70,8 +70,11 @@ print(next((s['id'] for s in rows if s.get('name')=='$SECRET_NAME'),''))")"
 
 # ---- read key, create the secret -------------------------------------------
 log "creating secret $SECRET_NAME (host $HOST_PATTERN, header $HEADER_NAME, fmt '$VALUE_FORMAT')"
-printf 'Paste the API key for %s (hidden), then Enter: ' "$SECRET_NAME" >&2
-read -rs SVC_KEY; echo >&2
+SVC_KEY="${KV_VALUE:-}"   # non-interactive when KV_VALUE is set (add-user.sh / install.sh)
+if [ -z "$SVC_KEY" ]; then
+  printf 'Paste the API key for %s (hidden), then Enter: ' "$SECRET_NAME" >&2
+  read -rs SVC_KEY; echo >&2
+fi
 [ -n "${SVC_KEY:-}" ] || die "empty key"
 # NOTE: --value on argv is briefly visible in /proc/*/cmdline; ~1s on a root-run
 # one-shot. Same accepted trade-off as m6.1-exa-vault.sh.
