@@ -475,7 +475,7 @@ fi
 echo "${ACTIVE_NAME:-default}" > "$ACTIVE_FILE"
 
 tmux kill-session -t "$SESSION" 2>/dev/null || true
-TMUX_CFG="$(mktemp)"; trap 'rm -f "$TMUX_CFG"' EXIT
+TMUX_CFG="$(mktemp)"; trap 'rm -f "$TMUX_CFG"; [ -n "${PROGRESS_SIDECAR_PID:-}" ] && kill "$PROGRESS_SIDECAR_PID" 2>/dev/null' EXIT
 echo "set-option -g history-limit 100000" > "$TMUX_CFG"
 mkdir -p "$TELEGRAM_STATE_DIR/logs"
 
@@ -493,6 +493,20 @@ SESS_LOG="$TELEGRAM_STATE_DIR/logs/session_current.txt"
 launch_claude "$ACTIVE_DIR" boot
 set_session_state "${ACTIVE_NAME:-default}" starting
 arm_readiness_watch "${ACTIVE_NAME:-default}"
+
+# In-chat progress sidecar (no-patch fleet parity): a TUI-spinner watchdog that
+# samples the claude tmux pane and renders Claude's own activity phrase with the
+# fleet's animated Premium emoji. The baked plugin is the CLEAN official one (no
+# progress feature) — this restores it without patching the plugin. Reaped by the
+# EXIT trap; on any supervise-loop exit the whole entrypoint restarts it.
+PROGRESS_SIDECAR_PID=""
+if [ "${DISABLE_PROGRESS_SIDECAR:-0}" != "1" ] && [ "${DISABLE_TELEGRAM_CHANNEL:-0}" != "1" ] \
+   && command -v node >/dev/null 2>&1; then
+  node /opt/platform/bin/telegram-progress-sidecar.mjs \
+    >>"$TELEGRAM_STATE_DIR/logs/progress-sidecar.log" 2>&1 &
+  PROGRESS_SIDECAR_PID=$!
+  echo "[progress] sidecar launched (pid $PROGRESS_SIDECAR_PID)"
+fi
 
 # Seed prior-session context (same logic as the host launcher; silent restore).
 # DEFAULT session only: the tail below is ~/work's conversation — pasting it

@@ -85,7 +85,10 @@ install -d -o "$USER_NAME" -g "$USER_NAME" -m 0755 "$CLAUDE_DIR/hooks" "$CLAUDE_
 sed "s#__TENANT_HOME__#/home/$USER_NAME#g" "$SKEL/settings.json.tmpl" > "$CLAUDE_DIR/settings.json"
 install -m 0755 "$SKEL/hooks/telegram-track-chat.sh"    "$CLAUDE_DIR/hooks/telegram-track-chat.sh"
 install -m 0755 "$SKEL/hooks/telegram-block-askuser.sh" "$CLAUDE_DIR/hooks/telegram-block-askuser.sh"
-install -m 0755 "$SKEL/hooks/telegram-progress.sh"      "$CLAUDE_DIR/hooks/telegram-progress.sh"
+# In-chat progress is NOT a tool hook (the simple PreToolUse hook showed a static
+# icon + raw tool args — wrong format). It's the telegram-progress-sidecar.mjs
+# baked at /opt/platform/bin, launched by the entrypoint: a TUI-spinner watchdog
+# that mirrors Claude's own activity phrase with the fleet's animated emoji.
 # Official telegram plugin tree from the image skel (clean, node_modules vendored);
 # copy once, then rewrite the placeholder home embedded in the index files.
 if [ ! -d "$CLAUDE_DIR/plugins/cache/claude-plugins-official" ]; then
