@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# onecli — fleet-platform shim for the OneCLI management CLI.
+#
+# Replaces the vendor Go binary with a thin client over the LOCAL OneCLI HTTP API
+# (open on loopback; the gateway/MITM proxy on :10255 is separate). Implements ONLY
+# the subcommands the platform scripts use. Ships in the repo; the installer drops
+# it at /usr/local/bin/onecli. No external binary download, no extra dependency.
+#
+# API base: $ONECLI_API_HOST (default http://127.0.0.1:10254). Output shapes match
+# what the callers parse (bare JSON arrays; callers already accept array or {data}).
+set -euo pipefail
+API="${ONECLI_API_HOST:-http://127.0.0.1:10254}"
+CT='Content-Type: application/json'
+
+die(){ echo "onecli(shim): $*" >&2; exit 1; }
+
+# collect --flag value pairs (after the group+action) into the F associative array
+declare -A F=()
+collect_flags(){ while [ $# -gt 0 ]; do case "$1" in --*) F["${1#--}"]="${2:-}"; shift 2;; *) shift;; esac; done; }
+
+# json_obj k1 v1 k2 v2 ...  -> compact JSON object (safe encoding via python)
+json_obj(){ python3 -c '
+import sys,json
+a=sys.argv[1:]
+print(json.dumps({a[i]:a[i+1] for i in range(0,len(a),2)}))' "$@"; }
+
+group="${1:-}"; action="${2:-}"
+[ $# -ge 1 ] && shift || true
+[ $# -ge 1 ] && shift || true
+
+case "$group/$action" in
+  auth/status)
+    # loopback API needs no auth; report healthy if the server answers
+    curl -fsS -o /dev/null "$API/api/agents" 2>/dev/null && echo '{"ok":true}' || die "OneCLI API unreachable at $API"
+    ;;
+
+  agents/list)
+    curl -fsS "$API/api/agents"; echo
+    ;;
+
+  agents/create)
+    collect_flags "$@"
+    [ -n "${F[name]:-}" ] && [ -n "${F[identifier]:-}" ] || die "agents create needs --name and --identifier"
+    body="$(json_obj name "${F[name]}" identifier "${F[identifier]}" secretMode "${F[secret-mode]:-selective}")"
+    curl -fsS -X POST -H "$CT" -d "$body" "$API/api/agents"; echo
+    ;;
+
+  agents/secrets)
+    collect_flags "$@"; [ -n "${F[id]:-}" ] || die "agents secrets needs --id"
+    curl -fsS "$API/api/agents/${F[id]}/secrets"; echo
+    ;;
+
+  agents/set-secrets)
+    collect_flags "$@"; [ -n "${F[id]:-}" ] || die "agents set-secrets needs --id"
+    ids="$(python3 -c 'import sys,json; print(json.dumps([x for x in (sys.argv[1] if len(sys.argv)>1 else "").split(",") if x]))' "${F[secret-ids]:-}")"
+    curl -fsS -X PUT -H "$CT" -d "{\"secretIds\":$ids}" "$API/api/agents/${F[id]}/secrets"; echo
+    ;;
+
+  secrets/list)
+    curl -fsS "$API/api/secrets"; echo
+    ;;
+
+  secrets/create)
+    if [ "${1:-}" = "--help" ] || [ "${2:-}" = "--help" ]; then
+      # surface the flags the platform scripts grep for
+      cat <<'H'
+onecli secrets create
+  --name           Display name for the secret
+  --type           Secret type: anthropic | openai | generic
+  --value          Secret value (e.g. API key)
+  --host-pattern   Host pattern to match (e.g. api.anthropic.com)
+  --path-pattern   Path pattern to match (e.g. /v1/*)
+  --header-name    Header name for injection (e.g. Authorization)
+  --value-format   Value format template (default {value})
+  --param-name     URL query parameter name for injection
+  --param-format   Value format template for param injection
+H
+      exit 0
+    fi
+    collect_flags "$@"
+    [ -n "${F[name]:-}" ] && [ -n "${F[value]:-}" ] && [ -n "${F[host-pattern]:-}" ] || die "secrets create needs --name --value --host-pattern"
+    # injectionConfig is nested; header XOR param
+    inj="$(python3 -c '
+import sys,json
+hn,vf,pn,pf=sys.argv[1:5]
+c={}
+if hn: c={"headerName":hn,"valueFormat":vf or "{value}"}
+elif pn: c={"paramName":pn,"paramFormat":pf or "{value}"}
+print(json.dumps(c))' "${F[header-name]:-}" "${F[value-format]:-}" "${F[param-name]:-}" "${F[param-format]:-}")"
+    body="$(python3 -c '
+import sys,json
+name,typ,val,host,path,inj=sys.argv[1:7]
+o={"name":name,"type":typ or "generic","value":val,"hostPattern":host}
+if path: o["pathPattern"]=path
+ic=json.loads(inj)
+if ic: o["injectionConfig"]=ic
+print(json.dumps(o))' "${F[name]}" "${F[type]:-generic}" "${F[value]}" "${F[host-pattern]}" "${F[path-pattern]:-}" "$inj")"
+    curl -fsS -X POST -H "$CT" -d "$body" "$API/api/secrets"; echo
+    ;;
+
+  secrets/delete)
+    collect_flags "$@"; [ -n "${F[id]:-}" ] || die "secrets delete needs --id"
+    curl -fsS -X DELETE "$API/api/secrets/${F[id]}"; echo
+    ;;
+
+  *)
+    die "unsupported command: $group $action (shim implements auth/agents/secrets subset used by the platform)"
+    ;;
+esac
