@@ -16,8 +16,14 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/*
 
-# Official Claude Code CLI.
-RUN npm install -g @anthropic-ai/claude-code
+# Official Claude Code CLI — PINNED. Do NOT float to `latest`: claude 2.1.181
+# ships an embedded Bun 1.4.0 "baseline" build whose JSC thread-suspend (TLC)
+# path segfaults in the interactive TUI on our hosts ("panic: Segmentation
+# fault", "embedder failed to suspend thread … for TLC"), restart-looping the
+# pod. 2.1.177 is the version the entire live fleet runs without crashing. Bump
+# this ARG only after validating the new version boots a polling bot.
+ARG CLAUDE_VERSION=2.1.177
+RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_VERSION}"
 
 # Bun — dependency of the official Telegram plugin. Install to /usr/local so it
 # is on PATH and readable by any uid (not /root, which keep-id can't reach).
