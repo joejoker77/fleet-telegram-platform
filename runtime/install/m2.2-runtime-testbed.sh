@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # M2.2 — install the claude-pod@ unit + wrapper and validate it on a THROWAWAY
-# test tenant (cptest). Does NOT touch the live claude-tg@vitaliy bot. Run as
+# test tenant (cptest). Does NOT touch any live claude-tg@ bot. Run as
 # root. Idempotent. DEV scaffolding (teardown — see project_fleet_dev_teardown).
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
 TEST_USER=cptest
-RT=/home/vitaliy/work/fleet-platform/runtime
+RT="$ROOT/runtime"
 WRAPPER=/usr/local/sbin/claude-pod-run
 UNIT=/etc/systemd/system/claude-pod@.service
 

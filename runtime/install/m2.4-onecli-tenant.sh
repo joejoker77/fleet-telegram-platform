@@ -5,12 +5,13 @@
 # context). Idempotent. DEV scaffolding (teardown).
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
 TEST_USER=cptest
 AGENT_ID_NAME=cptest          # display name
 AGENT_IDENT=cptest-bot        # identifier
 TOKDIR=/etc/cl-egress
 TOKFILE="$TOKDIR/$TEST_USER.token"
-RT=/home/vitaliy/work/fleet-platform/runtime
+RT="$ROOT/runtime"
 CA=/etc/onecli/ca-bundle.pem
 
 log() { printf '\n== %s ==\n' "$*"; }

@@ -6,15 +6,18 @@
 #      layer from the LIVE image — the repo source keeps it for a future re-apply)
 #   2. restore the latest tenant settings.json backup (brings the security hooks +
 #      deny rules back into the tenant layer)
-#   3. restart claude-pod@vitaliy so the bot comes up on the prior image + settings
+#   3. restart claude-pod@<user> so the bot comes up on the prior image + settings
+#
+#   bash m4.3-rollback-managed-settings.sh [<os_user>]   # defaults to the pilot
 #
 # Security is never absent during rollback: the prior settings.json carries the
 # security hooks/denies, so the moment the pod restarts on the prior image it is
 # guarded by the tenant layer again (the same state as before M4 #3).
 set -euo pipefail
 
-U=vitaliy
-REPO=/home/vitaliy/work/fleet-platform
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+U="${1:-vitaliy}"   # pilot default
+REPO="$ROOT"
 IMAGE=localhost/claude-user:latest
 PREV=localhost/claude-user:m4.3-prev
 CTR=claude-$U

@@ -3,8 +3,9 @@
 # metering now resolves to it (it finally has a control-plane users row).
 # Run as root.
 set -euo pipefail
-RT=/home/vitaliy/work/fleet-platform/runtime
-CP=/home/vitaliy/work/fleet-platform/control-plane
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+RT="$ROOT/runtime"
+CP="$ROOT/control-plane"
 log() { printf '\n== %s ==\n' "$*"; }
 [ "$(id -u)" -eq 0 ] || { echo "run as root"; exit 1; }
 

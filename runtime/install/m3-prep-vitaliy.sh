@@ -1,21 +1,22 @@
 #!/usr/bin/env bash
-# M3.1 — SAFE pre-cutover prep for vitaliy. NO live impact: it never starts the
-# container pod and never touches the running claude-tg@vitaliy. Idempotent.
+# M3.1 — SAFE pre-cutover prep for the pilot tenant. NO live impact: it never
+# starts the container pod and never touches the running claude-tg@<user>. Idempotent.
 #
-#   sudo bash m3-prep-vitaliy.sh
+#   sudo bash m3-prep-vitaliy.sh [<os_user>]
 #
 # Does three things:
-#   1. Full backup of /home/vitaliy/.claude + ~/work  -> independent rollback point.
+#   1. Full backup of /home/<user>/.claude + ~/work  -> independent rollback point.
 #   2. Install the runtime unit + wrapper (file install only; pod NOT enabled/started).
-#   3. Provision the OneCLI proxy token /etc/cl-egress/vitaliy.token for container egress.
+#   3. Provision the OneCLI proxy token /etc/cl-egress/<user>.token for container egress.
 #
-# ⚠️ Step 3 calls `onecli agents regenerate-token` for the vitaliy-bot agent.
+# ⚠️ Step 3 calls `onecli agents regenerate-token` for the <user>-bot agent.
 # DO NOT RUN until we've confirmed the live host bot does not depend on that
 # token (see SKIP_TOKEN below). Run `SKIP_TOKEN=1 sudo bash m3-prep-vitaliy.sh`
 # to do only the safe steps (1+2) first.
 set -uo pipefail
-U=vitaliy
-RT=/home/vitaliy/work/fleet-platform/runtime
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+U="${1:-vitaliy}"   # pilot default
+RT="$ROOT/runtime"
 TOKDIR=/etc/cl-egress; TOKFILE="$TOKDIR/$U.token"
 AGENT_IDENT="$U-bot"
 STAMP_FILE=/home/$U/work/.m3-backup-path
@@ -54,7 +55,7 @@ fi
 say "3) OneCLI proxy token for container egress -> $TOKFILE  (REUSE host token, NO regenerate)"
 # SAFE default: the live host bot authenticates to the OneCLI proxy with a token
 # embedded in its HTTPS_PROXY (http://<token>@127.0.0.1:10255). Regenerating the
-# vitaliy-bot agent token would rotate THAT out from under the live bot and break
+# <user>-bot agent token would rotate THAT out from under the live bot and break
 # its egress. So we REUSE the exact same token for the container (same agent
 # identity, no rotation, rollback-safe). Token is piped straight to the file,
 # never printed.

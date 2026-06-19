@@ -3,9 +3,10 @@
 # perimeter on the provisioned cptest tenant + non-interference with the live
 # stack. Read-mostly (one synthetic usage event). Run as root after M2.6.
 set -uo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
 C=claude-cptest
 CA=/etc/onecli/ca-bundle.pem
-CP=/home/vitaliy/work/fleet-platform/control-plane
+CP="$ROOT/control-plane"
 fail=0
 ok()  { echo "  ✓ $1"; }
 bad() { echo "  ✗ $1"; fail=1; }
@@ -51,7 +52,16 @@ m=$(podman exec cp-postgres psql -U cplane -d control_plane -tAc "select count(*
 [ "${m:-0}" -ge 1 ] && ok "usage_records resolves to cptest ($m rows)" || bad "no usage_records for cptest"
 
 hdr "5) non-interference with the live stack"
-[ "$(systemctl is-active claude-tg@vitaliy)" = "active" ] && ok "claude-tg@vitaliy still active (NRestarts=$(systemctl show claude-tg@vitaliy -p NRestarts --value))" || bad "vitaliy bot not active"
+# Detect a live tenant bot (claude-tg@ or claude-pod@) other than the cptest
+# testbed; verify the testbed didn't disturb it. On a greenfield host with no
+# live bot yet, there is nothing to interfere with, so this is informational.
+LIVE_UNIT="$(systemctl list-units --type=service --state=active --no-legend 'claude-tg@*' 'claude-pod@*' 2>/dev/null \
+  | awk '{print $1}' | grep -v '@cptest\.service$' | head -1)"
+if [ -n "$LIVE_UNIT" ]; then
+  [ "$(systemctl is-active "$LIVE_UNIT")" = "active" ] && ok "$LIVE_UNIT still active (NRestarts=$(systemctl show "$LIVE_UNIT" -p NRestarts --value))" || bad "$LIVE_UNIT not active"
+else
+  echo "  · info: no live claude-tg@/claude-pod@ tenant present (greenfield) — nothing to interfere with"
+fi
 dc=$(podman ps --filter 'name=cp-' --format '{{.Names}}' | wc -l)
 [ "$dc" -ge 2 ] && ok "control-plane services up ($dc cp-* running)" || bad "cp-* services missing"
 sudo docker ps --format '{{.Names}}' 2>/dev/null | grep -q n8n && ok "prototype docker stack intact" || bad "prototype stack disturbed?"

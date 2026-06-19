@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# m4.2-apply-audit-wiring.sh — M4 #2: wire the migrated vitaliy pod to the
+# m4.2-apply-audit-wiring.sh — M4 #2: wire the migrated pilot pod to the
 # control-plane audit-collector (socket + Stop hook), via a dedicated `audit` group.
 #
+#   bash m4.2-apply-audit-wiring.sh [<os_user>]   # defaults to the pilot
+#
 # Operator-run from the HOST as root. The control-plane redeploy (step 2) does NOT
-# touch the bot pod; only step 6 restarts claude-pod@vitaliy (kills + respawns the
+# touch the bot pod; only step 6 restarts claude-pod@<user> (kills + respawns the
 # bot's container). The script runs entirely host-side, so it survives that restart
 # and finishes verification after the new container comes up.
 #
@@ -26,8 +28,9 @@
 #   7. restart claude-pod@vitaliy and verify a fresh runtime.start lands in the WORM
 set -euo pipefail
 
-U=vitaliy
-REPO=/home/vitaliy/work/fleet-platform
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+U="${1:-vitaliy}"   # pilot default
+REPO="$ROOT"
 IMAGE=localhost/claude-user:latest
 VOL=cp-audit-run
 SETTINGS="/home/$U/.claude/settings.json"
@@ -119,7 +122,7 @@ PY
 
 log "7/7 restart claude-pod@$U + verify fresh runtime.start in the WORM log"
 # Anchor to bytes written AFTER the restart so the step-4 probe (also a
-# runtime.start actor=vitaliy) can't satisfy the check (M3-cutover false-positive
+# runtime.start actor=$U) can't satisfy the check (M3-cutover false-positive
 # class: never grep the whole append-only log).
 DAYLOG="$AUDIT_DIR/audit-$(date -u +%F).log"
 PRE_BYTES=0; [ -f "$DAYLOG" ] && PRE_BYTES="$(stat -c%s "$DAYLOG")"

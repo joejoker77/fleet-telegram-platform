@@ -5,10 +5,10 @@
 # through the L4 scanner + cp-judge. Exit 0 = all pass (safe to apply), non-zero
 # = at least one blocked / judge error (do NOT apply).
 #
-# WIRING (the one-liner the operator adds to deploy-mcp, scoped to the pilot):
+# WIRING (the one-liner the operator adds to deploy-mcp, scoped per tenant):
 #   after deploy-mcp renders the CANDIDATE settings.json (before it replaces the
-#   live one), for user `vitaliy` only:
-#       /home/vitaliy/work/fleet-platform/control-plane/install/m4.2-mcp-gate.sh <candidate.json> vitaliy \
+#   live one), for a given user <user>:
+#       <repo>/control-plane/install/m4.2-mcp-gate.sh <candidate.json> <user> \
 #         || { echo "MCP gate blocked the change"; exit 1; }
 #   so a malicious/ambiguous MCP never reaches the live settings.json.
 #
@@ -16,7 +16,8 @@
 # cp-audit-run volume + host net to reach cp-judge:8090). Run as root.
 set -euo pipefail
 
-REPO=/home/vitaliy/work/fleet-platform/control-plane
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+REPO="$ROOT/control-plane"
 NODE_IMAGE=docker.io/library/node:22-alpine
 
 SETTINGS="${1:-}"

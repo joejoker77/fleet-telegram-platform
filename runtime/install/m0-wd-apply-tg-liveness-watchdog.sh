@@ -2,7 +2,7 @@
 # m0-wd-apply-tg-liveness-watchdog.sh
 # Apply the Telegram-channel liveness-watchdog: rebuild the user image (so the
 # extended entrypoint supervise loop is baked) + install the rate-limited unit +
-# restart the vitaliy pod. Operator-run from the HOST as root.
+# restart the tenant pod. Operator-run from the HOST as root.
 #
 # What this fixes: after a pod restart the Telegram channel sometimes fails to
 # come up while `claude` itself is alive; the old supervisor watched only the tmux
@@ -10,12 +10,17 @@
 # entrypoint also watches the plugin's bot.pid and exits → Restart=always when the
 # channel can't come up / dies. StartLimit on the unit caps the restart rate.
 #
-# vitaliy PILOT ONLY. One-command rollback: m0-wd-rollback-tg-liveness-watchdog.sh
+# One-command rollback: m0-wd-rollback-tg-liveness-watchdog.sh
 # DEV scaffolding — folds into install.sh at end of dev (project_fleet_dev_teardown).
+#
+# Usage: m0-wd-apply-tg-liveness-watchdog.sh [tenant]
+#   tenant defaults to the repo owner.
 set -euo pipefail
 
-U=vitaliy
-REPO=/home/vitaliy/work/fleet-platform
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+REPO="$ROOT"
+OWNER="$(stat -c %U "$ROOT" 2>/dev/null)"; id "$OWNER" >/dev/null 2>&1 || OWNER=root
+U="${1:-$OWNER}"
 IMAGE=claude-user:latest
 CTX="$REPO/runtime/image"
 UNIT_SRC="$REPO/runtime/systemd/claude-pod@.service"

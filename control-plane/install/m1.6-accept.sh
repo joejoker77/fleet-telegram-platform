@@ -3,11 +3,12 @@
 # AFTER m1.5-services.sh. Read-only except for the audit event the round-trip
 # writes. Exercises every M1 acceptance criterion from doc 07.
 set -uo pipefail
-REPO=/home/vitaliy/work/fleet-platform/control-plane
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+REPO="$ROOT/control-plane"
 NODE_IMAGE=docker.io/library/node:22-alpine
 fail=0
 
-echo "############ 1) stores: schema (11 tables), enums (5), pilot tenant ############"
+echo "############ 1) stores: schema (11 tables), enums (5), bootstrap tenant ############"
 bash "$REPO/install/verify-stores.sh" || fail=1
 
 echo
@@ -27,9 +28,14 @@ echo "############ 4) audit hash-chain verifies (incl. the auth.session event ab
 podman exec cp-audit-collector sh -c "cd '$REPO' && AUDIT_DIR=/srv/audit node_modules/.bin/tsx apps/audit-collector/src/verify.ts" || fail=1
 
 echo
-echo "############ 5) non-interference: vitaliy bot untouched ############"
-echo -n "claude-tg@vitaliy: "; systemctl is-active claude-tg@vitaliy
-echo -n "NRestarts: "; systemctl show claude-tg@vitaliy -p NRestarts --value
+echo "############ 5) non-interference: existing bot untouched ############"
+EXISTING_BOT="${BOOTSTRAP_ADMIN_USER:-}"
+if [ -n "$EXISTING_BOT" ]; then
+  echo -n "claude-tg@${EXISTING_BOT}: "; systemctl is-active "claude-tg@${EXISTING_BOT}"
+  echo -n "NRestarts: "; systemctl show "claude-tg@${EXISTING_BOT}" -p NRestarts --value
+else
+  echo "  (no existing bot to check — set BOOTSTRAP_ADMIN_USER=<user> to assert non-interference)"
+fi
 
 echo
 if [ "$fail" -eq 0 ]; then echo "✅ M1.6 ACCEPTANCE PASSED"; else echo "❌ M1.6 had failures (see above)"; fi

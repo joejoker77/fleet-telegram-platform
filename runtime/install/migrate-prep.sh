@@ -16,9 +16,10 @@
 #   4. OneCLI proxy token /etc/cl-egress/<user>.token by REUSING the live host
 #      bot's token (no regenerate -> no rotation -> rollback-safe).
 set -uo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
 U="${1:?usage: migrate-prep.sh <os_user> <telegram_id>}"
 TG_ID="${2:?telegram_id required (for the control-plane tenant row)}"
-RT=/home/vitaliy/work/fleet-platform/runtime
+RT="$ROOT/runtime"
 TOKDIR=/etc/cl-egress; TOKFILE="$TOKDIR/$U.token"
 SD="/home/$U/.claude/channels/telegram-$U"
 STAMP_FILE="/home/$U/work/.migrate-backup-path"

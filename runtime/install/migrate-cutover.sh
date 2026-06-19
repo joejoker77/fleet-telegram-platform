@@ -29,7 +29,8 @@ for a in "$@"; do
   esac
 done
 [ -n "$U" ] || { echo "usage: migrate-cutover.sh <os_user> [--dry-run]"; exit 64; }
-RT=/home/vitaliy/work/fleet-platform/runtime
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+RT="$ROOT/runtime"
 SD="/home/$U/.claude/channels/telegram-$U"
 DEFAULT_SD="/home/$U/.claude/channels/telegram"   # plugin fallback if TELEGRAM_STATE_DIR not seen
 LOG="/home/$U/work/migrate-cutover-diag.txt"

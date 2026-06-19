@@ -4,8 +4,9 @@
 # authorized_keys, deletes the pod private key, clears is_admin. Leaves the host
 # broker binary in place (shared, harmless). Idempotent. Run as root.
 set -uo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
 U="${1:?usage: unmake-admin.sh <user>}"
-RT=/home/vitaliy/work/fleet-platform/runtime
+RT="$ROOT/runtime"
 SSH_DIR="/home/$U/.ssh"
 KEY="$SSH_DIR/host-admin"
 AUTHK="$SSH_DIR/authorized_keys"

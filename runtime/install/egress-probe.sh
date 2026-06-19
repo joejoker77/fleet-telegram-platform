@@ -12,8 +12,8 @@
 #     success or the exact error (incl. 409) on failure. So we do NOT need Claude,
 #     a Claude login, or any copied OAuth credentials — which is what dropped the
 #     live bot's login last time ([[feedback_no_shared_oauth_across_claude_instances]]).
-#   - ZERO impact on the live vitaliy bot: different token (@my_wordzilla_remply_bot,
-#     so no 409 against @vitaliy_claude_bot), throwaway --rm container, no tenant user,
+#   - ZERO impact on the live tenant bot: pass a DIFFERENT bot token than any live bot
+#     (so no 409 against the live bot), throwaway --rm container, no tenant user,
 #     no claude, temp token file purged on exit.
 #
 # Run as root:  egress-probe.sh <test_bot_token>
@@ -21,9 +21,13 @@ set -euo pipefail
 
 TOKEN="${1:?usage: egress-probe.sh <test_bot_token>}"
 IMG=claude-user:latest
-RT=/home/vitaliy/work/fleet-platform/runtime
-PLUGDIR=/home/vitaliy/.claude/plugins/cache/claude-plugins-official/telegram/0.0.6
-DIAG=/home/vitaliy/work/egress-probe-diag.txt
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+RT="$ROOT/runtime"
+OWNER="$(stat -c %U "$ROOT" 2>/dev/null)"; id "$OWNER" >/dev/null 2>&1 || OWNER=root
+# TODO: pilot-specific paths — derived from the repo owner's home (the tenant whose
+# installed plugin cache + work dir this probe reads/writes).
+PLUGDIR=/home/$OWNER/.claude/plugins/cache/claude-plugins-official/telegram/0.0.6
+DIAG=/home/$OWNER/work/egress-probe-diag.txt
 [ "$(id -u)" -eq 0 ] || { echo "run as root"; exit 1; }
 [ -f "$PLUGDIR/server.ts" ] || { echo "plugin server.ts not found at $PLUGDIR"; exit 1; }
 
@@ -110,9 +114,9 @@ timeout 20 podman run --rm "${NETARGS[@]}" --entrypoint /bin/sh "$IMG" \
   -c 'curl -s -o /dev/null -w "api.telegram.org http=%{http_code} time=%{time_total}s\n" --max-time 8 https://api.telegram.org 2>&1 || echo "curl failed (no route?)"' \
   2>&1 | sed 's/^/  /' | tee -a "$DIAG" || echo "  (step 3 timed out / container error)" | tee -a "$DIAG"
 
-chown vitaliy:vitaliy "$DIAG" 2>/dev/null || true
+chown "$OWNER:$OWNER" "$DIAG" 2>/dev/null || true
 echo
-echo "Done. Full result in $DIAG (the vitaliy bot reads it directly). Token file purged."
+echo "Done. Full result in $DIAG (the tenant bot reads it directly). Token file purged."
 if grep -qi 'polling as @' "$DIAG" 2>/dev/null; then
   echo "✅ Poller reaches Telegram standalone → the network/poller path is GOOD; the smoke gap is in how CLAUDE spawns the plugin (next: separate-account full test)."
 else

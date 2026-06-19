@@ -5,7 +5,8 @@
 #
 # DEV scaffolding (remove at end of dev — see project_fleet_dev_teardown).
 set -uo pipefail
-RT=/home/vitaliy/work/fleet-platform/runtime
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+RT="$ROOT/runtime"
 FWD_UNIT=/etc/systemd/system/cl-egress-forwarder.service
 TEST_USER=cptest
 [ "$(id -u)" -eq 0 ] || { echo "run as root"; exit 1; }
@@ -35,6 +36,12 @@ echo "== removing the M2.2 testbed (unit, wrapper, test user) =="
 bash "$RT/install/m2.2-rollback.sh" || true
 
 echo "== sanity: live bot + M1 stores untouched =="
-echo -n "claude-tg@vitaliy: "; systemctl is-active claude-tg@vitaliy 2>/dev/null || true
+LIVE_UNIT="$(systemctl list-units --type=service --state=active --no-legend 'claude-tg@*' 'claude-pod@*' 2>/dev/null \
+  | awk '{print $1}' | grep -v '@cptest\.service$' | head -1)"
+if [ -n "$LIVE_UNIT" ]; then
+  echo -n "$LIVE_UNIT: "; systemctl is-active "$LIVE_UNIT" 2>/dev/null || true
+else
+  echo "(no live claude-tg@/claude-pod@ tenant present)"
+fi
 podman ps --filter 'name=cp-' --format '{{.Names}} {{.Status}}'
 echo "M2.3 rollback done"

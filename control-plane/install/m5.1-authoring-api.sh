@@ -5,17 +5,19 @@
 #
 # Boundary note (ADR-004): PUT /fs/file is BOUNDARY-1 (own sandbox) — it writes +
 # audits + returns a non-blocking advisory, NO judge call. The blocking judge gate
-# is at PUBLISH (M5.5). Pilot: vitaliy only. Run as root. Idempotent.
+# is at PUBLISH (M5.5). Scoped to a single tenant. Run as root. Idempotent.
 # Rollback: re-run m1.5-services.sh (recreates cp-api without the sandbox mount).
 set -euo pipefail
 
-REPO=/home/vitaliy/work/fleet-platform/control-plane
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+REPO="$ROOT/control-plane"
 NODE_IMAGE=docker.io/library/node:22-alpine
 PG_SECRET=cp_pg_password
 BOT_SECRET=cp_bot_token
 JWT_SECRET=cp_jwt_secret
 API_PORT=8080
-TENANT=vitaliy
+TENANT="${BOOTSTRAP_ADMIN_USER:-}"
+[ -n "$TENANT" ] || { echo "ERROR: set BOOTSTRAP_ADMIN_USER=<user> (the tenant whose sandbox to mount)" >&2; exit 1; }
 SANDBOX="/home/${TENANT}/.claude"
 
 log() { printf '\n== %s ==\n' "$*"; }
@@ -23,14 +25,19 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 [ "$(id -u)" -eq 0 ] || die "run as root"
 [ -d "$SANDBOX" ] || die "tenant sandbox $SANDBOX missing"
 
+OWNER="$(stat -c %U "$ROOT" 2>/dev/null)"; id "$OWNER" >/dev/null 2>&1 || OWNER=root
+as_owner() {  # run a repo-scoped command as the repo owner (or directly if root)
+  if [ "$OWNER" = root ]; then bash -lc "$1"; else runuser -u "$OWNER" -- bash -lc "$1"; fi
+}
+
 # 1) link @fleet/scanners into the api (new workspace dep)
 log "pnpm install (links @fleet/scanners into @fleet/api)"
-runuser -u "$TENANT" -- bash -lc "cd '$REPO' && corepack pnpm install" || die "pnpm install failed"
+as_owner "cd '$REPO' && corepack pnpm install" || die "pnpm install failed"
 [ -e "$REPO/apps/api/node_modules/@fleet/scanners" ] || die "@fleet/scanners not linked into apps/api"
 
 # 2) fs-safety smoke (path confinement) — offline, no infra
 log "fs-safety smoke (path confinement)"
-runuser -u "$TENANT" -- bash -lc "cd '$REPO' && node_modules/.bin/tsx apps/api/src/fs-safety.smoke.ts" || die "fs-safety smoke failed"
+as_owner "cd '$REPO' && node_modules/.bin/tsx apps/api/src/fs-safety.smoke.ts" || die "fs-safety smoke failed"
 
 # 3) recreate cp-api WITH the tenant sandbox mount + TENANT_HOME_ROOT
 log "recreating cp-api with sandbox mount ($SANDBOX)"

@@ -8,8 +8,9 @@
 #   (phase 1) blocked / (phase 2) Telegram HITL.
 # Idempotent. Run as root on the host.   Rollback: unmake-admin.sh <user>
 set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
 U="${1:?usage: make-admin.sh <user>}"
-RT=/home/vitaliy/work/fleet-platform/runtime
+RT="$ROOT/runtime"
 BROKER=/usr/local/sbin/host-sudo-broker
 SSH_DIR="/home/$U/.ssh"
 KEY="$SSH_DIR/host-admin"

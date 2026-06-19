@@ -4,8 +4,9 @@
 # copied plugin cache + Claude OAuth). Run as root. Idempotent. The rebuilt
 # runtime image is left in place (the real cutover uses it too).
 set -uo pipefail
-RT=/home/vitaliy/work/fleet-platform/runtime
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+RT="$ROOT/runtime"
 [ "$(id -u)" -eq 0 ] || { echo "run as root"; exit 1; }
 echo "== deprovisioning m3smoke (purge user + home incl. copied creds) =="
 bash "$RT/install/deprovision-tenant.sh" m3smoke --purge-user
-echo "m3-smoke rollback done (runtime image kept; live vitaliy untouched)"
+echo "m3-smoke rollback done (runtime image kept; live pilot untouched)"

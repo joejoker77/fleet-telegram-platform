@@ -1,21 +1,22 @@
 #!/usr/bin/env bash
-# M3.3 — SEAMLESS CUTOVER of the live vitaliy bot onto the container runtime.
+# M3.3 — SEAMLESS CUTOVER of the live pilot bot onto the container runtime.
 #
-#   sudo bash m3-cutover.sh            # real run
-#   DRYRUN=1 sudo bash m3-cutover.sh   # pre-flight asserts only, touches nothing
+#   sudo bash m3-cutover.sh [<os_user>]            # real run (defaults to the pilot)
+#   DRYRUN=1 sudo bash m3-cutover.sh [<os_user>]   # pre-flight asserts only, touches nothing
 #
-# ⚠️ The vitaliy bot IS the assistant. `systemctl stop claude-tg@vitaliy` kills
+# ⚠️ The pilot bot IS the assistant. `systemctl stop claude-tg@<user>` kills
 # the Claude session running it. THEREFORE THIS SCRIPT MUST BE RUN FROM THE
 # OPERATOR'S OWN TERMINAL (or a detached systemd-run scope) — never from inside
 # the bot's session, or it would kill its own driver mid-cutover. A guard below
-# refuses to run if launched from within the claude-tg@vitaliy cgroup.
+# refuses to run if launched from within the claude-tg@<user> cgroup.
 #
 # Flow: pre-flight asserts -> stop old host poller (releases token + frees the
 # shared OAuth) -> start container pod (same ~/.claude, same token, single
 # instance => no rotation race, no 409) -> verify -> AUTO-ROLLBACK on any failure.
 set -uo pipefail
-U=vitaliy
-RT=/home/vitaliy/work/fleet-platform/runtime
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+U="${1:-vitaliy}"   # pilot default
+RT="$ROOT/runtime"
 SD="/home/$U/.claude/channels/telegram-$U"
 DEFAULT_SD="/home/$U/.claude/channels/telegram"   # plugin fallback if TELEGRAM_STATE_DIR not seen
 LOG=/home/$U/work/m3-cutover-diag.txt

@@ -1,23 +1,25 @@
 #!/usr/bin/env bash
 # M3.0-smoke — prove the full bot-in-container on a THROWAWAY test bot token,
-# WITHOUT touching the live vitaliy bot (different token, different container).
-# Run as root:  m3-smoke.sh <test_bot_token>
+# WITHOUT touching the live pilot bot (different token, different container).
+# Run as root:  m3-smoke.sh <test_bot_token> [<donor_user>]
 #
 # Rebuilds the image (new entrypoint), provisions tenant m3smoke with the test
-# token, copies the telegram plugin cache + Claude OAuth from vitaliy (option A;
-# 2nd first-party Claude Code on the same subscription), brings up the pod, and
-# verifies the plugin actually polls the test bot (no 409) and Claude launched.
-# Fully reversible: m3-smoke-rollback.sh (deprovision --purge-user).
+# token, copies the telegram plugin cache + Claude OAuth from the donor tenant
+# (option A; 2nd first-party Claude Code on the same subscription), brings up the
+# pod, and verifies the plugin actually polls the test bot (no 409) and Claude
+# launched. Fully reversible: m3-smoke-rollback.sh (deprovision --purge-user).
 set -euo pipefail
 
-TOKEN="${1:?usage: m3-smoke.sh <test_bot_token>}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+TOKEN="${1:?usage: m3-smoke.sh <test_bot_token> [<donor_user>]}"
+DONOR="${2:-vitaliy}"       # pilot default — tenant whose plugin cache + Claude OAuth is cloned
 U=m3smoke
 TG_ID=8376649513            # @my_wordzilla_remply_bot
-RT=/home/vitaliy/work/fleet-platform/runtime
-SRC=/home/vitaliy/.claude
+RT="$ROOT/runtime"
+SRC="/home/$DONOR/.claude"
 DST="/home/$U/.claude"
 IMG=claude-user:latest
-DIAG=/home/vitaliy/work/m3-smoke-diag.txt   # full untruncated evidence; the vitaliy bot reads this directly
+DIAG="/home/$DONOR/work/m3-smoke-diag.txt"   # full untruncated evidence; the pilot bot reads this directly
 : > "$DIAG" 2>/dev/null || true
 log() { printf '\n== %s ==\n' "$*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -37,19 +39,19 @@ log "2) create test tenant OS account + dirs"
 id "$U" >/dev/null 2>&1 || useradd --create-home --shell /usr/sbin/nologin "$U"
 install -d -o "$U" -g "$U" "$DST" "$DST/channels/telegram-$U" "$DST/channels/telegram-$U/logs" "/home/$U/work"
 
-log "3) copy telegram plugin cache + Claude OAuth + top-level config from vitaliy"
+log "3) copy telegram plugin cache + Claude OAuth + top-level config from $DONOR"
 cp -a "$SRC/plugins" "$DST/plugins"
 cp -a "$SRC/.credentials.json" "$DST/.credentials.json"
 # ~/.claude.json (onboarding/trust state) lives in HOME, not under ~/.claude;
 # without it Claude does first-run onboarding and exits in the pane.
-cp -a /home/vitaliy/.claude.json "/home/$U/.claude.json"
+cp -a "/home/$DONOR/.claude.json" "/home/$U/.claude.json"
 
 # Trust THIS tenant's workspace ON THE HOST, before the container ever starts.
-# The copied .claude.json only trusts the donor's path (/home/vitaliy/work); the
+# The copied .claude.json only trusts the donor's path (/home/$DONOR/work); the
 # tenant runs in /home/$U/work, so Claude would re-prompt and crash-loop. An
 # in-container write to the bind-mounted .claude.json proved unreliable, so we
 # seed trust host-side here (no bind-mount, no rename). For real new-tenant
-# onboarding this same seeding belongs in provision-tenant.sh; the live vitaliy
+# onboarding this same seeding belongs in provision-tenant.sh; the live pilot
 # cutover path is already trusted, so it's a no-op there.
 CJ="/home/$U/.claude.json" WORK="/home/$U/work" python3 - <<'PY'
 import json, os
@@ -68,7 +70,7 @@ PY
 chown -R "$U:$U" "$DST/plugins" "$DST/.credentials.json" "/home/$U/.claude.json"
 chmod 600 "$DST/.credentials.json"
 
-log "4) minimal tenant settings (model pin + metering hook; NOT vitaliy's host-path hooks)"
+log "4) minimal tenant settings (model pin + metering hook; NOT the donor's host-path hooks)"
 cat > "$DST/settings.json" <<'JSON'
 {
   "model": "claude-opus-4-8",
@@ -140,9 +142,9 @@ log "8) verdict"
   echo "=== FULL container logs (entrypoint stdout/stderr) ==="; podman logs "claude-$U" 2>&1 | sed 's/^/  /' || echo "  (container gone)"
 } | tee -a "$DIAG"
 
-chown vitaliy:vitaliy "$DIAG" 2>/dev/null || true
+chown "$DONOR:$DONOR" "$DIAG" 2>/dev/null || true
 echo
-echo "FULL DIAGNOSTIC written to $DIAG — the vitaliy bot can read it directly (no truncation)."
+echo "FULL DIAGNOSTIC written to $DIAG — the pilot bot can read it directly (no truncation)."
 
 if [ -n "$ok" ] && ! grep -qi '409' "$SDIR/logs/plugin_stderr.log" 2>/dev/null; then
   echo "✅ M3.0-smoke: bot-in-container launched + polling the test bot, no 409."

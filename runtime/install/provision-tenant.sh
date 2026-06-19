@@ -11,11 +11,13 @@
 # is global and assumed already provisioned by m2.3-egress.sh.
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+
 USER_NAME="${1:?usage: provision-tenant.sh <os_user> <telegram_id> [--admin]}"
 TG_ID="${2:?telegram_id required}"
 ADMIN=false; [ "${3:-}" = "--admin" ] && ADMIN=true
 AGENT_IDENT="${USER_NAME}-bot"
-RT=/home/vitaliy/work/fleet-platform/runtime
+RT="$ROOT/runtime"
 TOKDIR=/etc/cl-egress
 TOKFILE="$TOKDIR/$USER_NAME.token"
 

@@ -8,7 +8,8 @@
 #   4. WORM attr — /srv/audit is append-only (chattr +a) and tenant-unreadable.
 set -uo pipefail
 
-REPO=/home/vitaliy/work/fleet-platform/control-plane
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+REPO="$ROOT/control-plane"
 NODE_IMAGE=docker.io/library/node:22-alpine
 AUDIT=/srv/audit
 log() { printf '\n== %s ==\n' "$*"; }
