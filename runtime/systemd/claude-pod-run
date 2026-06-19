@@ -4,7 +4,7 @@
 #
 # Hardening (pilot interim): rootful podman + run-as-tenant-uid (--user) so
 # mounted home keeps host ownership, + --init (tini PID1 → signals work & reaping),
-# --cap-drop=ALL, --security-opt=no-new-privileges, --read-only rootfs + tmpfs,
+# --cap-drop=ALL (NOT no-new-privileges — it segfaults claude's Bun/JSC on some
 # and podman-enforced mem/cpu/pids limits (authoritative; the unit's cgroup
 # limits are a backstop). NETWORK is default bridge here — the locked netns +
 # nftables egress default-deny lands in M2.3. Fully-rootless per-user podman
@@ -141,11 +141,21 @@ if [ -d /run/cp-ide ]; then
   fi
 fi
 
+# NOTE: do NOT add `--security-opt=no-new-privileges`. The PR_SET_NO_NEW_PRIVS
+# prctl breaks Claude Code's embedded Bun/JSC stop-the-world GC thread-suspend on
+# some kernels — claude reaches its authenticated TUI + loads the telegram channel,
+# then segfaults ("embedder failed to suspend thread for TLC" → SIGSEGV) and
+# restart-loops, so the bot never polls. Bisected to NNP as the single trigger
+# 2026-06-19 (reproduced bare-vs-pod; seccomp=unconfined did NOT help, so it is
+# NNP itself, not the seccomp filter it gates). The hardening NNP would add
+# (block setuid/file-cap privilege gain at execve) is already covered here by
+# --cap-drop=ALL (no caps to escalate to) + non-root --user + --read-only rootfs
+# (no setuid binary can be written) + the cl-net default-deny egress lockdown.
 exec /usr/bin/podman run --rm --name "claude-$U" \
   --init \
   --user "${UID_N}:${GID_N}" \
   --network "$NETWORK" \
-  --cap-drop=ALL --security-opt=no-new-privileges \
+  --cap-drop=ALL \
   --read-only --tmpfs /tmp --tmpfs /run \
   --memory=4g --memory-reservation=3g --cpus=2 --pids-limit=2048 \
   -e HOME="$HOME_DIR" -e XDG_RUNTIME_DIR=/tmp -e HOST_ADMIN_USER="$U" "${PROXY_ARGS[@]}" "${CLAUDE_AUTH_ARGS[@]}" \
