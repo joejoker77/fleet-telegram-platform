@@ -94,6 +94,25 @@ if [ ! -d "$CLAUDE_DIR/plugins/cache/claude-plugins-official" ]; then
   grep -rlF __TENANT_HOME__ "$CLAUDE_DIR/plugins" 2>/dev/null \
     | xargs -r sed -i "s#__TENANT_HOME__#/home/$USER_NAME#g"
 fi
+# telegram channel access: seed the allowlist with the tenant's OWN telegram id so
+# the bot answers its registered owner out of the box (dmPolicy=pairing → anyone
+# else still has to pair). Without this a fresh tenant has no access.json and only
+# emits pairing prompts — it never actually chats. Idempotent: don't clobber an
+# existing access.json (the operator may have paired more chats via /telegram:access).
+CHAN_DIR="$CLAUDE_DIR/channels/telegram-$USER_NAME"
+install -d -o "$USER_NAME" -g "$USER_NAME" "$CHAN_DIR"
+if [ ! -f "$CHAN_DIR/access.json" ]; then
+  cat > "$CHAN_DIR/access.json" <<JSON
+{
+    "dmPolicy": "pairing",
+    "allowFrom": [
+        "${TG_ID}"
+    ],
+    "groups": {},
+    "pending": {}
+}
+JSON
+fi
 chown -R "$USER_NAME:$USER_NAME" "$CLAUDE_DIR"
 
 # 2) control-plane DB: users + containers
