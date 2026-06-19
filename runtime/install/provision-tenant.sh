@@ -37,6 +37,31 @@ log "OS account + .claude/work scaffold for $USER_NAME"
 id "$USER_NAME" >/dev/null 2>&1 || useradd --create-home --shell /usr/sbin/nologin "$USER_NAME"
 install -d -o "$USER_NAME" -g "$USER_NAME" "/home/$USER_NAME/.claude" "/home/$USER_NAME/work"
 
+# Seed ~/.claude.json (onboarding + trust state). Without it Claude Code treats
+# the pod run as first-run and stops at the trust/onboarding prompt → the
+# non-interactive pane hangs/exits → no session → supervisor restart-loop. The
+# entrypoint's trust_workdir also patches this, but seeding here means the very
+# first pod start is clean. Tenant-owned; trusts the tenant's ~/work.
+CJSON="/home/$USER_NAME/.claude.json"
+if [ ! -f "$CJSON" ]; then
+  cat > "$CJSON" <<JSON
+{
+  "hasCompletedOnboarding": true,
+  "trustDialogAccepted": true,
+  "projects": {
+    "/home/$USER_NAME/work": {
+      "hasTrustDialogAccepted": true,
+      "hasCompletedProjectOnboarding": true,
+      "allowedTools": [],
+      "mcpServers": {},
+      "mcpContextUris": []
+    }
+  }
+}
+JSON
+  chown "$USER_NAME:$USER_NAME" "$CJSON"; chmod 600 "$CJSON"
+fi
+
 # 1b) dormant iCloud scaffold (docs/12) — every tenant gets the mount point so the
 # capability is "available to all" by default. It stays empty/inert until the USER
 # authenticates via their own bot skill (creds -> host auth-helper -> OneCLI -> mount);

@@ -108,5 +108,23 @@ for _ in $(seq 1 60); do
 done
 [ -n "$up" ] || { echo "gateway not answering; recent onecli logs:"; podman logs --tail 50 onecli 2>&1 || true; die "OneCLI gateway never came up"; }
 
+# 7) export the gateway's MITM CA to the host so tenant pods can TRUST the proxy.
+#    OneCLI is a TLS-intercepting proxy; it generates+persists its CA inside the
+#    container at /app/data/gateway/ca.pem (the onecli-appdata volume). claude-pod-run
+#    mounts /etc/onecli/ca-bundle.pem into every pod (NODE_EXTRA_CA_CERTS/SSL_CERT_FILE
+#    …). WITHOUT this export, every in-pod HTTPS through the proxy (incl. the model
+#    endpoint) fails TLS → the agent can't reach Anthropic. Retry: the CA file appears
+#    a moment after first boot.
+log "exporting gateway CA -> /etc/onecli/ca-bundle.pem"
+install -d -m 0755 /etc/onecli
+ca_ok=""
+for _ in $(seq 1 30); do
+  if podman cp onecli:/app/data/gateway/ca.pem /etc/onecli/ca-bundle.pem 2>/dev/null && [ -s /etc/onecli/ca-bundle.pem ]; then
+    chmod 0644 /etc/onecli/ca-bundle.pem; ca_ok=1; echo "CA exported ($(wc -c </etc/onecli/ca-bundle.pem) bytes)"; break
+  fi
+  sleep 2
+done
+[ -n "$ca_ok" ] || die "could not export the OneCLI gateway CA (/app/data/gateway/ca.pem) — pods can't trust the proxy without it"
+
 log "status"
 podman ps --filter name=onecli --format '{{.Names}}  {{.Status}}  {{.Ports}}'
