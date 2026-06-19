@@ -46,7 +46,17 @@ command -v nginx >/dev/null || { echo "ERROR: nginx not installed (deps phase)" 
 SA=/etc/nginx/sites-available; SE=/etc/nginx/sites-enabled
 mkdir -p "$SA" "$SE"
 
-[ -d /var/www/miniapp/dist ] || warn "/var/www/miniapp/dist missing — the SPA isn't deployed yet (marketplace/m8.1). nginx will 404 until it is."
+# Deploy the Mini App SPA bundle from the repo (was a manual note in m8.1 →
+# broke out-of-the-box). The built dist is committed; copy it where nginx serves.
+SPA_SRC="$ROOT/control-plane/apps/miniapp/dist"
+if [ -d "$SPA_SRC" ] && [ -f "$SPA_SRC/index.html" ]; then
+  log "deploy Mini App SPA → /var/www/miniapp/dist"
+  mkdir -p /var/www/miniapp/dist
+  cp -a "$SPA_SRC/." /var/www/miniapp/dist/
+  chmod -R a+rX /var/www/miniapp
+else
+  warn "SPA dist not found at $SPA_SRC — build it first: (cd control-plane/apps/miniapp && pnpm build). nginx will 404 until then."
+fi
 
 render_vhost() { # $1=tmpl $2=dest  (remaining: sed exprs)
   local tmpl="$1" dest="$2"; shift 2
