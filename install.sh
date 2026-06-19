@@ -76,18 +76,21 @@ preflight() {
 # (podman, jq, curl, git, openssl, Node 22 + corepack) and the control-plane
 # node_modules. Idempotent — skips whatever is already present. Debian/Ubuntu apt
 # + NodeSource for Node; on other distros it warns and relies on preexisting tools.
-pkg_for() { case "$1" in podman) echo podman;; openssl) echo openssl;; jq) echo jq;; curl) echo curl;; git) echo git;; esac; }
+pkg_for() { case "$1" in podman) echo podman;; openssl) echo openssl;; jq) echo jq;; curl) echo curl;; git) echo git;; nginx) echo nginx;; certbot) echo certbot;; esac; }
 phase_deps() {
   if [ "$DRY_RUN" = "1" ]; then
-    info "would install missing prerequisites: podman, jq, curl, git, openssl, Node 22 + corepack, and control-plane node_modules (pnpm) — via apt + NodeSource"
+    info "would install missing prerequisites: podman, jq, curl, git, openssl, nginx, certbot (+python3-certbot-nginx), Node 22 + corepack, and control-plane node_modules (pnpm) — via apt + NodeSource"
     return 0
   fi
   require_root
   if ! command -v apt-get >/dev/null 2>&1; then
-    warn "apt-get not found (non-Debian host) — skipping auto-install; ensure podman/jq/curl/git/openssl/node22/corepack are present"
+    warn "apt-get not found (non-Debian host) — skipping auto-install; ensure podman/jq/curl/git/openssl/nginx/certbot/node22/corepack are present"
   else
+    # nginx + certbot are needed to serve the Mini App / web-IDE vhosts and issue
+    # their TLS certs (the public web surface — see m5/E). Bundled here so a
+    # greenfield host needs nothing pre-installed.
     local need=() c
-    for c in podman openssl jq curl git; do
+    for c in podman openssl jq curl git nginx certbot; do
       command -v "$c" >/dev/null 2>&1 || need+=("$(pkg_for "$c")")
     done
     if [ "${#need[@]}" -gt 0 ]; then
@@ -95,8 +98,13 @@ phase_deps() {
       DEBIAN_FRONTEND=noninteractive apt-get update -qq
       DEBIAN_FRONTEND=noninteractive apt-get install -y "${need[@]}"
     else
-      info "OS packages already present (podman jq curl git openssl)"
+      info "OS packages already present (podman jq curl git openssl nginx certbot)"
     fi
+    # certbot's nginx plugin has no standalone binary → ensure the package directly
+    # (needed for `certbot --nginx` automated issuance in the web-serving phase).
+    dpkg -s python3-certbot-nginx >/dev/null 2>&1 || \
+      DEBIAN_FRONTEND=noninteractive apt-get install -y python3-certbot-nginx || \
+      warn "python3-certbot-nginx not installed — automated TLS for Mini App/IDE will need it"
     # Node 22 + corepack — services run via tsx and need node >= 20.
     local nodemajor; nodemajor="$( (command -v node >/dev/null 2>&1 && node -p 'process.versions.node.split(".")[0]') 2>/dev/null || echo 0)"
     if [ "${nodemajor:-0}" -lt 20 ]; then
