@@ -109,6 +109,12 @@ phase_deps() {
   fi
   command -v corepack >/dev/null 2>&1 || npm install -g corepack >/dev/null 2>&1 || true
   corepack enable >/dev/null 2>&1 || true
+  # OneCLI client shim (replaces the vendor Go binary; talks to the local API).
+  # Repo-shipped — no external download.
+  if [ -f "$HERE/runtime/install/onecli" ]; then
+    install -m0755 "$HERE/runtime/install/onecli" /usr/local/bin/onecli
+    info "installed onecli client shim -> /usr/local/bin/onecli"
+  fi
   # control-plane node_modules (services run TypeScript via tsx). Use the pnpm
   # version pinned in package.json (corepack's default may mismatch and error).
   if [ ! -d "$HERE/control-plane/node_modules" ]; then
@@ -165,6 +171,11 @@ phase_secrets() {
   mk_podman_secret cp_openrouter_key "${PLATFORM_OPENROUTER_KEY:-}"
   [ "$DRY_RUN" = "1" ] || info "GitHub webhook secret (paste into the repo webhook 'Secret' field): $WH"
 }
+
+# ── PHASE: OneCLI vault (secret gateway, on podman — no Docker) ───────────────
+# Must come before egress (the cl-egress forwarder bridges tenant pods to the
+# OneCLI gateway on :10255) and before any per-tenant agent/secret bind.
+phase_onecli()  { run_cmd bash "$CP_INSTALL/m1.1-onecli.sh"; }
 
 # ── PHASE: control-plane stores (Postgres + Redis) ────────────────────────────
 phase_stores()  { run_cmd bash "$CP_INSTALL/m1.2-stores.sh"; }
@@ -242,6 +253,7 @@ run_phase secrets       phase_secrets
 run_phase stores        phase_stores
 run_phase services      phase_services
 run_phase image         phase_image
+run_phase onecli        phase_onecli
 run_phase egress        phase_egress
 run_phase security      phase_security
 run_phase authoring     phase_authoring
