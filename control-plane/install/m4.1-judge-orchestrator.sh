@@ -98,8 +98,14 @@ SECRET_ARGS=""
 podman secret inspect "$OR_SECRET" >/dev/null 2>&1 && SECRET_ARGS="--secret $OR_SECRET"
 
 # ---- 5) acceptance: throwaway stub instance on :8091 (zero LLM spend) --------
+# Remove BOTH the accept container AND any prior production cp-judge FIRST: a
+# leftover cp-judge (--restart=unless-stopped) from an earlier run is a worker on
+# the SAME shared BullMQ queue (cp-redis); if cp-postgres's password was rotated
+# since (m1.2 wipes + regenerates each run), that stale worker grabs the accept
+# job and fails with "password authentication failed" → flaky accept. Clearing it
+# before enqueuing guarantees only the fresh accept worker consumes the job.
 log "acceptance: ephemeral cp-judge-accept (JUDGE_STUB=pass) on :$ACCEPT_PORT"
-podman rm -f cp-judge-accept >/dev/null 2>&1 || true
+podman rm -f cp-judge-accept cp-judge >/dev/null 2>&1 || true
 podman run -d --name cp-judge-accept --network host \
   --workdir "$REPO" -v "$REPO:$REPO:ro" -v cp-audit-run:/run/audit \
   --secret "$PG_SECRET" \

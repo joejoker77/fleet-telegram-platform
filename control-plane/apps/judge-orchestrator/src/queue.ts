@@ -44,10 +44,17 @@ export function startJudgeQueue(
   const worker = new Worker<JudgeJobData, JudgeResult>(
     JUDGE_QUEUE,
     async (job: Job<JudgeJobData, JudgeResult>) => {
-      const result = await judgeOne(deps, job.data.req, job.data.content);
-      // Emit the verdict to the audit chain from the single authoritative run.
-      onVerdict(job.data.req, result);
-      return result;
+      try {
+        const result = await judgeOne(deps, job.data.req, job.data.content);
+        // Emit the verdict to the audit chain from the single authoritative run.
+        onVerdict(job.data.req, result);
+        return result;
+      } catch (e) {
+        // Surface the full worker stack — BullMQ's failed-event only carries the
+        // message, which hid a stale-worker PG-auth failure during bring-up.
+        console.error("judge job failed (worker)", (e as Error)?.stack || String(e));
+        throw e;
+      }
     },
     {
       connection: conn(cfg.redisUrl),
