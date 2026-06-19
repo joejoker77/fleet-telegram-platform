@@ -104,7 +104,7 @@ podman run -d --name cp-audit-collector --network host \
   -e AUDIT_GID="$AUDIT_GID" \
   -e REDIS_URL=redis://127.0.0.1:6380 \
   --secret "$PG_SECRET" \
-  --restart=unless-stopped \
+  --restart=always \
   "$NODE_IMAGE" \
   sh -c 'set -e; export AUDIT_DIR=/srv/audit AUDIT_SOCKET=/run/audit/collector.sock;
     export DATABASE_URL="postgres://cplane:$(cat /run/secrets/'"$PG_SECRET"')@127.0.0.1:5433/control_plane";
@@ -149,7 +149,7 @@ podman run -d --name cp-api --network host \
   -v /run/cp-secretd:/run/cp-secretd \
   -v /home:/home \
   --secret "$PG_SECRET" --secret "$BOT_SECRET" --secret "$JWT_SECRET" $WH_SECRET_ARG \
-  --restart=unless-stopped \
+  --restart=always \
   "$NODE_IMAGE" \
   sh -c 'set -e;
     # M5.5: best-effort git for committing settings.json to the tenant git HEAD

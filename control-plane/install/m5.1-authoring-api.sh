@@ -48,7 +48,7 @@ podman run -d --name cp-api --network host \
   -v cp-audit-run:/run/audit \
   -v /home:/home \
   --secret "$PG_SECRET" --secret "$BOT_SECRET" --secret "$JWT_SECRET" \
-  --restart=unless-stopped \
+  --restart=always \
   "$NODE_IMAGE" \
   sh -c 'set -e; export HOST=127.0.0.1 PORT='"$API_PORT"' REDIS_URL=redis://127.0.0.1:6380 AUDIT_SOCKET=/run/audit/collector.sock TENANT_HOME_ROOT=/home;
     export TELEGRAM_BOT_TOKEN_FILE=/run/secrets/'"$BOT_SECRET"' JWT_SECRET_FILE=/run/secrets/'"$JWT_SECRET"';

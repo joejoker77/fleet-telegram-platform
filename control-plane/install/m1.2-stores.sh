@@ -73,14 +73,14 @@ podman run -d --name cp-postgres --network cp-net \
   -e POSTGRES_PASSWORD_FILE=/run/secrets/${SECRET} \
   --secret "${SECRET}" \
   -v cp-pgdata:/var/lib/postgresql \
-  --restart=unless-stopped \
+  --restart=always \
   "${PG_IMAGE}" >/dev/null
 
 # 7) redis
 log "starting cp-redis (127.0.0.1:${REDIS_PORT})"
 podman run -d --name cp-redis --network cp-net \
   -p 127.0.0.1:${REDIS_PORT}:6379 \
-  --restart=unless-stopped \
+  --restart=always \
   "${REDIS_IMAGE}" >/dev/null
 
 # 8) wait for postgres — fail loudly with logs if it never comes up

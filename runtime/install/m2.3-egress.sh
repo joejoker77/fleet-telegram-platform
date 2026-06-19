@@ -54,6 +54,18 @@ sed -e "s#__SUBNET__#$SUBNET#g" -e "s#__GW__#$GW#g" "$RT/nftables/cl-egress.nft.
 nft -f "$NFT_FILE"
 nft list table inet cl_egress >/dev/null || die "cl_egress table not loaded"
 
+# 4c) reboot persistence for the nft rules: cl_egress lives in its own table and
+#     does NOT survive a reboot. Install a boot unit that reloads $NFT_FILE (the
+#     rules are pure IP-subnet matches, so they load independent of cl-net being
+#     up; the cl-net subnet is podman-persistent so $NFT_FILE stays valid). The
+#     infra containers (--restart=always) + podman-restart.service handle the
+#     bridge/forwarder; the forwarder self-retries (Restart=always) until the
+#     bridge is up. Without this, the egress lockdown was lost after a VPS reboot.
+log "installing cl-egress-boot.service (reboot persistence for nft rules)"
+install -m 0644 "$RT/systemd/cl-egress-boot.service" /etc/systemd/system/cl-egress-boot.service
+systemctl daemon-reload
+systemctl enable cl-egress-boot.service >/dev/null 2>&1 || true
+
 # 4b) the host runs UFW with input policy=drop; a separate-table accept can't
 #     override it, so allow the tenant subnet to reach the proxy port via UFW.
 #     Scoped (subnet -> :10255 only) and reversible (rollback does ufw delete).
@@ -73,7 +85,7 @@ ANCHOR_IMAGE="${ANCHOR_IMAGE:-docker.io/library/ubuntu:24.04}"
 podman image exists "$ANCHOR_IMAGE" || { log "pulling anchor image"; podman pull "$ANCHOR_IMAGE" >/dev/null; }
 log "ensuring cl-net anchor (keeps the bridge/gateway up)"
 podman rm -f cl-net-anchor >/dev/null 2>&1 || true
-podman run -d --name cl-net-anchor --network cl-net --restart=unless-stopped \
+podman run -d --name cl-net-anchor --network cl-net --restart=always \
   "$ANCHOR_IMAGE" sleep infinity >/dev/null
 up=""
 for _ in $(seq 1 20); do

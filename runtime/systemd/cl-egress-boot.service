@@ -1,0 +1,19 @@
+[Unit]
+Description=Reload cl-egress nftables lockdown on boot
+# The cl_egress rules are pure IP-subnet matches (no interface refs), so they
+# load independent of podman/cl-net coming up. cl-net's subnet is podman-
+# persistent (stable across reboots) → the rendered /etc/cl-egress.nft from
+# m2.3-egress.sh is valid as-is. Runtime application of the live rules happens
+# in m2.3; this unit just re-applies the persisted file after a reboot (the
+# rules live in their own table and don't survive a reboot on their own).
+After=nftables.service network-pre.target
+Wants=network-pre.target
+ConditionPathExists=/etc/cl-egress.nft
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/cl-egress.nft
+
+[Install]
+WantedBy=multi-user.target

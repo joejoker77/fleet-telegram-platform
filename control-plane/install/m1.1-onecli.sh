@@ -72,7 +72,7 @@ podman rm -f onecli-pg >/dev/null 2>&1 || true
 podman run -d --name onecli-pg --network "$NET" \
   --env-file "$ENVF" \
   -v onecli-pgdata:/var/lib/postgresql \
-  --restart=unless-stopped \
+  --restart=always \
   "$PG_IMAGE" >/dev/null
 
 log "waiting for onecli-pg"
@@ -94,7 +94,7 @@ podman run -d --name onecli --network "$NET" \
   -e APP_URL="http://${BIND}:${APP_PORT}" \
   -e NEXT_PUBLIC_APP_URL="http://${BIND}:${APP_PORT}" \
   -v onecli-appdata:/app/data \
-  --restart=unless-stopped \
+  --restart=always \
   "$ONECLI_IMAGE" >/dev/null
 
 # 6) wait for the gateway port to answer (any HTTP response = up)
