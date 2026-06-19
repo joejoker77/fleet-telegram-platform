@@ -38,6 +38,7 @@ prompt_secret() {
   _describe "$__var" "$__desc"
   [ "${DRY_RUN:-0}" = "1" ] && { info "(dry-run — would prompt for this secret)"; return 0; }
   if [ -n "${!__var:-}" ]; then info "(value supplied via environment — not prompting)"; return 0; fi
+  if [ "${ASSUME_YES:-0}" = "1" ]; then die "$__var: required secret not provided — set it via env or --config for a --yes run"; fi
   local __val=""
   printf '    Enter value (input hidden, not echoed): '
   read -rs __val; echo
@@ -51,6 +52,11 @@ prompt_param() {
   _describe "$__var" "$__desc"
   [ "${DRY_RUN:-0}" = "1" ] && { info "(dry-run — would prompt; default: ${__default:-none})"; return 0; }
   if [ -n "${!__var:-}" ]; then info "(using value from environment: ${!__var})"; return 0; fi
+  if [ "${ASSUME_YES:-0}" = "1" ]; then
+    printf -v "$__var" '%s' "$__default"
+    info "(--yes non-interactive: using default: ${__default:-none})"
+    return 0
+  fi
   local __val=""
   printf '    Value%s: ' "${__default:+ [default: $__default]}"
   read -r __val
@@ -65,6 +71,7 @@ prompt_secret_optional() {
   _describe "$__var" "$__desc"
   [ "${DRY_RUN:-0}" = "1" ] && { info "(dry-run — optional secret; would prompt, blank = skip)"; return 0; }
   if [ -n "${!__var:-}" ]; then info "(value supplied via environment)"; return 0; fi
+  if [ "${ASSUME_YES:-0}" = "1" ]; then info "(--yes non-interactive: skipping optional secret)"; return 0; fi
   local __val=""
   printf '    Enter value (hidden), or press Enter to SKIP this integration: '
   read -rs __val; echo
