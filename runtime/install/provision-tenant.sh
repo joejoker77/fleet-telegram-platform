@@ -69,6 +69,33 @@ fi
 # 0700 tenant-owned matches the rclone mount unit's ExecStartPre expectations.
 install -d -o "$USER_NAME" -g "$USER_NAME" -m 0700 "/home/$USER_NAME/icloud"
 
+# 1c) seed the tenant ~/.claude BASELINE so the pod boots a working, SECURED
+# fleet bot on first start: settings.json (model pin + permission perimeter +
+# security hooks + enabledPlugins) + the two telegram hooks + the official
+# Telegram channel plugin (baked clean in the image skel). Without this the pod's
+# claude reaches its TUI but has no model pin, no security hooks and no channel
+# plugin → "plugin not installed" → it can never poll Telegram. Idempotent:
+# settings.json + hooks are (re)written from the templates every run; the plugin
+# tree (baked in the image, deps vendored) is copied only once.
+log "seeding ~/.claude baseline (settings + telegram hooks + plugin) for $USER_NAME"
+CLAUDE_DIR="/home/$USER_NAME/.claude"
+SKEL="$RT/install/tenant-skel"
+[ -f "$SKEL/settings.json.tmpl" ] || die "tenant skel missing at $SKEL (settings.json.tmpl)"
+install -d -o "$USER_NAME" -g "$USER_NAME" -m 0755 "$CLAUDE_DIR/hooks" "$CLAUDE_DIR/plugins"
+sed "s#__TENANT_HOME__#/home/$USER_NAME#g" "$SKEL/settings.json.tmpl" > "$CLAUDE_DIR/settings.json"
+install -m 0755 "$SKEL/hooks/telegram-track-chat.sh"    "$CLAUDE_DIR/hooks/telegram-track-chat.sh"
+install -m 0755 "$SKEL/hooks/telegram-block-askuser.sh" "$CLAUDE_DIR/hooks/telegram-block-askuser.sh"
+# Official telegram plugin tree from the image skel (clean, node_modules vendored);
+# copy once, then rewrite the placeholder home embedded in the index files.
+if [ ! -d "$CLAUDE_DIR/plugins/cache/claude-plugins-official" ]; then
+  cid="$(podman create localhost/claude-user:latest)"
+  podman cp "$cid:/opt/claude-skel/.claude/plugins/." "$CLAUDE_DIR/plugins/"
+  podman rm "$cid" >/dev/null
+  grep -rlF __TENANT_HOME__ "$CLAUDE_DIR/plugins" 2>/dev/null \
+    | xargs -r sed -i "s#__TENANT_HOME__#/home/$USER_NAME#g"
+fi
+chown -R "$USER_NAME:$USER_NAME" "$CLAUDE_DIR"
+
 # 2) control-plane DB: users + containers
 log "registering tenant in control-plane DB"
 psql_cp <<SQL

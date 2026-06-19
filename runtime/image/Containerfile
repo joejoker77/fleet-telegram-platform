@@ -26,6 +26,27 @@ RUN curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash
 # code-server — per-tenant web IDE (authoring; wired at M5).
 RUN curl -fsSL https://code-server.dev/install.sh | sh
 
+# Baseline tenant plugin — the official Telegram channel plugin, installed CLEAN
+# from the official marketplace and baked into the image as a first-class
+# dependency (Vitaliy: "the plugin must be in the deps from the start"). No
+# per-tenant network install, no hand-patched server.ts. provision-tenant
+# extracts this skeleton into each tenant's ~/.claude/plugins and rewrites the
+# embedded absolute home paths (installed_plugins.json / known_marketplaces.json)
+# for that tenant. node_modules is vendored here so the plugin's start-time
+# `bun install` is an offline no-op inside the egress-locked pod.
+ENV CLAUDE_SKEL=/opt/claude-skel
+RUN mkdir -p "$CLAUDE_SKEL" \
+ && HOME="$CLAUDE_SKEL" claude plugin marketplace add anthropics/claude-plugins-official </dev/null \
+ && HOME="$CLAUDE_SKEL" claude plugin install telegram@claude-plugins-official --scope user </dev/null \
+ && ( cd "$CLAUDE_SKEL"/.claude/plugins/cache/claude-plugins-official/telegram/*/ && bun install --no-summary ) \
+ && HOME="$CLAUDE_SKEL" claude plugin list </dev/null | grep -q 'telegram@claude-plugins-official' \
+ # provision writes the real tenant settings.json baseline; drop claude's auto-stub
+ && rm -f "$CLAUDE_SKEL/.claude/settings.json" \
+ # normalize the two index files' embedded build-home path to a placeholder
+ && sed -i "s#$CLAUDE_SKEL#__TENANT_HOME__#g" \
+      "$CLAUDE_SKEL/.claude/plugins/installed_plugins.json" \
+      "$CLAUDE_SKEL/.claude/plugins/known_marketplaces.json"
+
 # M4.1 — shellfirm: dangerous-shell-command guard (kaplanelad/shellfirm v0.3.10).
 # Native binary pinned to the same version the host fleet runs; the PreToolUse
 # wrapper (which closes shellfirm's quoting-bypass) + the system policy are baked

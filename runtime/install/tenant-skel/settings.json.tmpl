@@ -1,0 +1,131 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__plugin_telegram_telegram__*",
+      "mcp__composio__*",
+      "Bash",
+      "Read",
+      "Edit",
+      "Write",
+      "mcp__exa__*"
+    ],
+    "deny": [
+      "Bash(*> /dev/*)",
+      "Bash(chmod 777 *)",
+      "Bash(rm -rf *)",
+      "Bash(ssh *)",
+      "Bash(sudo *)",
+      "WebFetch",
+      "WebSearch"
+    ]
+  },
+  "model": "claude-opus-4-8",
+  "enableAllProjectMcpServers": false,
+  "enabledMcpjsonServers": [
+    "exa"
+  ],
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__TENANT_HOME__/.claude/hooks/telegram-track-chat.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__TENANT_HOME__/.claude/hooks/telegram-block-askuser.sh",
+            "timeout": 15
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/bin/shellfirm-bot-wrapper",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "/usr/local/share/claude-guard/block-nested-claude.py",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /opt/platform/hooks/tool-activity-hook.mjs",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /opt/platform/hooks/metering-stop-hook.mjs",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /opt/platform/hooks/tool-activity-hook.mjs",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /opt/platform/hooks/tool-activity-hook.mjs",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  },
+  "enabledPlugins": {
+    "telegram@claude-plugins-official": true
+  },
+  "extraKnownMarketplaces": {
+    "claude-plugins-official": {
+      "source": {
+        "source": "github",
+        "repo": "anthropics/claude-plugins-official"
+      }
+    }
+  },
+  "theme": "dark",
+  "mcpServers": {
+    "shellfirm": {
+      "command": "/usr/local/bin/shellfirm",
+      "args": [
+        "mcp"
+      ],
+      "timeout": 30000
+    }
+  },
+  "skipWorkflowUsageWarning": true
+}
