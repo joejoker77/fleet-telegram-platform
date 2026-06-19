@@ -14,7 +14,8 @@ set -euo pipefail
 
 ACTION="${1:-apply}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
-REPO="${REPO:-$ROOT}"
+# the pnpm workspace (package.json + @fleet/db) lives under control-plane/
+REPO="${REPO:-$ROOT/control-plane}"
 PG_USER=cplane
 PG_DB=control_plane
 PG_PORT=5433
