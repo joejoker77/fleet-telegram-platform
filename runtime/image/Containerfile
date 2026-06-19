@@ -100,7 +100,9 @@ RUN chmod 0755 /opt/platform/entrypoint.sh /opt/platform/session-ctl /opt/platfo
  # M7.5: host-root bridge for admins (inert unless make-admin.sh provisioned the key)
  && ln -sf /opt/platform/bin/host-sudo /usr/local/bin/host-sudo \
  # M8.1: pod-side GitHub publisher for the artifact marketplace (PAT injected by proxy)
- && ln -sf /opt/platform/bin/registry-publish /usr/local/bin/registry-publish
+ && ln -sf /opt/platform/bin/registry-publish /usr/local/bin/registry-publish \
+ # B: rich-message / structured-reply helper the clean plugin's reply tool lacks
+ && ln -sf /opt/platform/bin/tg-send /usr/local/bin/tg-send
 
 # Sanity: fail the build early if a core tool is missing.
 RUN claude --version && bun --version && code-server --version && node --version \

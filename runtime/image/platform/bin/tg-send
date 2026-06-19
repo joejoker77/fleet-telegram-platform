@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# tg-send — no-patch helper for the structured-message features the CLEAN
+# official telegram plugin's `reply` tool lacks (it supports only text /
+# markdownv2). Posts directly to the Bot API with the per-tenant token,
+# auto-routing to the active chat/topic. Use it for rich tables / HTML the
+# reply tool can't render; ordinary prose still goes through the reply tool.
+#
+#   tg-send [--chat-id ID] [--thread TID] [--reply-to MID]
+#           [--format rich|html|markdownv2|text] (TEXT | --file PATH)
+#
+# Defaults: --format rich; chat-id + thread taken from last_chat.json (the
+# active conversation) when omitted, so a reply lands in the right topic.
+# 'rich' posts sendRichMessage (Bot API 10.1, tables/headings/lists); if the
+# method is unavailable for this bot it transparently falls back to an HTML
+# sendMessage so the content always lands.
+set -euo pipefail
+
+SD="${TELEGRAM_STATE_DIR:-}"
+[ -z "$SD" ] && { echo "tg-send: TELEGRAM_STATE_DIR unset" >&2; exit 1; }
+
+FORMAT=rich CHAT_ID="" THREAD="" REPLY_TO="" TEXT="" FILE=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --format)   FORMAT="$2"; shift 2;;
+    --chat-id)  CHAT_ID="$2"; shift 2;;
+    --thread)   THREAD="$2"; shift 2;;
+    --reply-to) REPLY_TO="$2"; shift 2;;
+    --file)     FILE="$2"; shift 2;;
+    --) shift; break;;
+    -*) echo "tg-send: unknown flag $1" >&2; exit 2;;
+    *)  TEXT="$1"; shift;;
+  esac
+done
+[ -n "$FILE" ] && TEXT="$(cat "$FILE")"
+[ -z "$TEXT" ] && { echo "tg-send: empty text (pass TEXT or --file)" >&2; exit 2; }
+
+TOKEN="$(grep -E '^TELEGRAM_BOT_TOKEN=' "$SD/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")"
+[ -z "$TOKEN" ] && { echo "tg-send: no TELEGRAM_BOT_TOKEN in $SD/.env" >&2; exit 1; }
+
+# Default chat + thread from the active conversation.
+if [ -z "$CHAT_ID" ] && [ -f "$SD/last_chat.json" ]; then
+  CHAT_ID="$(jq -r '.chat_id // ""' "$SD/last_chat.json")"
+  [ -z "$THREAD" ] && THREAD="$(jq -r '.message_thread_id // ""' "$SD/last_chat.json")"
+fi
+[ -z "$CHAT_ID" ] && { echo "tg-send: no chat_id (pass --chat-id or have last_chat.json)" >&2; exit 1; }
+
+API="https://api.telegram.org/bot${TOKEN}"
+
+ok_of() { printf '%s' "$1" | jq -r '.ok // false'; }
+desc_of() { printf '%s' "$1" | jq -r '.description // "?"'; }
+common_jq=' + (if $t != "" then {message_thread_id:($t|tonumber)} else {} end)
+            + (if $r != "" then {reply_parameters:{message_id:($r|tonumber)}} else {} end)'
+
+post() { # $1=method $2=payload -> echoes response
+  curl -s -m 15 -X POST "$API/$1" -H 'Content-Type: application/json' -d "$2"
+}
+
+# Strip HTML to plain text — the patched plugin's final fallback so content
+# always lands even when neither rich nor HTML can render it.
+strip_tags() {
+  printf '%s' "$TEXT" \
+    | sed -E 's#</(p|div|tr|h[1-6]|li|blockquote)>#\n#gI' \
+    | sed -E 's#<li[^>]*>#• #gI' \
+    | sed -E 's#<[^>]+>##g' \
+    | sed -E 's#&lt;#<#g; s#&gt;#>#g; s#&amp;#\&#g'
+}
+
+send_html() {  # HTML sendMessage; on failure strip → plain
+  local resp; resp="$(post sendMessage "$(jq -n --arg c "$CHAT_ID" --arg x "$TEXT" --arg t "$THREAD" --arg r "$REPLY_TO" \
+      "{chat_id:\$c, text:\$x, parse_mode:\"HTML\"} $common_jq")")"
+  if [ "$(ok_of "$resp")" = "true" ]; then printf '%s' "$resp"; return; fi
+  echo "tg-send: HTML send failed ($(desc_of "$resp")) → plain-text fallback" >&2
+  local plain; plain="$(strip_tags)"
+  post sendMessage "$(jq -n --arg c "$CHAT_ID" --arg x "$plain" --arg t "$THREAD" --arg r "$REPLY_TO" \
+      "{chat_id:\$c, text:\$x} $common_jq")"
+}
+
+case "$FORMAT" in
+  rich)
+    RICH="$(jq -n --arg c "$CHAT_ID" --arg h "$TEXT" --arg t "$THREAD" --arg r "$REPLY_TO" \
+      "{chat_id:\$c, rich_message:{html:\$h}} $common_jq")"
+    RESP="$(post sendRichMessage "$RICH")"
+    if [ "$(ok_of "$RESP")" != "true" ]; then
+      echo "tg-send: sendRichMessage rejected ($(desc_of "$RESP")) → HTML/plain fallback" >&2
+      RESP="$(send_html)"
+    fi
+    ;;
+  html)        RESP="$(send_html)";;
+  markdownv2)  RESP="$(post sendMessage "$(jq -n --arg c "$CHAT_ID" --arg x "$TEXT" --arg t "$THREAD" --arg r "$REPLY_TO" "{chat_id:\$c, text:\$x, parse_mode:\"MarkdownV2\"} $common_jq")")";;
+  text)        RESP="$(post sendMessage "$(jq -n --arg c "$CHAT_ID" --arg x "$TEXT" --arg t "$THREAD" --arg r "$REPLY_TO" "{chat_id:\$c, text:\$x} $common_jq")")";;
+  *) echo "tg-send: bad --format '$FORMAT'" >&2; exit 2;;
+esac
+
+if [ "$(ok_of "$RESP")" = "true" ]; then
+  echo "sent message_id=$(printf '%s' "$RESP" | jq -r '.result.message_id')"
+else
+  echo "tg-send: FAILED: $(desc_of "$RESP")" >&2
+  exit 1
+fi
