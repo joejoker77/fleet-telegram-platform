@@ -475,7 +475,7 @@ fi
 echo "${ACTIVE_NAME:-default}" > "$ACTIVE_FILE"
 
 tmux kill-session -t "$SESSION" 2>/dev/null || true
-TMUX_CFG="$(mktemp)"; trap 'rm -f "$TMUX_CFG"; [ -n "${PROGRESS_SIDECAR_PID:-}" ] && kill "$PROGRESS_SIDECAR_PID" 2>/dev/null' EXIT
+TMUX_CFG="$(mktemp)"; trap 'rm -f "$TMUX_CFG"; for _p in "${PROGRESS_SIDECAR_PID:-}" "${SESSION_INDEXER_PID:-}"; do [ -n "$_p" ] && kill "$_p" 2>/dev/null; done' EXIT
 echo "set-option -g history-limit 100000" > "$TMUX_CFG"
 mkdir -p "$TELEGRAM_STATE_DIR/logs"
 
@@ -506,6 +506,20 @@ if [ "${DISABLE_PROGRESS_SIDECAR:-0}" != "1" ] && [ "${DISABLE_TELEGRAM_CHANNEL:
     >>"$TELEGRAM_STATE_DIR/logs/progress-sidecar.log" 2>&1 &
   PROGRESS_SIDECAR_PID=$!
   echo "[progress] sidecar launched (pid $PROGRESS_SIDECAR_PID)"
+fi
+
+# Session-search indexer (C): keep the FTS5 index over this bot's own session
+# logs fresh so `session-search` answers from history. Pure SQLite, NO LLM (the
+# zero-recurring-LLM rule allows non-LLM ticks). A background loop — not a cron —
+# keeps it pod-native; reaped by the EXIT trap.
+SESSION_INDEXER_PID=""
+if [ "${DISABLE_SESSION_INDEXER:-0}" != "1" ] && command -v python3 >/dev/null 2>&1; then
+  ( while true; do
+      python3 /opt/platform/bin/session_indexer.py >>"$TELEGRAM_STATE_DIR/logs/session-indexer.log" 2>&1 || true
+      sleep "${SESSION_INDEX_INTERVAL:-300}"
+    done ) &
+  SESSION_INDEXER_PID=$!
+  echo "[session-search] indexer loop launched (pid $SESSION_INDEXER_PID)"
 fi
 
 # Seed prior-session context (same logic as the host launcher; silent restore).

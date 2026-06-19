@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""session-search — full-text search across this bot's session_*.txt logs.
+
+Reads the FTS5 index at ~/.claude/channels/telegram-<user>/logs/.index/session_index.db
+populated by session_indexer.py.  Ranked by BM25 (most relevant first).
+
+Usage:
+  session-search "patch placeholder"
+  session-search "spinner NEAR/5 placeholder"
+  session-search --limit 20 "wordzilla cache"
+  session-search --json "telegram topic"
+  session-search --since 2026-05-01 "ackReaction"
+
+The query string is passed to FTS5 MATCH verbatim.  Quote multi-word
+phrases ("exact phrase") or use boolean operators (AND, OR, NOT, NEAR).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sqlite3
+import sys
+from pathlib import Path
+
+
+def find_db() -> Path:
+    home = Path(os.path.expanduser("~"))
+    user = home.name
+    db = home / ".claude" / "channels" / f"telegram-{user}" / "logs" / ".index" / "session_index.db"
+    if not db.exists():
+        sys.stderr.write(
+            f"session-search: no index at {db}\n"
+            "Run session_indexer.py first (or wait for the cron tick).\n"
+        )
+        sys.exit(2)
+    return db
+
+
+def snippet_clean(text: str, max_chars: int = 240) -> str:
+    text = text.replace("\n", " ⏎ ")
+    return (text[:max_chars] + "…") if len(text) > max_chars else text
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="session-search", add_help=True)
+    parser.add_argument("query", help="FTS5 MATCH query (quote multi-word phrases)")
+    parser.add_argument("--limit", type=int, default=10, help="max hits (default 10)")
+    parser.add_argument("--since", help="only hits with ts >= YYYY-MM-DD")
+    parser.add_argument("--json", action="store_true", help="emit JSON instead of human text")
+    args = parser.parse_args()
+
+    db = find_db()
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+
+    sql = (
+        "SELECT filename, chunk_no, ts, "
+        "snippet(sessions, 3, '<<', '>>', '…', 12) AS snip, "
+        "bm25(sessions) AS rank "
+        "FROM sessions WHERE sessions MATCH ? "
+    )
+    params: list = [args.query]
+    if args.since:
+        sql += "AND ts >= ? "
+        params.append(args.since)
+    sql += "ORDER BY rank LIMIT ?"
+    params.append(args.limit)
+
+    try:
+        rows = list(conn.execute(sql, params))
+    except sqlite3.OperationalError as e:
+        sys.stderr.write(f"session-search: bad query ({e}). Try plain words or quoted phrases.\n")
+        return 2
+
+    if args.json:
+        out = [
+            {
+                "filename": r["filename"],
+                "chunk_no": r["chunk_no"],
+                "ts": r["ts"],
+                "rank": r["rank"],
+                "snippet": r["snip"],
+            }
+            for r in rows
+        ]
+        json.dump(out, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+    else:
+        if not rows:
+            print("(no hits)")
+            return 0
+        for r in rows:
+            ts = r["ts"] or "(no ts)"
+            print(f"\n# {r['filename']}  chunk={r['chunk_no']}  ts={ts}  rank={r['rank']:.2f}")
+            print(snippet_clean(r["snip"]))
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -102,7 +102,9 @@ RUN chmod 0755 /opt/platform/entrypoint.sh /opt/platform/session-ctl /opt/platfo
  # M8.1: pod-side GitHub publisher for the artifact marketplace (PAT injected by proxy)
  && ln -sf /opt/platform/bin/registry-publish /usr/local/bin/registry-publish \
  # B: rich-message / structured-reply helper the clean plugin's reply tool lacks
- && ln -sf /opt/platform/bin/tg-send /usr/local/bin/tg-send
+ && ln -sf /opt/platform/bin/tg-send /usr/local/bin/tg-send \
+ # C: full-text search over this bot's own session logs (FTS5; indexer loop in entrypoint)
+ && ln -sf /opt/platform/bin/session-search /usr/local/bin/session-search
 
 # Sanity: fail the build early if a core tool is missing.
 RUN claude --version && bun --version && code-server --version && node --version \
