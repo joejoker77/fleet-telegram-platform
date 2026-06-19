@@ -260,8 +260,15 @@ function currentTarget() {
 }
 
 // ─── Telegram API via curl (rides HTTPS_PROXY; api.telegram.org pass-through) ─
+// Flood guard: Telegram answers a too-busy chat with 429 + retry_after (can be
+// minutes—hours). Honour it — suppress ALL sends until it passes so the sidecar
+// never piles rejected calls onto a flood-wait (which is what got the chat
+// limited in the first place). A progress placeholder is disposable; skipping
+// it during a back-off is strictly correct.
+let suppressUntil = 0
 function tg(method, params) {
   return new Promise((resolve) => {
+    if (Date.now() < suppressUntil) { resolve({ ok: false, description: 'suppressed (429 backoff)' }); return }
     const token = getToken()
     if (!token) { resolve({ ok: false, description: 'no token' }); return }
     const body = {}
@@ -279,6 +286,11 @@ function tg(method, params) {
       clearTimeout(to)
       try {
         const j = JSON.parse(out)
+        if (j.error_code === 429) {
+          const ra = Number(j.parameters?.retry_after ?? 5)
+          suppressUntil = Date.now() + (ra + 1) * 1000
+          logln(`429 flood-wait ${ra}s on ${method} — suppressing sends until it clears`)
+        }
         resolve({ ok: !!j.ok, result: j.result, error_code: j.error_code, description: j.description })
       } catch { resolve({ ok: false, description: 'parse:' + out.slice(0, 120) }) }
     })
