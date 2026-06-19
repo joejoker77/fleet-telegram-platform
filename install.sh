@@ -232,9 +232,14 @@ phase_bootstrap_admin() {
   prompt_param BOOTSTRAP_ADMIN_TG \
     "Telegram numeric user id of the bootstrap admin (their Telegram account id; used to bind the bot + Mini App auth)." ""
   [ -n "${BOOTSTRAP_ADMIN_TG:-}" ] || die "bootstrap admin needs a Telegram user id (BOOTSTRAP_ADMIN_TG)"
+  # Claude subscription token for the admin's agent — without it the admin pod's
+  # claude session can't authenticate (no working bot out of the box).
+  prompt_secret PLATFORM_ADMIN_CLAUDE_TOKEN \
+    "Claude subscription OAuth token for the bootstrap admin's agent. On a machine WITH a browser, signed into the admin's own Claude (Pro/Max/Team) account, run 'claude setup-token' and paste the ccat_... value. Long-lived (~1yr), per-seat."
   info "onboarding bootstrap admin '$BOOTSTRAP_ADMIN_USER' via add-user.sh --is-admin"
-  # reuse the bot token from phase_secrets as the admin's tenant token (TENANT_BOT_TOKEN)
-  run_cmd env TENANT_BOT_TOKEN="${PLATFORM_BOT_TOKEN:-}" bash "$HERE/add-user.sh" "$BOOTSTRAP_ADMIN_USER" "$BOOTSTRAP_ADMIN_TG" --is-admin
+  # reuse the bot token from phase_secrets as the admin's tenant token; pass the
+  # admin Claude token through as CLAUDE_CODE_OAUTH_TOKEN (add-user writes it host-side).
+  run_cmd env TENANT_BOT_TOKEN="${PLATFORM_BOT_TOKEN:-}" CLAUDE_CODE_OAUTH_TOKEN="${PLATFORM_ADMIN_CLAUDE_TOKEN:-}" bash "$HERE/add-user.sh" "$BOOTSTRAP_ADMIN_USER" "$BOOTSTRAP_ADMIN_TG" --is-admin
 }
 
 # ── PHASE: verify ─────────────────────────────────────────────────────────────

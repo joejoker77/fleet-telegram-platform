@@ -62,6 +62,16 @@ fi
 CFG_ARGS=()
 [ -f "$HOME_DIR/.claude.json" ] && CFG_ARGS+=(-v "$HOME_DIR/.claude.json:$HOME_DIR/.claude.json")
 
+# Claude subscription auth: per-tenant long-lived OAuth token (CLAUDE_CODE_OAUTH_TOKEN
+# from `claude setup-token`), injected as env so the pod's claude authenticates
+# HEADLESSLY — no browser on the box, no shared credentials.json (per-seat, ToS).
+# Host-only file (mirrors the /etc/cl-egress proxy-token pattern); takes precedence
+# over a mounted ~/.claude/.credentials.json. Without any auth the claude session
+# can't start and the supervisor restart-loops.
+CLAUDE_AUTH_ARGS=()
+CLAUDE_TOKEN_FILE="/etc/claude-auth/$U.token"
+[ -f "$CLAUDE_TOKEN_FILE" ] && CLAUDE_AUTH_ARGS=(-e CLAUDE_CODE_OAUTH_TOKEN="$(cat "$CLAUDE_TOKEN_FILE")")
+
 # ~/.ssh: mount the tenant's own SSH keys so the agent can reach remote servers
 # (owner decision 2026-06-15; egress is full-outbound). Mounted rw so ssh can
 # append to ~/.ssh/known_hosts on first connect. Only when present — users with
@@ -138,7 +148,7 @@ exec /usr/bin/podman run --rm --name "claude-$U" \
   --cap-drop=ALL --security-opt=no-new-privileges \
   --read-only --tmpfs /tmp --tmpfs /run \
   --memory=4g --memory-reservation=3g --cpus=2 --pids-limit=2048 \
-  -e HOME="$HOME_DIR" -e XDG_RUNTIME_DIR=/tmp -e HOST_ADMIN_USER="$U" "${PROXY_ARGS[@]}" \
+  -e HOME="$HOME_DIR" -e XDG_RUNTIME_DIR=/tmp -e HOST_ADMIN_USER="$U" "${PROXY_ARGS[@]}" "${CLAUDE_AUTH_ARGS[@]}" \
   -v "$HOME_DIR/.claude:$HOME_DIR/.claude" \
   -v "$HOME_DIR/work:$HOME_DIR/work" \
   -v "$HOME_DIR/.config:$HOME_DIR/.config" \
