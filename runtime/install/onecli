@@ -56,6 +56,22 @@ case "$group/$action" in
     curl -fsS -X PUT -H "$CT" -d "{\"secretIds\":$ids}" "$API/api/agents/${F[id]}/secrets"; echo
     ;;
 
+  agents/set-secret-mode)
+    collect_flags "$@"; [ -n "${F[id]:-}" ] || die "agents set-secret-mode needs --id"
+    # PATCH /api/agents/{id} requires name+identifier too; fetch them, then patch with the mode.
+    body="$(curl -fsS "$API/api/agents" | python3 -c '
+import sys,json
+aid=sys.argv[1]; mode=sys.argv[2]
+a=next((x for x in json.load(sys.stdin) if x.get("id")==aid),{})
+print(json.dumps({"name":a.get("name",""),"identifier":a.get("identifier",""),"secretMode":mode}))' "${F[id]}" "${F[mode]:-selective}")"
+    curl -fsS -X PATCH -H "$CT" -d "$body" "$API/api/agents/${F[id]}"; echo
+    ;;
+
+  agents/regenerate-token)
+    collect_flags "$@"; [ -n "${F[id]:-}" ] || die "agents regenerate-token needs --id"
+    curl -fsS -X POST "$API/api/agents/${F[id]}/regenerate-token"; echo
+    ;;
+
   secrets/list)
     curl -fsS "$API/api/secrets"; echo
     ;;
