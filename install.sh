@@ -48,11 +48,8 @@ export DRY_RUN ONLY_PHASE ASSUME_YES
 
 # ── config (overridable via --config / env) ──────────────────────────────────
 # Non-secret platform parameters. Secrets are collected in phase_secrets below.
-PLATFORM_MINIAPP_HOST="${PLATFORM_MINIAPP_HOST:-}"
-PLATFORM_IDE_HOST="${PLATFORM_IDE_HOST:-}"
-PLATFORM_DOMAIN="${PLATFORM_DOMAIN:-}"            # base domain → miniapp./ide.<domain> if hosts unset
-PLATFORM_ADMIN_EMAIL="${PLATFORM_ADMIN_EMAIL:-}"  # certbot TLS registration email (optional)
-PLATFORM_REGISTRY_REPO="${PLATFORM_REGISTRY_REPO:-joejoker77/claude-bot-skills}"
+# (Mini App + web-IDE removed for the firm: Telegram-only, no public web surface,
+#  so no PLATFORM_DOMAIN / MINIAPP_HOST / IDE_HOST / certbot-email here.)
 # The bootstrap ADMIN this install creates (the platform's first operator). Every
 # other user is added afterwards with add-user.sh (default role user; --is-admin
 # for more admins). Empty => stand up the platform only, add the admin later.
@@ -215,10 +212,10 @@ phase_security() {
   run_cmd bash "$CP_INSTALL/m4.4-auto-suspend.sh"
 }
 
-# ── PHASE: authoring host side (cp-secretd, web-IDE) ──────────────────────────
+# ── PHASE: authoring host side (cp-secretd) ───────────────────────────────────
+# (web-IDE removed for the firm — Telegram-only, no public web surface.)
 phase_authoring() {
   run_cmd bash "$RT_INSTALL/m5.5b-secretd.sh"
-  run_cmd bash "$RT_INSTALL/m5.6-ide.sh"
 }
 
 # (Integrations are NOT a platform-level phase: each tenant's keys are bound to
@@ -253,31 +250,6 @@ phase_bootstrap_admin() {
 }
 
 # ── PHASE: verify ─────────────────────────────────────────────────────────────
-phase_web() {
-  # Serve the Telegram Mini App + web-IDE on a real domain with TLS, and point
-  # the bot's menu button at the app. Runs AFTER bootstrap_admin so the tenant
-  # (and its IDE socket) exists for the IDE vhost. Optional: skipped with no
-  # domain — the bot still works; add later by re-running m5.9-web-serving.sh.
-  if [ -z "${PLATFORM_DOMAIN:-}${PLATFORM_MINIAPP_HOST:-}" ]; then
-    prompt_param PLATFORM_DOMAIN \
-      "Base domain for the Mini App + web-IDE (e.g. example.com → miniapp./ide.<domain>). Needs an A record pointing at this host for TLS. Empty to skip web serving (bot still works; add it later)." ""
-  fi
-  if [ -z "${PLATFORM_DOMAIN:-}${PLATFORM_MINIAPP_HOST:-}" ]; then
-    info "no domain set — skipping Mini App / web-IDE serving (add later: PLATFORM_DOMAIN=... bash runtime/install/m5.9-web-serving.sh)"
-    return 0
-  fi
-  [ -z "${PLATFORM_ADMIN_EMAIL:-}" ] && prompt_param PLATFORM_ADMIN_EMAIL \
-    "Email for certbot TLS registration (optional — Enter to register without one)." ""
-  run_cmd env \
-    PLATFORM_DOMAIN="${PLATFORM_DOMAIN:-}" \
-    PLATFORM_MINIAPP_HOST="${PLATFORM_MINIAPP_HOST:-}" \
-    PLATFORM_IDE_HOST="${PLATFORM_IDE_HOST:-}" \
-    PLATFORM_ADMIN_EMAIL="${PLATFORM_ADMIN_EMAIL:-}" \
-    PLATFORM_BOT_TOKEN="${PLATFORM_BOT_TOKEN:-}" \
-    BOOTSTRAP_ADMIN_USER="${BOOTSTRAP_ADMIN_USER:-}" \
-    bash "$RT_INSTALL/m5.9-web-serving.sh"
-}
-
 phase_verify() {
   if [ "$DRY_RUN" = "1" ]; then info "would verify: cp-api /healthz + 'podman ps' of cp-* containers"; return 0; fi
   curl -sf "http://127.0.0.1:8080/healthz" >/dev/null 2>&1 && info "cp-api /healthz OK" || warn "cp-api /healthz not responding"
@@ -299,6 +271,5 @@ run_phase security      phase_security
 run_phase authoring     phase_authoring
 run_phase marketplace   phase_marketplace
 run_phase bootstrap_admin phase_bootstrap_admin
-run_phase web           phase_web
 run_phase verify        phase_verify
 log "done."
