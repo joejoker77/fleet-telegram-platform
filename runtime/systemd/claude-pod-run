@@ -124,22 +124,7 @@ if podman volume exists cp-audit-run >/dev/null 2>&1; then
   [ -n "${AGID:-}" ] && AUDIT_ARGS+=(--group-add "$AGID")
 fi
 
-# M5.6 web-IDE: expose code-server over a unix socket bind-mounted to the host
-# so nginx (forward-auth vhost, deploy/nginx-ide.conf) reaches it without ANY
-# network exposure — not on cl-net, not on host ports; a neighbor pod physically
-# can't connect. Conditional on /run/cp-ide existing (created by m5.6-ide.sh via
-# tmpfiles.d; absent — e.g. after m5.6-rollback.sh — → prior tcp-loopback
-# behavior), mirroring the cl-net/audit fallbacks above. The per-tenant dir is
-# setgid www-data (2750): the socket code-server creates inherits the group, so
-# nginx connects via socket-mode 0660 while the dir stays tenant-owned.
-IDE_ARGS=()
-if [ -d /run/cp-ide ]; then
-  WGID="$(getent group www-data 2>/dev/null | cut -d: -f3 || true)"
-  if [ -n "${WGID:-}" ]; then
-    install -d -o "$UID_N" -g "$WGID" -m 2750 "/run/cp-ide/$U"
-    IDE_ARGS=(-v "/run/cp-ide/$U:/run/cp-ide" -e CP_IDE_SOCKET=/run/cp-ide/ide.sock)
-  fi
-fi
+# (web-IDE / code-server removed for the firm build — no IDE socket bind here.)
 
 # NOTE: do NOT add `--security-opt=no-new-privileges`. The PR_SET_NO_NEW_PRIVS
 # prctl breaks Claude Code's embedded Bun/JSC stop-the-world GC thread-suspend on
@@ -163,6 +148,6 @@ exec /usr/bin/podman run --rm --name "claude-$U" \
   -v "$HOME_DIR/work:$HOME_DIR/work" \
   -v "$HOME_DIR/.config:$HOME_DIR/.config" \
   -v "$HOME_DIR/.local:$HOME_DIR/.local" \
-  "${CFG_ARGS[@]}" "${SSH_ARGS[@]}" "${ICLOUD_ARGS[@]}" "${AUDIT_ARGS[@]}" "${IDE_ARGS[@]}" \
+  "${CFG_ARGS[@]}" "${SSH_ARGS[@]}" "${ICLOUD_ARGS[@]}" "${AUDIT_ARGS[@]}" \
   -w "$HOME_DIR/work" \
   "$IMAGE"

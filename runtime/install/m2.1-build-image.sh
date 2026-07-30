@@ -23,7 +23,7 @@ log "verify toolchain inside the image"
 # Override the entrypoint, else `run IMAGE <cmd>` passes <cmd> as ARGS to the
 # entrypoint (which runs tail -f /dev/null and hangs). (The in-build RUN above
 # already asserts the toolchain; this is just a friendly post-build echo.)
-podman run --rm --entrypoint /bin/sh "$IMAGE" -c 'echo -n "claude "; claude --version; echo -n "node "; node --version; echo -n "bun "; bun --version; echo -n "code-server "; code-server --version | head -1'
+podman run --rm --entrypoint /bin/sh "$IMAGE" -c 'echo -n "claude "; claude --version; echo -n "node "; node --version; echo -n "bun "; bun --version'
 
 log "image"
 podman images --filter reference="$IMAGE" --format '{{.Repository}}:{{.Tag}}  {{.Size}}'

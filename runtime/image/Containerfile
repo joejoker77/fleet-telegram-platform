@@ -29,8 +29,7 @@ RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_VERSION}"
 # is on PATH and readable by any uid (not /root, which keep-id can't reach).
 RUN curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash
 
-# code-server — per-tenant web IDE (authoring; wired at M5).
-RUN curl -fsSL https://code-server.dev/install.sh | sh
+# (web-IDE / code-server removed for the firm build — Telegram-only, no public web surface.)
 
 # Baseline tenant plugin — the official Telegram channel plugin, installed CLEAN
 # from the official marketplace and baked into the image as a first-class
@@ -109,7 +108,7 @@ RUN chmod 0755 /opt/platform/entrypoint.sh /opt/platform/session-ctl /opt/platfo
  && ln -sf /opt/platform/bin/xero-call /usr/local/bin/xero-call
 
 # Sanity: fail the build early if a core tool is missing.
-RUN claude --version && bun --version && code-server --version && node --version \
+RUN claude --version && bun --version && node --version \
  && shellfirm --version && jq --version
 
 ENTRYPOINT ["/opt/platform/entrypoint.sh"]
