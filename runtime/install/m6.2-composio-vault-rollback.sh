@@ -8,7 +8,7 @@
 # Run as root on the host.
 set -euo pipefail
 
-USER_NAME=vitaliy
+USER_NAME="${KV_USER:-vitaliy}"   # honor KV_USER (add-user/remove-user set it per tenant)
 AGENT_IDENT="${USER_NAME}-bot"
 SECRET_NAMES=("${USER_NAME}-composio-api" "${USER_NAME}-composio-mcp")
 PRESTATE=/etc/cl-egress/${USER_NAME}-composio.prestate

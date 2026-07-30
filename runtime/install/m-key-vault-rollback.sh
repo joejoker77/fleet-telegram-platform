@@ -8,7 +8,7 @@
 set -euo pipefail
 
 SUFFIX="${1:?usage: m-key-vault-rollback.sh <secret-suffix>}"
-USER_NAME=vitaliy
+USER_NAME="${KV_USER:-vitaliy}"   # honor KV_USER (add-user/remove-user set it per tenant)
 AGENT_IDENT="${USER_NAME}-bot"
 SECRET_NAME="${USER_NAME}-${SUFFIX}"
 PRESTATE="/etc/cl-egress/${USER_NAME}-${SUFFIX}.prestate"

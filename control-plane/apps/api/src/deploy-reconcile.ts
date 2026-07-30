@@ -18,7 +18,7 @@ import { eq } from "drizzle-orm";
 import { getDb, schema } from "@fleet/db";
 
 const HOME_ROOT = process.env.TENANT_HOME_ROOT || "/home";
-const REPO = process.env.REGISTRY_REPO || "joejoker77/claude-bot-skills";
+const REPO = process.env.REGISTRY_REPO || "monacodigital/ClaudeCodeTeam";
 
 type FetchedFile = { relPath: string; content: string };
 
