@@ -92,9 +92,24 @@ bind_secret_to_agent(){ # $1 secret-id  $2 agent-id
   echo "$after" | grep -q "^$sid$"
 }
 
-# vault_and_distribute <service> <secret-name> <host> <header> <fmt> <value>
+# roles_with_scope <service> <scope> — roles whose matrix scope == <scope> (e.g. rw|read)
+roles_with_scope(){
+  python3 - "$MATRIX" "$1" "$2" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1])); svc = sys.argv[2]; scope = sys.argv[3]
+roles = m["services"].get(svc, {}).get("roles", {})
+print(" ".join(r for r in m["role_order"] if roles.get(r) == scope))
+PY
+}
+
+# vault_and_distribute <service> <secret-name> <host> <header> <fmt> <value> [scope]
+# Without [scope]: bind to every role entitled to <service> (ms_shared, uniform scope).
+# With [scope] (rw|read): bind ONLY to roles whose matrix scope == that value — so a
+# read-only key reaches read-scoped roles and the rw key reaches rw roles. This is what makes
+# "basic = read-only Supabase" actually enforced (the injected key is itself read-only), not a
+# doc promise; a read role never gets the rw key bound.
 vault_and_distribute(){
-  local svc="$1" name="$2" host="$3" hdr="$4" fmt="$5" val="$6" sid
+  local svc="$1" name="$2" host="$3" hdr="$4" fmt="$5" val="$6" scope="${7:-}" sid allowed
   if [ "${KEYTYPE[$svc]:-ms_shared}" = per_user ]; then
     c_no "  [$svc] is a PER-USER service — each user adds their OWN key via self-onboarding; this admin script does NOT create a shared key for it."
     return 0
@@ -110,15 +125,15 @@ vault_and_distribute(){
     sid="$(secret_id "$name")"; [ -n "$sid" ] || { c_no "  secret not found after create"; return 1; }
   fi
   c_ok "  ✓ vaulted $name ($host / $hdr)"
-  # distribute by ROLE_MATRIX
-  local allowed="${ROLES[$svc]}" bound=0 t aid
-  echo "  binding to tenants with role in: $allowed"
+  if [ -n "$scope" ]; then allowed="$(roles_with_scope "$svc" "$scope")"; else allowed="${ROLES[$svc]}"; fi
+  local bound=0 t aid
+  echo "  binding to tenants with role in: [${allowed:-none}]${scope:+  scope=$scope}"
   for t in $(tenants_for_role "$allowed"); do
     aid="$(agent_id "${t}-bot")"
     if [ -z "$aid" ]; then echo "   - $t: agent missing, skip"; continue; fi
     if bind_secret_to_agent "$sid" "$aid"; then echo "   - $t ✓"; bound=$((bound+1)); else c_no "   - $t bind FAILED"; fi
   done
-  c_ok "  distributed to $bound tenant(s) per ROLE_MATRIX"
+  c_ok "  distributed to $bound tenant(s) per matrix"
 }
 
 # ===========================================================================
@@ -128,14 +143,31 @@ echo "For each service: y to configure, Enter to skip. The credential is validat
 echo "against the live service before it is stored. Nothing is written on failure."
 
 # --- Supabase (prod) : jdjxlczkggckdnpeluuw.supabase.co --------------------
+# TWO keys by role scope: a READ/WRITE service_role key for rw roles (admin/manager), and a
+# READ-ONLY credential for read roles (basic). Each is bound ONLY to the roles whose matrix
+# scope matches, so a read role physically cannot write (the injected key is itself read-only).
+# The read-only key must be genuinely read-only ON SUPABASE'S SIDE (anon key + RLS that allows
+# only SELECT, or a read-scoped Postgres role / JWT) — this script only vaults + distributes
+# whatever key you give it; it does not make a key read-only.
 if confirm "Configure Supabase?"; then
   H=jdjxlczkggckdnpeluuw.supabase.co
-  K="$(ask_secret "Supabase service_role key (MS-scoped)")"
-  code="$(http_code GET "https://$H/rest/v1/" "apikey: $K" "Authorization: Bearer $K")"
-  if [ "$code" = 200 ] || [ "$code" = 404 ]; then c_ok "  valid (HTTP $code)"
-    vault_and_distribute supabase "ms-supabase" "$H" apikey '{value}' "$K"
-    vault_and_distribute supabase "ms-supabase-auth" "$H" Authorization 'Bearer {value}' "$K"
-  else c_no "  INVALID (HTTP $code) — not vaulted"; fi
+  # 1) read/write (service_role) -> rw roles (admin, manager)
+  Krw="$(ask_secret "Supabase READ/WRITE key (service_role — for admin/manager)")"
+  code="$(http_code GET "https://$H/rest/v1/" "apikey: $Krw" "Authorization: Bearer $Krw")"
+  if [ "$code" = 200 ] || [ "$code" = 404 ]; then c_ok "  rw key valid (HTTP $code)"
+    vault_and_distribute supabase "ms-supabase"      "$H" apikey        '{value}'        "$Krw" rw
+    vault_and_distribute supabase "ms-supabase-auth" "$H" Authorization 'Bearer {value}'  "$Krw" rw
+  else c_no "  rw key INVALID (HTTP $code) — not vaulted"; fi
+  # 2) read-only -> read roles (basic). If you don't have one yet, skip: basic then simply has
+  #    NO Supabase until it's provided (fail-safe — never falls back to the rw key).
+  if confirm "  Configure a READ-ONLY Supabase key now (for basic)?"; then
+    Kro="$(ask_secret "Supabase READ-ONLY key (anon+RLS, or a read-scoped role/JWT)")"
+    code="$(http_code GET "https://$H/rest/v1/" "apikey: $Kro" "Authorization: Bearer $Kro")"
+    if [ "$code" = 200 ] || [ "$code" = 404 ]; then c_ok "  read-only key valid (HTTP $code)"
+      vault_and_distribute supabase "ms-supabase-read"      "$H" apikey        '{value}'        "$Kro" read
+      vault_and_distribute supabase "ms-supabase-read-auth" "$H" Authorization 'Bearer {value}'  "$Kro" read
+    else c_no "  read-only key INVALID (HTTP $code) — not vaulted"; fi
+  fi
 fi
 
 # --- Pipedrive (prod) : monacosolicitors2.pipedrive.com --------------------
