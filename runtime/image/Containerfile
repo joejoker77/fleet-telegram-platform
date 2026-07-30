@@ -104,7 +104,9 @@ RUN chmod 0755 /opt/platform/entrypoint.sh /opt/platform/session-ctl /opt/platfo
  # B: rich-message / structured-reply helper the clean plugin's reply tool lacks
  && ln -sf /opt/platform/bin/tg-send /usr/local/bin/tg-send \
  # C: full-text search over this bot's own session logs (FTS5; indexer loop in entrypoint)
- && ln -sf /opt/platform/bin/session-search /usr/local/bin/session-search
+ && ln -sf /opt/platform/bin/session-search /usr/local/bin/session-search \
+ # firm: Xero runtime helper — 2-step Custom Connection (Basic client-creds proxy-injected)
+ && ln -sf /opt/platform/bin/xero-call /usr/local/bin/xero-call
 
 # Sanity: fail the build early if a core tool is missing.
 RUN claude --version && bun --version && code-server --version && node --version \

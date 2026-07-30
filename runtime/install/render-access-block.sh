@@ -138,11 +138,16 @@ MD
 MD
     ;;
     xero) cat <<'MD'
-#### Xero — billing & invoicing (OAuth2 Custom Connection, two steps)
-1. `POST https://identity.xero.com/connect/token` body `grant_type=client_credentials`
-   (send **NO** `scope`) — client creds auto-injected → returns an `access_token` (~30 min).
-2. `GET https://api.xero.com/api.xro/2.0/<Resource>` with `Authorization: Bearer <token>`,
-   `Xero-tenant-id: 7bb6bd0a-fccc-4421-b949-ddcdd28ece62`, `Accept: application/json`.
+#### Xero — billing & invoicing (OAuth2 Custom Connection)
+Use the **`xero-call`** helper — it does the two-step token exchange for you (fetches a
+short-lived token via the firm's client creds, then calls the Accounting API with the bearer
+token + the firm's `Xero-tenant-id`):
+- `xero-call GET Invoices` · `xero-call GET Contacts` · `xero-call GET Accounts`
+- filter: `xero-call GET 'Invoices?where=Type=="ACCREC"&page=1'`
+- write: `xero-call POST Invoices --data @/tmp/invoice.json`
+A "no access_token / invalid_client" error means Xero isn't set up for your role yet — tell
+the user. (Under the hood: `POST identity.xero.com/connect/token` grant_type=client_credentials,
+NO scope, Basic client-creds proxy-injected → token → `api.xero.com/api.xro/2.0/<Resource>`.)
 MD
     ;;
     exa) cat <<'MD'

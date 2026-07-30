@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# xero-call — runtime Xero helper (OAuth2 Custom Connection, 2-legged).
+#
+# Xero needs two steps and a SHORT-LIVED bearer token that the egress proxy cannot inject
+# (it only injects static secrets). This helper does both steps so the agent makes ONE call:
+#   1. POST identity.xero.com/connect/token (grant_type=client_credentials, NO scope) — the
+#      egress proxy injects the firm's Basic client-creds (vault secret `ms-xero-client`,
+#      bound to your agent only if your role is entitled to Xero) and returns a ~30-min
+#      access_token. This helper does NOT send its own auth on this call.
+#   2. Call api.xero.com/api.xro/2.0/<resource> with `Authorization: Bearer <token>` +
+#      `Xero-tenant-id` + JSON headers.
+# The token is fetched fresh per call and NEVER written to disk.
+#
+# Usage:
+#   xero-call <METHOD> <resource> [extra curl args...]
+#   xero-call GET  Invoices
+#   xero-call GET  'Invoices?where=Type=="ACCREC"&page=1'
+#   xero-call GET  Contacts
+#   xero-call POST Invoices --data @/tmp/invoice.json
+#
+# Env overrides: XERO_TENANT_ID (defaults to the firm's MS tenant).
+set -euo pipefail
+
+XERO_TENANT_ID="${XERO_TENANT_ID:-7bb6bd0a-fccc-4421-b949-ddcdd28ece62}"
+
+METHOD="${1:?usage: xero-call <METHOD> <resource> [curl-args...]  (e.g. xero-call GET Invoices)}"
+RES="${2:?resource required, e.g. Invoices / Contacts / Accounts}"
+shift 2
+
+# Step 1 — token. Do NOT add an Authorization header: the proxy injects the Basic client
+# creds on identity.xero.com. If nothing is injected (role not entitled / key not vaulted),
+# Xero returns invalid_client and we surface a clear message.
+tok_resp="$(curl -sS -m 30 -X POST https://identity.xero.com/connect/token \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  --data-urlencode 'grant_type=client_credentials' 2>&1)" || {
+    echo "xero-call: token request to identity.xero.com failed (network/egress)." >&2; exit 1; }
+
+token="$(printf '%s' "$tok_resp" | python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("access_token",""))
+except Exception: print("")' 2>/dev/null || true)"
+
+if [ -z "$token" ]; then
+  echo "xero-call: no access_token." >&2
+  echo "  Likely: your role isn't entitled to Xero, or the firm's Xero client creds aren't in" >&2
+  echo "  the vault yet (ask an administrator to run onboarding). Token endpoint said:" >&2
+  echo "  $(printf '%s' "$tok_resp" | tr -d '\n' | head -c 240)" >&2
+  exit 1
+fi
+
+# Step 2 — the actual Accounting API call.
+exec curl -sS -m 60 -X "$METHOD" "https://api.xero.com/api.xro/2.0/${RES}" \
+  -H "Authorization: Bearer ${token}" \
+  -H "Xero-tenant-id: ${XERO_TENANT_ID}" \
+  -H "Accept: application/json" \
+  -H "Content-Type: application/json" \
+  "$@"
