@@ -1,0 +1,29 @@
+{
+  "_doc": [
+    "AUTHORITATIVE firm RBAC role->service matrix. THE single source of truth.",
+    "Everything derives from this file (edit ONLY here):",
+    "  - render-access-block.sh renders the per-role 'Your access' block in each tenant's",
+    "    CLAUDE.md from this (which services a role sees + scope).",
+    "  - onboard-integrations.sh binds ms_shared keys to entitled roles' agents AND gates",
+    "    per-user self-onboarding (a role may only connect a service it's entitled to).",
+    "  - provision-tenant.sh assembles CLAUDE.md via render-access-block.sh, so it inherits this.",
+    "So the CLAUDE.md doc, the vault bindings, and the onboarding gate can never diverge.",
+    "key_type: ms_shared = one firm key distributed by role; per_user = each user supplies own.",
+    "roles.<role>: rw = full; read = read-only (must be backed by a real read-scoped key/RLS,",
+    "  else the read restriction is not enforced -- see supabase/basic)."
+  ],
+  "role_order": ["admin", "manager", "finance", "basic"],
+  "service_order": ["supabase", "payload", "rota", "strapi", "pipedrive", "n8n", "openrouter", "exa", "composio", "xero"],
+  "services": {
+    "supabase":   { "label": "Supabase",         "key_type": "ms_shared", "hosts": ["jdjxlczkggckdnpeluuw.supabase.co", "gdkgitoicaryhiiwohuz.supabase.co"], "roles": { "admin": "rw", "manager": "rw", "basic": "read" } },
+    "payload":    { "label": "Payload CMS",       "key_type": "ms_shared", "hosts": ["chatbot.monacosolicitors.co.uk"], "roles": { "admin": "rw" } },
+    "rota":       { "label": "Rota (WordPress)",  "key_type": "ms_shared", "hosts": ["cms.monacosolicitors.co.uk"], "roles": { "admin": "rw", "manager": "rw" } },
+    "strapi":     { "label": "Strapi",            "key_type": "ms_shared", "hosts": ["api.monacosolicitors.grapple.uk"], "roles": { "admin": "rw" } },
+    "pipedrive":  { "label": "Pipedrive",         "key_type": "per_user",  "hosts": ["monacosolicitors2.pipedrive.com"], "roles": { "admin": "rw", "manager": "rw", "basic": "rw" } },
+    "n8n":        { "label": "n8n (cloud + self-hosted)", "key_type": "ms_shared", "hosts": ["msgrapple.app.n8n.cloud", "n8n.monacosolicitors.co.uk"], "roles": { "admin": "rw", "manager": "rw" } },
+    "openrouter": { "label": "OpenRouter",        "key_type": "per_user",  "hosts": ["openrouter.ai"], "roles": { "admin": "rw", "manager": "rw" } },
+    "exa":        { "label": "Exa",               "key_type": "ms_shared", "hosts": ["mcp.exa.ai"], "roles": { "admin": "rw", "manager": "rw", "finance": "rw", "basic": "rw" } },
+    "composio":   { "label": "Composio",          "key_type": "per_user",  "hosts": ["mcp.composio.dev", "backend.composio.dev"], "roles": { "admin": "rw", "manager": "rw", "finance": "rw", "basic": "rw" } },
+    "xero":       { "label": "Xero",              "key_type": "ms_shared", "hosts": ["api.xero.com", "identity.xero.com"], "roles": { "admin": "rw", "manager": "rw", "finance": "rw" } }
+  }
+}
