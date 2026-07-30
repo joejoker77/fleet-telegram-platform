@@ -78,7 +78,7 @@ export function loadConfig(): Config {
     judgeUrl: process.env.JUDGE_URL ?? "http://127.0.0.1:8090",
     secretdSocket: process.env.SECRETD_SOCKET ?? "/run/cp-secretd/secretd.sock",
     ideUrl: (process.env.IDE_URL ?? "https://ide.ai-assistant.gg").replace(/\/$/, ""),
-    registryRepo: process.env.REGISTRY_REPO ?? "joejoker77/claude-bot-skills",
+    registryRepo: process.env.REGISTRY_REPO ?? "monacodigital/ClaudeCodeTeam",
     githubWebhookSecret: fileOrEnvOptional("GITHUB_WEBHOOK_SECRET"),
   };
 }
