@@ -98,16 +98,35 @@ sed "s#__TENANT_HOME__#/home/$USER_NAME#g" "$SKEL/settings.json.tmpl" > "$CLAUDE
 install -m 0755 "$SKEL/hooks/telegram-track-chat.sh"    "$CLAUDE_DIR/hooks/telegram-track-chat.sh"
 install -m 0755 "$SKEL/hooks/telegram-block-askuser.sh" "$CLAUDE_DIR/hooks/telegram-block-askuser.sh"
 # Managed firm CLAUDE.md = static base (English; Telegram + infra/security behavior,
-# tenant name substituted) + the per-ROLE access block (which firm systems this role
-# may use and exactly how to call each — from render-access-block.sh, marker-delimited)
-# + a Host-admin section for admins only. It's a MANAGED file: regenerated on every
-# provision run so a role change or base update always takes effect. render-access-block.sh
-# is the single source of truth shared with the integrations onboarding.
+# tenant name substituted) + the per-ROLE access block (which firm systems this role may
+# use and exactly how to call each — from render-access-block.sh, role/scope driven by
+# role-matrix.json) + a Host-admin section for admins only. The whole thing is wrapped in
+# BEGIN/END MANAGED markers and regenerated on every provision run (so a role change or base
+# update always takes effect) — but ONLY the marked block is replaced, so anything the tenant
+# added to their CLAUDE.md outside the markers is preserved.
 CMD_OUT="$CLAUDE_DIR/CLAUDE.md"
-sed "s#__TENANT_USER__#$USER_NAME#g; s#__TENANT_HOME__#/home/$USER_NAME#g" \
-    "$SKEL/CLAUDE.md.baseline" > "$CMD_OUT"
-{ echo; bash "$RT/install/render-access-block.sh" "$ROLE"; } >> "$CMD_OUT"
-if [ "$ROLE" = admin ]; then { echo; cat "$SKEL/host-admin.md.snippet"; } >> "$CMD_OUT"; fi
+MANAGED_TMP="$(mktemp)"
+{
+  echo "<!-- BEGIN MANAGED (provision-tenant) — regenerated each run; do NOT edit between these markers. Put your own notes OUTSIDE them. -->"
+  sed "s#__TENANT_USER__#$USER_NAME#g; s#__TENANT_HOME__#/home/$USER_NAME#g" "$SKEL/CLAUDE.md.baseline"
+  echo; bash "$RT/install/render-access-block.sh" "$ROLE"
+  if [ "$ROLE" = admin ]; then echo; cat "$SKEL/host-admin.md.snippet"; fi
+  echo "<!-- END MANAGED (provision-tenant) -->"
+} > "$MANAGED_TMP"
+if [ -f "$CMD_OUT" ] && grep -q 'BEGIN MANAGED (provision-tenant)' "$CMD_OUT"; then
+  # replace ONLY the managed block; keep tenant content before/after the markers
+  MANAGED_TMP="$MANAGED_TMP" python3 - "$CMD_OUT" <<'PY'
+import os, re, sys
+target = sys.argv[1]
+new = open(os.environ["MANAGED_TMP"]).read().strip()
+cur = open(target).read()
+pat = re.compile(r"<!-- BEGIN MANAGED \(provision-tenant\).*?<!-- END MANAGED \(provision-tenant\) -->", re.S)
+open(target, "w").write(pat.sub(lambda _m: new, cur, count=1))
+PY
+else
+  cp "$MANAGED_TMP" "$CMD_OUT"   # fresh tenant (or legacy file w/o markers): write managed block
+fi
+rm -f "$MANAGED_TMP"
 chown "$USER_NAME:$USER_NAME" "$CMD_OUT"; chmod 0644 "$CMD_OUT"
 # Persist the role so integrations onboarding (ROLE_MATRIX) and any later CLAUDE.md
 # regeneration know it.
