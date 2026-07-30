@@ -73,7 +73,7 @@ chmod 600 "$DST/.credentials.json"
 log "4) minimal tenant settings (model pin + metering hook; NOT the donor's host-path hooks)"
 cat > "$DST/settings.json" <<'JSON'
 {
-  "model": "claude-opus-4-8",
+  "model": "claude-fable-5",
   "hooks": {
     "Stop": [ { "hooks": [ { "type": "command", "command": "node /opt/platform/hooks/metering-stop-hook.mjs" } ] } ]
   }
