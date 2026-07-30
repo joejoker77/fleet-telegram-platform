@@ -25,9 +25,10 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 RT_INSTALL="$HERE/runtime/install"
 CP_DIR="$HERE/control-plane"
 
-DRY_RUN=0; IS_ADMIN=0; CONFIG_FILE=""; POS=()
+DRY_RUN=0; IS_ADMIN=0; ROLE_ARG=""; CONFIG_FILE=""; POS=()
 while [ $# -gt 0 ]; do
   case "$1" in
+    --role) ROLE_ARG="${2:?--role needs a value}"; shift ;;
     --is-admin) IS_ADMIN=1 ;;
     --dry-run) DRY_RUN=1 ;;
     --config) CONFIG_FILE="${2:?--config needs a file}"; shift ;;
@@ -47,7 +48,23 @@ onecli_secret_exists() {
   HOME=/root /usr/local/bin/onecli secrets list 2>/dev/null | grep -q "\"name\"[: ]*\"$1\""
 }
 
-ROLE="user"; [ "$IS_ADMIN" = "1" ] && ROLE="admin"
+# Role: --role wins; --is-admin is an alias for --role admin; default basic. Must be one of
+# the firm roles so provision-tenant, role-matrix.json and the vault bindings all agree.
+ROLE="${ROLE_ARG:-}"
+if [ -z "$ROLE" ]; then if [ "$IS_ADMIN" = "1" ]; then ROLE="admin"; else ROLE="basic"; fi; fi
+case "$ROLE" in admin|manager|finance|basic) ;; *) die "invalid --role: $ROLE (admin|manager|finance|basic)";; esac
+if [ "$ROLE" = "admin" ]; then IS_ADMIN=1; else IS_ADMIN=0; fi
+
+# role_entitled <role> <service> — true iff role-matrix.json grants <role> access to <service>.
+# Firm per-user integrations below are offered ONLY to entitled roles (fail-closed).
+role_entitled() {
+  python3 - "$RT_INSTALL/role-matrix.json" "$1" "$2" <<'PY'
+import json, sys
+try: m = json.load(open(sys.argv[1]))
+except Exception: sys.exit(1)   # can't verify -> don't offer (fail-closed)
+sys.exit(0 if sys.argv[2] in (m.get("services", {}).get(sys.argv[3], {}).get("roles", {})) else 1)
+PY
+}
 log "add-user '$USER_NAME' (tg=$TG_ID, role=$ROLE)"
 
 # 1) Claude subscription auth token — written host-side BEFORE the pod starts so
@@ -64,8 +81,7 @@ fi
 
 # 2) provision the tenant (OS account, pod, OneCLI agent, control-plane rows)
 log "2/6 provision tenant"
-if [ "$IS_ADMIN" = "1" ]; then run_cmd bash "$RT_INSTALL/provision-tenant.sh" "$USER_NAME" "$TG_ID" --admin
-else run_cmd bash "$RT_INSTALL/provision-tenant.sh" "$USER_NAME" "$TG_ID"; fi
+run_cmd bash "$RT_INSTALL/provision-tenant.sh" "$USER_NAME" "$TG_ID" --role "$ROLE"
 
 # 2) Telegram bot token → the tenant's channel .env (so its pod's plugin polls)
 log "3/6 Telegram bot token"
@@ -79,16 +95,23 @@ if [ "$DRY_RUN" != "1" ]; then
   info "wrote $ENVDIR/.env"
 fi
 
-# 3) bind platform integration keys to THIS tenant's OneCLI agent (each optional)
-log "4/6 integrations (bind to ${USER_NAME}-bot)"
-prompt_secret_optional EXA_API_KEY \
-  "Exa API key (web-search / deep-research MCP). Staged for this tenant as ${USER_NAME}-exa-api (x-api-key @ mcp.exa.ai) and proxy-injected. Blank to skip."
-prompt_secret_optional COMPOSIO_API_KEY \
-  "Composio platform API key (external-app connectors). Staged as ${USER_NAME}-composio-api/-mcp. Blank to skip."
+# 3) bind platform integration keys to THIS tenant's OneCLI agent.
+#    Firm per-user services (Exa/Composio/OpenRouter/Pipedrive) are offered ONLY if this role
+#    is entitled per role-matrix.json — so a tenant can't stage a firm-service key its role
+#    isn't allowed. GitHub PAT (skill/marketplace publishing) + ElevenLabs (voice STT) are
+#    platform utilities, not firm-data services → offered to everyone. Blank = skip.
+log "4/6 integrations (bind to ${USER_NAME}-bot, role=$ROLE)"
+EXA_API_KEY=""; COMPOSIO_API_KEY=""; OPENROUTER_KEY=""; PIPEDRIVE_TOKEN=""
+if role_entitled "$ROLE" exa; then prompt_secret_optional EXA_API_KEY \
+  "Exa API key (web-search / deep-research). Staged as ${USER_NAME}-exa-api (x-api-key @ mcp.exa.ai). Blank to skip."; fi
+if role_entitled "$ROLE" composio; then prompt_secret_optional COMPOSIO_API_KEY \
+  "Composio platform API key (external-app connectors). Staged as ${USER_NAME}-composio-api/-mcp. Blank to skip."; fi
+if role_entitled "$ROLE" openrouter; then prompt_secret_optional OPENROUTER_KEY \
+  "OpenRouter API key (LLM gateway / voice fallback). Staged as ${USER_NAME}-openrouter-api (Authorization: Bearer @ openrouter.ai). Blank to skip."; fi
+if role_entitled "$ROLE" pipedrive; then prompt_secret_optional PIPEDRIVE_TOKEN \
+  "Pipedrive personal API token for the firm CRM (monacosolicitors2.pipedrive.com). Staged as ${USER_NAME}-pipedrive (x-api-token). Blank to skip."; fi
 prompt_secret_optional GITHUB_PAT \
   "GitHub PAT for skill/MCP sharing + marketplace. Staged as ${USER_NAME}-git-fleet-platform (git @ github.com) AND ${USER_NAME}-github-github_pat (REST @ api.github.com, for marketplace publish). Blank to skip."
-prompt_secret_optional OPENROUTER_KEY \
-  "OpenRouter API key (voice STT + LLM fallback). Staged as ${USER_NAME}-openrouter-api (Authorization: Bearer @ openrouter.ai). Blank to skip."
 prompt_secret_optional ELEVENLABS_KEY \
   "ElevenLabs API key (voice STT; note: geo-restricted in some regions). Staged as ${USER_NAME}-elevenlabs-api (xi-api-key @ api.elevenlabs.io). Blank to skip."
 _bind() { # SCRIPT  VALUE  EXISTING_SECRET_NAME  [extra args forwarded to SCRIPT]
@@ -107,6 +130,7 @@ _bind git-pat-vault.sh       "${GITHUB_PAT:-}"       "${USER_NAME}-git-fleet-pla
 # separately), so github.com does NOT cover api.github.com → bind it explicitly.
 _bind m-key-vault.sh "${GITHUB_PAT:-}"     "${USER_NAME}-github-github_pat" github-github_pat api.github.com Authorization "Bearer {value}"
 _bind m-key-vault.sh "${OPENROUTER_KEY:-}" "${USER_NAME}-openrouter-api"     openrouter-api    openrouter.ai    Authorization "Bearer {value}"
+_bind m-key-vault.sh "${PIPEDRIVE_TOKEN:-}" "${USER_NAME}-pipedrive"         pipedrive         monacosolicitors2.pipedrive.com x-api-token "{value}"
 _bind m-key-vault.sh "${ELEVENLABS_KEY:-}" "${USER_NAME}-elevenlabs-api"     elevenlabs-api    api.elevenlabs.io xi-api-key   "{value}"
 
 # 5) admin tier (host-sudo broker) if requested
