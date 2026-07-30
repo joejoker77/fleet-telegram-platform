@@ -1,0 +1,31 @@
+# rclone iCloud Drive mount — templated per tenant (%i = os_user).
+# OPT-IN: this unit is NOT enabled by the base install. It is installed + enabled on
+# demand by the icloud-connect skill -> icloud-connect-helper.sh, only for a tenant who
+# explicitly connects their iCloud. The tenant's rclone.conf (holding the ~30-day iCloud
+# trust_token, mode 600) stays HOST-ONLY; the pod only ever sees the mounted DATA at
+# ~/icloud (claude-pod-run binds it :rslave at pod start).
+[Unit]
+Description=rclone iCloud Drive mount for %i (FUSE on host at /home/%i/icloud)
+Documentation=file:///dev/null
+After=network-online.target
+Wants=network-online.target
+# Only start once the tenant has actually authenticated (helper writes this first).
+AssertPathExists=/home/%i/rclone.conf
+
+[Service]
+Type=notify
+ExecStartPre=/bin/mkdir -p /home/%i/icloud /var/log/icloud-rclone
+ExecStart=/usr/bin/rclone mount %i_icloud: /home/%i/icloud \
+    --config /home/%i/rclone.conf \
+    --allow-other \
+    --dir-cache-time 24h \
+    --vfs-cache-mode writes \
+    --vfs-cache-max-age 24h \
+    --umask 022 \
+    --log-file /var/log/icloud-rclone/%i.log --log-level INFO
+ExecStop=/bin/fusermount -uz /home/%i/icloud
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

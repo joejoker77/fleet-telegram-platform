@@ -103,6 +103,15 @@ if [ -f "/etc/systemd/system/rclone-${USER_NAME}-mount.service" ]; then
   exit 1
 fi
 mkdir -p /var/log/icloud-rclone
+# Install the templated mount unit ON DEMAND — iCloud is opt-in, so the base install ships
+# nothing; this skill-driven helper drops the unit only when a tenant actually connects.
+UNIT_SRC="$HERE/../systemd/rclone-icloud-mount@.service"
+UNIT_DST="/etc/systemd/system/rclone-icloud-mount@.service"
+if [ -f "$UNIT_SRC" ] && ! cmp -s "$UNIT_SRC" "$UNIT_DST" 2>/dev/null; then
+  install -m 0644 "$UNIT_SRC" "$UNIT_DST"; systemctl daemon-reload
+  echo "icloud-connect: installed mount unit template at $UNIT_DST"
+fi
+[ -f "$UNIT_DST" ] || { echo "icloud-connect: mount unit template missing ($UNIT_SRC) — cannot mount." >&2; exit 1; }
 systemctl enable --now "rclone-icloud-mount@${USER_NAME}.service"
 sleep 2
 if mountpoint -q "/home/${USER_NAME}/icloud"; then
