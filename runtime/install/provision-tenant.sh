@@ -13,10 +13,22 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
 
-USER_NAME="${1:?usage: provision-tenant.sh <os_user> <telegram_id> [--admin]}"
+USER_NAME="${1:?usage: provision-tenant.sh <os_user> <telegram_id> [--role <admin|manager|finance|basic>] [--admin]}"
 TG_ID="${2:?telegram_id required}"
-ADMIN=false; [ "${3:-}" = "--admin" ] && ADMIN=true
 AGENT_IDENT="${USER_NAME}-bot"
+# Role drives BOTH the per-role RBAC access block in CLAUDE.md and control-plane
+# is_admin. Back-compat: bare `--admin` == `--role admin`. Default role = basic.
+ROLE=basic
+shift 2
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --role)  ROLE="${2:?--role needs a value}"; shift 2 ;;
+    --admin) ROLE=admin; shift ;;
+    *) echo "ERROR: unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+case "$ROLE" in admin|manager|finance|basic) ;; *) echo "ERROR: invalid role: $ROLE (admin|manager|finance|basic)" >&2; exit 1 ;; esac
+ADMIN=false; [ "$ROLE" = admin ] && ADMIN=true
 RT="$ROOT/runtime"
 TOKDIR=/etc/cl-egress
 TOKFILE="$TOKDIR/$USER_NAME.token"
@@ -85,10 +97,22 @@ install -d -o "$USER_NAME" -g "$USER_NAME" -m 0755 "$CLAUDE_DIR/hooks" "$CLAUDE_
 sed "s#__TENANT_HOME__#/home/$USER_NAME#g" "$SKEL/settings.json.tmpl" > "$CLAUDE_DIR/settings.json"
 install -m 0755 "$SKEL/hooks/telegram-track-chat.sh"    "$CLAUDE_DIR/hooks/telegram-track-chat.sh"
 install -m 0755 "$SKEL/hooks/telegram-block-askuser.sh" "$CLAUDE_DIR/hooks/telegram-block-askuser.sh"
-# Product baseline instructions (rich-reply helper etc.). Only-if-absent so a
-# tenant's own ~/.claude/CLAUDE.md is never clobbered.
-[ -f "$CLAUDE_DIR/CLAUDE.md" ] || \
-  install -m 0644 -o "$USER_NAME" -g "$USER_NAME" "$SKEL/CLAUDE.md.baseline" "$CLAUDE_DIR/CLAUDE.md"
+# Managed firm CLAUDE.md = static base (English; Telegram + infra/security behavior,
+# tenant name substituted) + the per-ROLE access block (which firm systems this role
+# may use and exactly how to call each — from render-access-block.sh, marker-delimited)
+# + a Host-admin section for admins only. It's a MANAGED file: regenerated on every
+# provision run so a role change or base update always takes effect. render-access-block.sh
+# is the single source of truth shared with the integrations onboarding.
+CMD_OUT="$CLAUDE_DIR/CLAUDE.md"
+sed "s#__TENANT_USER__#$USER_NAME#g; s#__TENANT_HOME__#/home/$USER_NAME#g" \
+    "$SKEL/CLAUDE.md.baseline" > "$CMD_OUT"
+{ echo; bash "$RT/install/render-access-block.sh" "$ROLE"; } >> "$CMD_OUT"
+if [ "$ROLE" = admin ]; then { echo; cat "$SKEL/host-admin.md.snippet"; } >> "$CMD_OUT"; fi
+chown "$USER_NAME:$USER_NAME" "$CMD_OUT"; chmod 0644 "$CMD_OUT"
+# Persist the role so integrations onboarding (ROLE_MATRIX) and any later CLAUDE.md
+# regeneration know it.
+install -d -m 0755 /etc/claude-role
+printf '%s\n' "$ROLE" > "/etc/claude-role/$USER_NAME"
 # In-chat progress is NOT a tool hook (the simple PreToolUse hook showed a static
 # icon + raw tool args — wrong format). It's the telegram-progress-sidecar.mjs
 # baked at /opt/platform/bin, launched by the entrypoint: a TUI-spinner watchdog
