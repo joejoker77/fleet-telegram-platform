@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+# onboard-integrations.sh — interactively collect, VALIDATE, and vault Monaco
+# external-service API credentials into OneCLI, then make each one AVAILABLE to
+# tenants strictly per the ROLE_MATRIX (the platform decides availability, not
+# the operator). No --user flag: run as root; each validated key is bound to
+# every current tenant whose role grants that service.
+#
+# Endpoints are BAKED IN (production). The script does NOT ask prod/stage — MS
+# runs on prod. For each service it simply says "give me the creds for <svc>",
+# the operator (e.g. Tom) enters them, the script tests the LIVE connection,
+# says OK, and moves on. All prompts are in English.
+#
+# The egress proxy injects the right header at runtime; the Claude process never
+# sees the raw key. (Exa is NOT here — it is already provisioned per-tenant at
+# user creation as <user>-exa-api on mcp.exa.ai.)
+#
+#   sudo ./onboard-integrations.sh
+#
+set -uo pipefail
+ONECLI=/usr/local/bin/onecli
+export HOME=/root
+
+c_ok(){ printf '\033[32m%s\033[0m\n' "$*"; }
+c_no(){ printf '\033[31m%s\033[0m\n' "$*"; }
+c_hd(){ printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
+die(){ printf '\033[31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
+
+[ "$(id -u)" -eq 0 ] || die "run as root (ssh root@host / host-sudo)"
+command -v "$ONECLI" >/dev/null || die "onecli not found"
+"$ONECLI" auth status >/dev/null 2>&1 || die "onecli not authenticated (onecli auth login)"
+command -v curl >/dev/null || die "curl required for validation"
+
+# ---- ROLE_MATRIX + key_type: loaded from role-matrix.json (the SINGLE source of
+# truth, shared with render-access-block.sh). Edit entitlements there, not here — so
+# the vault bindings this script creates can never drift from what the tenant CLAUDE.md
+# says. ROLES[svc]="space-separated roles"; KEYTYPE[svc]="ms_shared|per_user".
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+MATRIX="${ROLE_MATRIX_JSON:-$HERE/role-matrix.json}"
+[ -f "$MATRIX" ] || die "role-matrix.json not found at $MATRIX (set ROLE_MATRIX_JSON)"
+declare -A ROLES KEYTYPE
+while IFS="$(printf '\t')" read -r svc roles ktype; do
+  [ -n "$svc" ] || continue
+  ROLES[$svc]="$roles"; KEYTYPE[$svc]="$ktype"
+done < <(python3 - "$MATRIX" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))
+for s in m["service_order"]:
+    spec = m["services"][s]
+    roles = " ".join(r for r in m["role_order"] if r in spec.get("roles", {}))
+    print("\t".join([s, roles, spec.get("key_type", "ms_shared")]))
+PY
+)
+
+# ---- tenant enumeration ----------------------------------------------------
+tenants_for_role(){ # $1 = space-separated allowed roles -> prints tenant names
+  local allowed=" $1 " t r
+  for f in /etc/claude-role/*; do
+    [ -f "$f" ] || continue
+    t="$(basename "$f")"; r="$(tr -d ' \t\r\n' < "$f")"
+    case "$allowed" in *" $r "*) echo "$t";; esac
+  done
+}
+
+# ---- helpers ---------------------------------------------------------------
+confirm(){ local a; read -rp "$1 [y/N]: " a; [ "$a" = y ] || [ "$a" = Y ]; }
+ask(){ local v; read -rp "  $1: " v; printf '%s' "$v"; }
+ask_secret(){ local v; read -rsp "  $1: " v; echo >&2; printf '%s' "$v"; }
+
+http_code(){ local m="$1" url="$2"; shift 2; local args=(-sS -o /dev/null -w '%{http_code}' -m 20 -X "$m") data=""
+  while [ $# -gt 0 ]; do case "$1" in --data) data="$2"; shift 2;; *) args+=(-H "$1"); shift;; esac; done
+  [ -n "$data" ] && args+=(-H "Content-Type: application/json" --data "$data")
+  curl "${args[@]}" "$url" 2>/dev/null || echo 000; }
+
+secret_id(){ "$ONECLI" secrets list 2>/dev/null | python3 -c "
+import json,sys
+d=json.load(sys.stdin); r=d.get('data',d) if isinstance(d,dict) else d
+print(next((s['id'] for s in r if s.get('name')=='$1'),''))"; }
+agent_id(){ "$ONECLI" agents list 2>/dev/null | python3 -c "
+import json,sys
+d=json.load(sys.stdin); r=d.get('data',d) if isinstance(d,dict) else d
+print(next((a['id'] for a in r if a.get('identifier')=='$1'),''))"; }
+py_ids(){ python3 -c 'import json,sys;d=json.load(sys.stdin);r=d.get("data",d) if isinstance(d,dict) else d;print("\n".join(x if isinstance(x,str) else x.get("id","") for x in r))'; }
+
+bind_secret_to_agent(){ # $1 secret-id  $2 agent-id
+  local sid="$1" aid="$2" before want after
+  before="$("$ONECLI" agents secrets --id "$aid" 2>/dev/null | py_ids | grep -v '^$' || true)"
+  echo "$before" | grep -q "^$sid$" && { echo "     already bound"; return 0; }
+  want="$(printf '%s\n%s\n' "$before" "$sid" | grep -v '^$' | sort -u)"
+  "$ONECLI" agents set-secrets --id "$aid" --secret-ids "$(echo $want | tr ' ' ',')" >/dev/null 2>&1 \
+    || "$ONECLI" agents set-secrets --id "$aid" --secret-ids $want >/dev/null 2>&1
+  after="$("$ONECLI" agents secrets --id "$aid" 2>/dev/null | py_ids | grep -v '^$' || true)"
+  echo "$after" | grep -q "^$sid$"
+}
+
+# vault_and_distribute <service> <secret-name> <host> <header> <fmt> <value>
+vault_and_distribute(){
+  local svc="$1" name="$2" host="$3" hdr="$4" fmt="$5" val="$6" sid
+  if [ "${KEYTYPE[$svc]:-ms_shared}" = per_user ]; then
+    c_no "  [$svc] is a PER-USER service — each user adds their OWN key via self-onboarding; this admin script does NOT create a shared key for it."
+    return 0
+  fi
+  sid="$(secret_id "$name")"
+  if [ -n "$sid" ]; then
+    if confirm "  secret $name exists — replace value?"; then "$ONECLI" secrets delete --id "$sid" >/dev/null 2>&1 || true; sid=""; fi
+  fi
+  if [ -z "$sid" ]; then
+    "$ONECLI" secrets create --name "$name" --type generic --value "$val" \
+      --host-pattern "$host" --header-name "$hdr" --value-format "$fmt" >/dev/null \
+      || { c_no "  vault create failed"; return 1; }
+    sid="$(secret_id "$name")"; [ -n "$sid" ] || { c_no "  secret not found after create"; return 1; }
+  fi
+  c_ok "  ✓ vaulted $name ($host / $hdr)"
+  # distribute by ROLE_MATRIX
+  local allowed="${ROLES[$svc]}" bound=0 t aid
+  echo "  binding to tenants with role in: $allowed"
+  for t in $(tenants_for_role "$allowed"); do
+    aid="$(agent_id "${t}-bot")"
+    if [ -z "$aid" ]; then echo "   - $t: agent missing, skip"; continue; fi
+    if bind_secret_to_agent "$sid" "$aid"; then echo "   - $t ✓"; bound=$((bound+1)); else c_no "   - $t bind FAILED"; fi
+  done
+  c_ok "  distributed to $bound tenant(s) per ROLE_MATRIX"
+}
+
+# ===========================================================================
+c_hd "Monaco integration onboarding (production; availability by ROLE_MATRIX)"
+echo "Tenants on this host:"; for f in /etc/claude-role/*; do [ -f "$f" ] && echo "  $(basename "$f") = $(tr -d ' \t\r\n' <"$f")"; done
+echo "For each service: y to configure, Enter to skip. The credential is validated"
+echo "against the live service before it is stored. Nothing is written on failure."
+
+# --- Supabase (prod) : jdjxlczkggckdnpeluuw.supabase.co --------------------
+if confirm "Configure Supabase?"; then
+  H=jdjxlczkggckdnpeluuw.supabase.co
+  K="$(ask_secret "Supabase service_role key (MS-scoped)")"
+  code="$(http_code GET "https://$H/rest/v1/" "apikey: $K" "Authorization: Bearer $K")"
+  if [ "$code" = 200 ] || [ "$code" = 404 ]; then c_ok "  valid (HTTP $code)"
+    vault_and_distribute supabase "ms-supabase" "$H" apikey '{value}' "$K"
+    vault_and_distribute supabase "ms-supabase-auth" "$H" Authorization 'Bearer {value}' "$K"
+  else c_no "  INVALID (HTTP $code) — not vaulted"; fi
+fi
+
+# --- Pipedrive (prod) : monacosolicitors2.pipedrive.com --------------------
+# Personal API token authenticates via the `x-api-token` header; an OAuth access
+# token via `Authorization: Bearer`. Try x-api-token first, fall back to Bearer,
+# and vault whichever the API actually accepts.
+if [ "${KEYTYPE[pipedrive]:-}" = per_user ]; then echo "  Pipedrive is a per-user service (each user self-onboards their own key) — skipped in this admin script."
+elif confirm "Configure Pipedrive?"; then
+  H=monacosolicitors2.pipedrive.com
+  K="$(ask_secret "Pipedrive personal API token (sent as the x-api-token header)")"
+  hdr=""; fmt=""
+  # try a couple of always-present v2 endpoints with x-api-token; Bearer only helps for OAuth
+  c1="$(http_code GET "https://$H/api/v2/users/me" "x-api-token: $K")"
+  c2="$(http_code GET "https://$H/api/v2/deals?limit=1" "x-api-token: $K")"
+  c3="-"
+  if [ "$c1" = 200 ] || [ "$c2" = 200 ]; then hdr="x-api-token"; fmt='{value}'
+  else c3="$(http_code GET "https://$H/api/v2/users/me" "Authorization: Bearer $K")"; [ "$c3" = 200 ] && { hdr="Authorization"; fmt='Bearer {value}'; }
+  fi
+  if [ -n "$hdr" ]; then c_ok "  valid (via $hdr)"; vault_and_distribute pipedrive "ms-pipedrive" "$H" "$hdr" "$fmt" "$K"
+  else c_no "  INVALID — users/me=$c1 deals=$c2 bearer=$c3. Use a personal API token (Settings → Personal preferences → API) that belongs to the $H account."; fi
+fi
+
+# --- n8n : two production accounts (cloud + self-hosted) --------------------
+if confirm "Configure n8n (cloud account)?"; then
+  H=msgrapple.app.n8n.cloud
+  K="$(ask_secret "n8n cloud API key")"
+  code="$(http_code GET "https://$H/api/v1/workflows?limit=1" "X-N8N-API-KEY: $K")"
+  [ "$code" = 200 ] && { c_ok "  valid"; vault_and_distribute n8n "ms-n8n-cloud" "$H" X-N8N-API-KEY '{value}' "$K"; } || c_no "  INVALID (HTTP $code)"
+fi
+if confirm "Configure n8n (self-hosted account)?"; then
+  H=n8n.monacosolicitors.co.uk
+  K="$(ask_secret "n8n self-hosted API key")"
+  code="$(http_code GET "https://$H/api/v1/workflows?limit=1" "X-N8N-API-KEY: $K")"
+  [ "$code" = 200 ] && { c_ok "  valid"; vault_and_distribute n8n "ms-n8n-selfhosted" "$H" X-N8N-API-KEY '{value}' "$K"; } || c_no "  INVALID (HTTP $code)"
+fi
+
+# --- OpenRouter : openrouter.ai --------------------------------------------
+if [ "${KEYTYPE[openrouter]:-}" = per_user ]; then echo "  OpenRouter is a per-user service (each user self-onboards their own key) — skipped in this admin script."
+elif confirm "Configure OpenRouter?"; then
+  K="$(ask_secret "OpenRouter API key")"
+  code="$(http_code GET "https://openrouter.ai/api/v1/key" "Authorization: Bearer $K")"
+  [ "$code" = 200 ] && { c_ok "  valid"; vault_and_distribute openrouter "ms-openrouter" openrouter.ai Authorization 'Bearer {value}' "$K"; } || c_no "  INVALID (HTTP $code)"
+fi
+
+# --- WordPress (Rota) prod : cms.monacosolicitors.co.uk --------------------
+if confirm "Configure WordPress (Rota)?"; then
+  H=cms.monacosolicitors.co.uk
+  U="$(ask "WP username")"; P="$(ask_secret "WP Application Password (Users -> Profile -> Application Passwords; the normal login password will NOT work)")"; B="$(printf '%s:%s' "$U" "$P" | base64 -w0)"
+  code="$(http_code GET "https://$H/wp-json/wp/v2/users/me" "Authorization: Basic $B")"
+  [ "$code" = 200 ] && { c_ok "  valid"; vault_and_distribute rota "ms-wordpress" "$H" Authorization 'Basic {value}' "$B"; } || c_no "  INVALID (HTTP $code)"
+fi
+
+# --- Payload CMS prod : chatbot.monacosolicitors.co.uk ---------------------
+if confirm "Configure Payload CMS?"; then
+  H=chatbot.monacosolicitors.co.uk
+  K="$(ask_secret "Payload API key")"
+  code="$(http_code GET "https://$H/api/access" "Authorization: users API-Key $K")"
+  [ "$code" = 200 ] && { c_ok "  valid"; vault_and_distribute payload "ms-payload" "$H" Authorization 'users API-Key {value}' "$K"; } || c_no "  INVALID (HTTP $code) — check endpoint /api/access"
+fi
+
+# --- Strapi prod : api.monacosolicitors.grapple.uk -------------------------
+if confirm "Configure Strapi?"; then
+  H=api.monacosolicitors.grapple.uk
+  K="$(ask_secret "Strapi API token")"
+  code="$(http_code GET "https://$H/api/users/me" "Authorization: Bearer $K")"
+  { [ "$code" = 200 ] || [ "$code" = 403 ]; } && { c_ok "  token accepted (HTTP $code)"; vault_and_distribute strapi "ms-strapi" "$H" Authorization 'Bearer {value}' "$K"; } || c_no "  INVALID (HTTP $code)"
+fi
+
+# --- Xero : OAuth2 Custom Connection (identity.xero.com / api.xero.com) -----
+# Custom Connection = 2-legged client_credentials. We vault the client creds as
+# Basic on identity.xero.com; at runtime Claude POSTs the token endpoint (proxy
+# injects Basic), gets a ~30-min access_token, then calls api.xero.com with
+# Bearer + the fixed Xero-tenant-id (baked into CLAUDE.md, not a secret).
+XERO_TENANT_ID=7bb6bd0a-fccc-4421-b949-ddcdd28ece62
+if confirm "Configure Xero? (OAuth2 Custom Connection)"; then
+  CID="$(ask "Xero client_id")"; CSEC="$(ask_secret "Xero client_secret")"; BASIC="$(printf '%s:%s' "$CID" "$CSEC" | base64 -w0)"
+  # Custom Connection: request NO scope. Xero issues a token scoped to whatever the
+  # connection was granted; passing explicit scopes is filtered to empty -> invalid_scope.
+  R="$(curl -sS -m 20 -X POST https://identity.xero.com/connect/token -H "Authorization: Basic $BASIC" \
+        -H "Content-Type: application/x-www-form-urlencoded" --data-urlencode "grant_type=client_credentials" 2>/dev/null)"
+  TOK="$(printf '%s' "$R" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null || true)"
+  if [ -n "$TOK" ]; then conn="$(http_code GET https://api.xero.com/connections "Authorization: Bearer $TOK")"
+    c_ok "  OAuth token OK; /connections HTTP $conn"
+    vault_and_distribute xero "ms-xero-client" identity.xero.com Authorization 'Basic {value}' "$BASIC"
+    echo "  runtime: Claude POSTs identity.xero.com/connect/token (grant_type=client_credentials, NO scope;"
+    echo "           proxy injects Basic) -> access_token, then calls api.xero.com with"
+    echo "           'Authorization: Bearer <token>' + 'Xero-tenant-id: $XERO_TENANT_ID'."
+  else c_no "  INVALID — no token. Response: $(printf '%s' "$R" | tr -d '\n' | head -c 200)"; fi
+fi
+
+c_hd "Done"
+echo "MS secrets in vault:"; "$ONECLI" secrets list 2>/dev/null | python3 -c "
+import json,sys
+d=json.load(sys.stdin); r=d.get('data',d) if isinstance(d,dict) else d
+[print('  ',s['name'],'->',s.get('hostPattern')) for s in r if s.get('name','').startswith('ms-')] or print('  (none)')"
+echo "Tenants pick up new integrations on their next NEW Claude App session."
+echo "NOTE: wire provisioning (add-user) to auto-bind existing ms-* secrets to new tenants by role."
