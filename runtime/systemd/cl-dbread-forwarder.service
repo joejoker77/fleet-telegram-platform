@@ -1,0 +1,18 @@
+[Unit]
+Description=cl-dbread forwarder (tenant bridge gateway -> read-only DB gateway)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+# Same shape as cl-egress-forwarder: GW is the cl-net gateway IP from
+# /etc/cl-egress.env (podman-assigned subnet). Tenant pods cannot reach a service on
+# the host's loopback, so listen on the bridge gateway and forward to the gateway
+# container's 127.0.0.1:8092. Paired with an nft rule allowing the pod subnet to
+# reach tcp/10256 on the host (m9.1-dbread-gateway.sh installs both).
+EnvironmentFile=/etc/cl-egress.env
+ExecStart=/usr/bin/socat TCP-LISTEN:10256,bind=${GW},fork,reuseaddr TCP:127.0.0.1:8092
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
