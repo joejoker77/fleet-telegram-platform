@@ -24,7 +24,16 @@ if command -v onecli >/dev/null 2>&1 && onecli auth status >/dev/null 2>&1; then
 import json,sys
 d=json.load(sys.stdin); rows=d.get('data',d) if isinstance(d,dict) else d
 print(next((a['id'] for a in rows if a.get('identifier')=='${AGENT_IDENT}'),''))" 2>/dev/null || true)"
-  [ -n "$AID" ] && onecli agents delete --id "$AID" >/dev/null 2>&1 && echo "deleted agent $AID" || echo "(agent not found)"
+  # Distinguish "no such agent" from "deletion failed": the old one-liner collapsed both into
+  # "(agent not found)", which hid the fact that the shim had no agents/delete at all and every
+  # offboarding was leaving the agent behind in the vault.
+  if [ -z "$AID" ]; then
+    echo "(no agent $AGENT_IDENT — nothing to delete)"
+  elif onecli agents delete --id "$AID" >/dev/null 2>&1; then
+    echo "deleted agent $AID"
+  else
+    echo "WARN: agent $AGENT_IDENT ($AID) could NOT be deleted — remove it manually, it still exists"
+  fi
 fi
 
 echo "== remove control-plane DB rows =="

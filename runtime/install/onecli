@@ -45,6 +45,14 @@ case "$group/$action" in
     curl -fsS -X POST -H "$CT" -d "$body" "$API/api/agents"; echo
     ;;
 
+  agents/delete)
+    # deprovision-tenant.sh has always called this; the shim didn't implement it, so every
+    # offboarding silently fell through to "(agent not found)" and left the tenant's agent
+    # in the vault. Mirrors secrets/delete.
+    collect_flags "$@"; [ -n "${F[id]:-}" ] || die "agents delete needs --id"
+    curl -fsS -X DELETE "$API/api/agents/${F[id]}"; echo
+    ;;
+
   agents/secrets)
     collect_flags "$@"; [ -n "${F[id]:-}" ] || die "agents secrets needs --id"
     curl -fsS "$API/api/agents/${F[id]}/secrets"; echo
