@@ -168,8 +168,11 @@ phase_secrets() {
   # --- prompted secrets (described, then read silently) ---
   prompt_secret PLATFORM_BOT_TOKEN \
     "Telegram bot token from @BotFather for THIS deployment's bot. cp-api uses it to verify Mini App initData (HMAC) and to send approval/notification messages. A local credential (stays in a podman secret), NOT an outbound API key."
-  prompt_secret PLATFORM_OPENROUTER_KEY \
-    "OpenRouter API key for the security LLM-judge (cp-judge), which scores user-submitted MCP/skill artifacts. Event-triggered only (never on a schedule) and provider-side \$10/week capped. Format: sk-or-v1-... (no quotes)."
+  # OPTIONAL: empty => cp-judge starts dormant (no artifact scoring until a key is
+  # set later). The platform stands up fully without it; the judge only runs when a
+  # user submits an MCP/skill for review, so it is safe to defer.
+  prompt_secret_optional PLATFORM_OPENROUTER_KEY \
+    "OpenRouter API key for the security LLM-judge (cp-judge), which scores user-submitted MCP/skill artifacts. Event-triggered only (never on a schedule) and provider-side \$10/week capped. Format: sk-or-v1-... (no quotes). OPTIONAL — leave empty to stand up the platform with the judge dormant; add it later before enabling MCP/skill submissions."
 
   mk_podman_secret cp_pg_password "$PG"
   mk_podman_secret cp_jwt_secret "$JWT"
