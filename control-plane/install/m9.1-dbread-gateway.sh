@@ -96,7 +96,13 @@ esac
 # Baked in from the firm's read-only role. Overridable via env for a different project.
 DBREAD_HOST="${DBREAD_HOST:-db.jdjxlczkggckdnpeluuw.supabase.co}"
 DBREAD_PORT="${DBREAD_PORT:-5432}"
-DBREAD_DB="${DBREAD_DB:-chatbot_v3_fork_prod}"
+# The database is 'postgres'. The firm initially specified "chatbot_v3_fork_prod", but the
+# server rejects it — verified with the same credential: the only non-template database on
+# db.<ref>.supabase.co is 'postgres', and chatbot_v3_fork_prod exists neither as a database
+# nor as a schema (it appears to be the Supabase project/branch name). The data lives in
+# schemas inside 'postgres' (public, auth, storage, realtime, …), which is the standard
+# Supabase layout.
+DBREAD_DB="${DBREAD_DB:-postgres}"
 DBREAD_USER="${DBREAD_USER:-claude_readonly}"
 # Supabase mandates TLS, so 'require' is the production default. Only a local test target
 # (plain Postgres, no TLS) needs DBREAD_SSL=disable.
