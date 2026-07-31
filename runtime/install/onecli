@@ -55,13 +55,38 @@ case "$group/$action" in
 
   agents/secrets)
     collect_flags "$@"; [ -n "${F[id]:-}" ] || die "agents secrets needs --id"
-    curl -fsS "$API/api/agents/${F[id]}/secrets"; echo
+    # The vault RETIRED /agents/:id/secrets (HTTP 410 Gone) in favour of per-secret grants.
+    # Translate the grants view back into the flat id list every caller in this repo expects,
+    # so the shim stays the compatibility layer and callers need no changes.
+    curl -fsS "$API/api/agents/${F[id]}/grants" | python3 -c '
+import json,sys
+d = json.load(sys.stdin)
+print(json.dumps([s.get("secretId") for s in d.get("secrets", []) if s.get("secretId")]))'
     ;;
 
   agents/set-secrets)
     collect_flags "$@"; [ -n "${F[id]:-}" ] || die "agents set-secrets needs --id"
-    ids="$(python3 -c 'import sys,json; print(json.dumps([x for x in (sys.argv[1] if len(sys.argv)>1 else "").split(",") if x]))' "${F[secret-ids]:-}")"
-    curl -fsS -X PUT -H "$CT" -d "{\"secretIds\":$ids}" "$API/api/agents/${F[id]}/secrets"; echo
+    # PUT /agents/:id/secrets is gone (410). Rebuild REPLACE semantics on top of the
+    # per-secret grant API: grant what's missing, revoke what's no longer listed. Replace
+    # (not append) matters — the *-rollback.sh scripts pass a DELIBERATELY REDUCED list and
+    # rely on the difference being revoked. An empty list therefore revokes everything.
+    aid="${F[id]}"
+    want="$(python3 -c 'import sys; print("\n".join(x for x in (sys.argv[1] if len(sys.argv)>1 else "").replace(","," ").split() if x))' "${F[secret-ids]:-}")"
+    have="$(curl -fsS "$API/api/agents/$aid/grants" | python3 -c '
+import json,sys
+d = json.load(sys.stdin)
+print("\n".join(s.get("secretId","") for s in d.get("secrets", []) if s.get("secretId")))')"
+    rc=0
+    for s in $want; do
+      printf '%s\n' "$have" | grep -qx -- "$s" && continue
+      curl -fsS -o /dev/null -X PUT "$API/api/agents/$aid/grants/secrets/$s" || rc=1
+    done
+    for s in $have; do
+      printf '%s\n' "$want" | grep -qx -- "$s" && continue
+      curl -fsS -o /dev/null -X DELETE "$API/api/agents/$aid/grants/secrets/$s" || rc=1
+    done
+    [ "$rc" = 0 ] || die "one or more grant changes failed for agent $aid"
+    echo '{"ok":true}'
     ;;
 
   agents/set-secret-mode)

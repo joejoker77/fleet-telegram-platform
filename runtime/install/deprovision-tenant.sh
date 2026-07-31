@@ -36,6 +36,13 @@ print(next((a['id'] for a in rows if a.get('identifier')=='${AGENT_IDENT}'),''))
   fi
 fi
 
+echo "== remove the role marker =="
+# provision-tenant.sh writes /etc/claude-role/<user>, and every matrix-driven loop treats that
+# directory as the list of live tenants (onboard-integrations.sh, onboard-user-keys.sh,
+# rebind-shared-secrets.sh). Leaving it behind creates a ghost tenant that those scripts then
+# try to bind secrets for — observed after a failed onboarding.
+rm -f "/etc/claude-role/$USER_NAME" && echo "removed /etc/claude-role/$USER_NAME"
+
 echo "== remove control-plane DB rows =="
 if podman container exists cp-postgres; then
   psql_cp -c "delete from users where os_username='${USER_NAME}';" 2>&1 || true
