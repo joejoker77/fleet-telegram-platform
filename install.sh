@@ -147,6 +147,7 @@ phase_deps() {
 #   - external service API keys         → OneCLI vault (via runtime/install vault scripts)
 mk_podman_secret() { # NAME VALUE — create only if absent (dry-run: announce only)
   if [ "${DRY_RUN:-0}" = "1" ]; then info "would create podman secret '$1' (if absent)"; return 0; fi
+  if [ -z "${2:-}" ]; then info "podman secret '$1' has no value — skipping (optional; consumer treats absence as dormant)"; return 0; fi
   podman secret inspect "$1" >/dev/null 2>&1 && { info "podman secret '$1' already exists — keeping"; return 0; }
   printf '%s' "$2" | podman secret create "$1" - >/dev/null && info "created podman secret '$1'"
 }
