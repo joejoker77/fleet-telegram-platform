@@ -67,16 +67,24 @@ PY
 }
 log "add-user '$USER_NAME' (tg=$TG_ID, role=$ROLE)"
 
-# 1) Claude subscription auth token — written host-side BEFORE the pod starts so
-#    claude-pod-run injects CLAUDE_CODE_OAUTH_TOKEN on first start (else the claude
-#    session can't authenticate and the pod restart-loops). Per-seat; tenant-generated.
-log "1/6 Claude auth token"
-prompt_secret CLAUDE_CODE_OAUTH_TOKEN \
-  "Claude subscription OAuth token for THIS tenant's agent. On a machine WITH a browser, signed into THIS tenant's own Claude (Pro/Max/Team) account, run 'claude setup-token' and paste the ccat_... value. Long-lived (~1yr), per-seat — never shared across users. It lets the pod's claude authenticate headlessly."
-if [ "$DRY_RUN" != "1" ]; then
+# 1) Claude subscription auth — OPTIONAL, two supported paths:
+#    (a) headless: a per-seat OAuth token here → written host-side BEFORE the pod
+#        starts, so claude-pod-run injects CLAUDE_CODE_OAUTH_TOKEN on first start.
+#    (b) interactive (default when blank): the tenant logs in THEMSELVES with /login
+#        in the pod's tmux console; credentials land in their mounted
+#        ~/.claude/.credentials.json. claude-pod-run injects the token only when the
+#        file exists, so an absent token file is a supported state — no secret ever
+#        has to be handed to an operator. Prefer (b): the tenant's credentials stay
+#        with the tenant.
+log "1/6 Claude auth (blank = tenant logs in interactively with /login)"
+prompt_secret_optional CLAUDE_CODE_OAUTH_TOKEN \
+  "OPTIONAL Claude subscription OAuth token for THIS tenant's agent (headless auth). On a machine WITH a browser, signed into THIS tenant's own Claude account, run 'claude setup-token' and paste the ccat_... value. Long-lived (~1yr), per-seat — never shared across users. LEAVE BLANK (recommended) to have the tenant authenticate themselves: attach the pod's tmux console and run /login, which keeps their credentials in their own hands."
+if [ "$DRY_RUN" != "1" ] && [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
   install -d -m 0700 /etc/claude-auth
   umask 077; printf '%s' "$CLAUDE_CODE_OAUTH_TOKEN" > "/etc/claude-auth/$USER_NAME.token"
   chmod 600 "/etc/claude-auth/$USER_NAME.token"; info "wrote /etc/claude-auth/$USER_NAME.token"
+elif [ "$DRY_RUN" != "1" ]; then
+  info "no token supplied — tenant authenticates interactively (/login in the pod console)"
 fi
 
 # 2) provision the tenant (OS account, pod, OneCLI agent, control-plane rows)
