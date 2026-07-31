@@ -132,6 +132,22 @@ print(" ".join(r for r in m["role_order"] if roles.get(r) == scope))
 PY
 }
 
+# store_anyway <service> <secret-name> <host> <header> <fmt> <value>
+# Validation MUST NOT be a gate. Before Composio moved to a shared key it was onboarded by a
+# script that never checked the key at all — it just stored it — which is why onboarding
+# "always worked": there was nothing to fail. Keeping a hard block would make a probe we wrote
+# the reason a real credential can't be installed. So a refusal now offers to store it anyway:
+# the operator decides, the diagnosis is still printed, and the consequence is stated plainly.
+store_anyway(){
+  echo "     The key was NOT accepted by the service, but that does not have to stop you:"
+  echo "     if you are confident it is right, it can be stored as-is."
+  if confirm "     Store it anyway (calls may fail until the key is correct)?"; then
+    vault_and_distribute "$1" "$2" "$3" "$4" "$5" "$6"
+  else
+    echo "     not stored — re-run this script when you have the key you want to use"
+  fi
+}
+
 # vault_and_distribute <service> <secret-name> <host> <header> <fmt> <value> [scope]
 # Without [scope]: bind to every role entitled to <service> (ms_shared, uniform scope).
 # With [scope] (rw|read): bind ONLY to roles whose matrix scope == that value — so a
@@ -263,6 +279,7 @@ n8n_onboard(){ # $1 host  $2 secret-name  $3 label
     echo "       curl -i -H 'X-N8N-API-KEY: <key>' 'https://$H/api/v1/workflows?limit=1'"
     echo "     200 there but 401 here means something about this host; 401 in both places means"
     echo "     n8n itself is refusing the key (check it is current at Settings -> n8n API)."
+    store_anyway n8n "$name" "$H" X-N8N-API-KEY '{value}' "$K"
   fi
 }
 if confirm "Configure n8n (cloud account)?"; then n8n_onboard msgrapple.app.n8n.cloud ms-n8n-cloud cloud; fi
@@ -329,6 +346,7 @@ if confirm "Configure Strapi?"; then
       echo "     Create it in the admin panel: Settings -> API Tokens -> Create new API token"
       echo "     (Full access or a custom read token). A user JWT, the admin password or a"
       echo "     transfer token will not work here."
+      store_anyway strapi "ms-strapi" "$H" Authorization 'Bearer {value}' "$K"
     fi
   fi
 fi
@@ -369,6 +387,13 @@ if confirm "Configure Composio (external app connectors, all roles)?"; then
       echo "     the next check is on their side: is that key still active? Same test from your"
       echo "     own machine, which takes our server out of the picture:"
       echo "       curl -i -H 'x-api-key: <key>' https://backend.composio.dev/api/v3/toolkits"
+      echo "     The key was NOT accepted by Composio, but that need not stop you."
+      if confirm "     Store it anyway (calls may fail until the key is correct)?"; then
+        vault_and_distribute composio "ms-composio-api" backend.composio.dev x-api-key '{value}' "$K"
+        vault_and_distribute composio "ms-composio-mcp" mcp.composio.dev      x-api-key '{value}' "$K"
+      else
+        echo "     not stored — re-run this script when you have the key you want to use"
+      fi
     fi
   fi
 fi
