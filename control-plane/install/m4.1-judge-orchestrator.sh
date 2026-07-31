@@ -79,8 +79,15 @@ echo "  judge_verdicts ready"
 # proxy. If you skip this, cp-judge boots but real judge calls return verdict=error
 # (fail-closed) until the key is set; the stub acceptance below still passes.
 if ! podman secret inspect "$OR_SECRET" >/dev/null 2>&1; then
-  printf 'Paste the OpenRouter judge key ($10/wk-capped) [Enter to skip]: ' >&2
-  read -rs OR_KEY; echo >&2
+  # Key may come from the environment (installer passes PLATFORM_OPENROUTER_KEY).
+  # Only fall back to an interactive prompt when there is a real TTY and we are NOT
+  # in a --yes/non-interactive run — otherwise (e.g. driven over ssh with no tty)
+  # skip silently so the judge stays dormant instead of hanging / EOF-aborting.
+  OR_KEY="${PLATFORM_OPENROUTER_KEY:-${OR_KEY:-}}"
+  if [ -z "${OR_KEY:-}" ] && [ "${ASSUME_YES:-0}" != "1" ] && [ -t 0 ]; then
+    printf 'Paste the OpenRouter judge key ($10/wk-capped) [Enter to skip]: ' >&2
+    read -rs OR_KEY || true; echo >&2
+  fi
   if [ -n "${OR_KEY:-}" ]; then
     printf '%s' "$OR_KEY" | podman secret create "$OR_SECRET" - >/dev/null
     unset OR_KEY
