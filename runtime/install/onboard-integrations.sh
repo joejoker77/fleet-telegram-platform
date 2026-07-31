@@ -11,8 +11,9 @@
 # says OK, and moves on. All prompts are in English.
 #
 # The egress proxy injects the right header at runtime; the Claude process never
-# sees the raw key. (Exa is NOT here — it is already provisioned per-tenant at
-# user creation as <user>-exa-api on mcp.exa.ai.)
+# sees the raw key. Which services appear here is decided by key_type in
+# role-matrix.json: ms_shared services are asked for below; per_user ones (each
+# tenant supplies their own) are skipped here and prompted by add-user.sh instead.
 #
 #   sudo ./onboard-integrations.sh
 #
@@ -234,6 +235,33 @@ if confirm "Configure Strapi?"; then
   K="$(ask_secret "Strapi API token")"
   code="$(http_code GET "https://$H/api/users/me" "Authorization: Bearer $K")"
   { [ "$code" = 200 ] || [ "$code" = 403 ]; } && { c_ok "  token accepted (HTTP $code)"; vault_and_distribute strapi "ms-strapi" "$H" Authorization 'Bearer {value}' "$K"; } || c_no "  INVALID (HTTP $code)"
+fi
+
+# --- Exa : mcp.exa.ai -------------------------------------------------------
+# One firm Exa key for everyone (all roles have Exa). Validated against the REST
+# API (api.exa.ai) because mcp.exa.ai speaks MCP, not a probe-able REST surface;
+# the vaulted secret is bound for mcp.exa.ai, which is what the Exa MCP tools hit.
+if confirm "Configure Exa (web search, all roles)?"; then
+  K="$(ask_secret "Exa API key")"
+  code="$(http_code POST "https://api.exa.ai/search" "x-api-key: $K" --data '{"query":"connectivity check","numResults":1}')"
+  [ "$code" = 200 ] && { c_ok "  valid"; vault_and_distribute exa "ms-exa-api" mcp.exa.ai x-api-key '{value}' "$K"; } || c_no "  INVALID (HTTP $code)"
+fi
+
+# --- Composio : backend.composio.dev + mcp.composio.dev ---------------------
+# ONE firm platform key, bound to every role. Per-user privacy is preserved by
+# Composio itself: each tenant's connected accounts (their own Gmail/Slack/…) are
+# isolated by user_id = that tenant's Telegram chat_id. A shared API key is NOT a
+# shared mailbox — do not describe it as a shared account anywhere.
+# Two secrets because OneCLI host-matching is exact-host and both hosts are used:
+# backend.composio.dev (REST/connection management) + mcp.composio.dev (MCP tools).
+if confirm "Configure Composio (external app connectors, all roles)?"; then
+  K="$(ask_secret "Composio platform API key")"
+  code="$(http_code GET "https://backend.composio.dev/api/v3/toolkits" "x-api-key: $K")"
+  if [ "$code" = 200 ]; then
+    c_ok "  valid"
+    vault_and_distribute composio "ms-composio-api" backend.composio.dev x-api-key '{value}' "$K"
+    vault_and_distribute composio "ms-composio-mcp" mcp.composio.dev      x-api-key '{value}' "$K"
+  else c_no "  INVALID (HTTP $code)"; fi
 fi
 
 # --- Xero : OAuth2 Custom Connection (identity.xero.com / api.xero.com) -----

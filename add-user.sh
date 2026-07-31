@@ -65,6 +65,24 @@ except Exception: sys.exit(1)   # can't verify -> don't offer (fail-closed)
 sys.exit(0 if sys.argv[2] in (m.get("services", {}).get(sys.argv[3], {}).get("roles", {})) else 1)
 PY
 }
+
+# svc_per_user <service> — true iff role-matrix.json marks <service> key_type=per_user.
+# Per-user services are the ONLY ones prompted here; ms_shared ones are onboarded once by
+# an admin via onboard-integrations.sh. Reading key_type from the matrix (instead of
+# hardcoding the list) is what keeps this script from drifting out of sync with it — a
+# service can be flipped between the two models by editing role-matrix.json alone.
+svc_per_user() {
+  python3 - "$RT_INSTALL/role-matrix.json" "$1" <<'PY'
+import json, sys
+try: m = json.load(open(sys.argv[1]))
+except Exception: sys.exit(1)   # can't verify -> don't prompt (the shared path can still bind)
+sys.exit(0 if m.get("services", {}).get(sys.argv[2], {}).get("key_type") == "per_user" else 1)
+PY
+}
+
+# offer_own_key <service> — prompt this tenant for their own key only when the matrix says
+# the service is per_user AND this role is entitled to it.
+offer_own_key() { svc_per_user "$1" && role_entitled "$ROLE" "$1"; }
 log "add-user '$USER_NAME' (tg=$TG_ID, role=$ROLE)"
 
 # 1) Claude subscription auth — OPTIONAL, two supported paths:
@@ -104,19 +122,21 @@ if [ "$DRY_RUN" != "1" ]; then
 fi
 
 # 3) bind platform integration keys to THIS tenant's OneCLI agent.
-#    Firm per-user services (Exa/Composio/OpenRouter/Pipedrive) are offered ONLY if this role
-#    is entitled per role-matrix.json — so a tenant can't stage a firm-service key its role
-#    isn't allowed. GitHub PAT (skill/marketplace publishing) + ElevenLabs (voice STT) are
-#    platform utilities, not firm-data services → offered to everyone. Blank = skip.
+#    Only services the matrix marks key_type=per_user are asked for here, and only when this
+#    role is entitled to them — so a tenant can neither stage a key its role isn't allowed nor
+#    be asked for a service the firm supplies centrally (Supabase/Payload/Rota/Strapi/n8n/
+#    Xero/Exa/Composio come from onboard-integrations.sh). GitHub PAT (skill/marketplace
+#    publishing) + ElevenLabs (voice STT) are platform utilities, not firm-data services →
+#    offered to everyone regardless of the matrix. Blank = skip.
 log "4/6 integrations (bind to ${USER_NAME}-bot, role=$ROLE)"
 EXA_API_KEY=""; COMPOSIO_API_KEY=""; OPENROUTER_KEY=""; PIPEDRIVE_TOKEN=""
-if role_entitled "$ROLE" exa; then prompt_secret_optional EXA_API_KEY \
+if offer_own_key exa; then prompt_secret_optional EXA_API_KEY \
   "Exa API key (web-search / deep-research). Staged as ${USER_NAME}-exa-api (x-api-key @ mcp.exa.ai). Blank to skip."; fi
-if role_entitled "$ROLE" composio; then prompt_secret_optional COMPOSIO_API_KEY \
+if offer_own_key composio; then prompt_secret_optional COMPOSIO_API_KEY \
   "Composio platform API key (external-app connectors). Staged as ${USER_NAME}-composio-api/-mcp. Blank to skip."; fi
-if role_entitled "$ROLE" openrouter; then prompt_secret_optional OPENROUTER_KEY \
+if offer_own_key openrouter; then prompt_secret_optional OPENROUTER_KEY \
   "OpenRouter API key (LLM gateway / voice fallback). Staged as ${USER_NAME}-openrouter-api (Authorization: Bearer @ openrouter.ai). Blank to skip."; fi
-if role_entitled "$ROLE" pipedrive; then prompt_secret_optional PIPEDRIVE_TOKEN \
+if offer_own_key pipedrive; then prompt_secret_optional PIPEDRIVE_TOKEN \
   "Pipedrive personal API token for the firm CRM (monacosolicitors2.pipedrive.com). Staged as ${USER_NAME}-pipedrive (x-api-token). Blank to skip."; fi
 prompt_secret_optional GITHUB_PAT \
   "GitHub PAT for skill/MCP sharing + marketplace. Staged as ${USER_NAME}-git-fleet-platform (git @ github.com) AND ${USER_NAME}-github-github_pat (REST @ api.github.com, for marketplace publish). Blank to skip."

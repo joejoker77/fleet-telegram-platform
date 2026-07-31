@@ -9,6 +9,12 @@
     "  - provision-tenant.sh assembles CLAUDE.md via render-access-block.sh, so it inherits this.",
     "So the CLAUDE.md doc, the vault bindings, and the onboarding gate can never diverge.",
     "key_type: ms_shared = one firm key distributed by role; per_user = each user supplies own.",
+    "  ms_shared services are onboarded ONCE by an admin (onboard-integrations.sh); per_user",
+    "  services are prompted per tenant in add-user.sh. Both read key_type from HERE, so",
+    "  flipping a service between the two models needs NO code change.",
+    "  NOTE on Composio: the API key is ms_shared (one firm platform key), but each user's",
+    "  CONNECTED ACCOUNTS stay private -- Composio isolates them by user_id (= the tenant's",
+    "  Telegram chat_id). Shared key != shared mailbox; never document it as a shared account.",
     "roles.<role>: rw = full; read = read-only (must be backed by a real read-scoped key/RLS,",
     "  else the read restriction is not enforced -- see supabase/basic)."
   ],
@@ -23,7 +29,7 @@
     "n8n":        { "label": "n8n (cloud + self-hosted)", "key_type": "ms_shared", "hosts": ["msgrapple.app.n8n.cloud", "n8n.monacosolicitors.co.uk"], "roles": { "admin": "rw", "manager": "rw" } },
     "openrouter": { "label": "OpenRouter",        "key_type": "per_user",  "hosts": ["openrouter.ai"], "roles": { "admin": "rw", "manager": "rw" } },
     "exa":        { "label": "Exa",               "key_type": "ms_shared", "hosts": ["mcp.exa.ai"], "roles": { "admin": "rw", "manager": "rw", "finance": "rw", "basic": "rw" } },
-    "composio":   { "label": "Composio",          "key_type": "per_user",  "hosts": ["mcp.composio.dev", "backend.composio.dev"], "roles": { "admin": "rw", "manager": "rw", "finance": "rw", "basic": "rw" } },
+    "composio":   { "label": "Composio",          "key_type": "ms_shared", "hosts": ["mcp.composio.dev", "backend.composio.dev"], "roles": { "admin": "rw", "manager": "rw", "finance": "rw", "basic": "rw" } },
     "xero":       { "label": "Xero",              "key_type": "ms_shared", "hosts": ["api.xero.com", "identity.xero.com"], "roles": { "admin": "rw", "manager": "rw", "finance": "rw" } }
   }
 }

@@ -56,7 +56,11 @@ howreach() { # $1=service $2=key_type
   esac; }
 
 # credential-model reminder (printed once, above the per-service detail)
+# $1 = comma-separated labels of this role's per_user services (may be empty). Derived from
+# the matrix by the caller, never hardcoded — a service flipped between shared and per-user
+# must not leave stale prose behind claiming the wrong credential model.
 cred_note() {
+  local own="${1:-}"
   cat <<'MD'
 ### How to actually call each system
 
@@ -65,14 +69,18 @@ credential lives in the encrypted vault and the egress proxy **injects the right
 automatically** on that service's host. So you just `curl` (or fetch) the real endpoint and
 the request comes back authenticated — the key never touches your process, files, or shell
 history. (Exa and Composio are used through their own tools, not raw `curl`.)
-
-**If a call returns 401/403 or "unauthorized":** that credential isn't in the vault yet. Do
-NOT fall back to Composio for a firm system. Tell the user which service needs its key — for
-firm-wide services an administrator adds it once; for your-own-key services (Pipedrive,
-OpenRouter, Composio) you add yours via the onboarding step — then retry the exact same call.
-You can't list the vault; just try the call, and a 401 means "not set yet".
-
 MD
+  echo
+  echo "**If a call returns 401/403 or \"unauthorized\":** that credential isn't in the vault yet. Do"
+  echo "NOT fall back to Composio for a firm system. Tell the user which service needs its key — for"
+  if [ -n "$own" ]; then
+    echo "firm-wide services an administrator adds it once; for your-own-key services ($own) you add"
+    echo "yours via the onboarding step — then retry the exact same call."
+  else
+    echo "every service below an administrator adds the firm key once — then retry the exact same call."
+  fi
+  echo "You can't list the vault; just try the call, and a 401 means \"not set yet\"."
+  echo
 }
 
 # per-service concrete how-to (presentation; emitted only for entitled services)
@@ -197,7 +205,18 @@ if [ "$ROLE" = admin ]; then
   echo "You are also an administrator (host-root via \`host-sudo\`) — see the **Host admin capability** section below."
 fi
 echo
-cred_note
+# labels of the per_user services this role actually has — feeds the credential-model prose.
+# NB: use if/fi, not `[ ] && printf` — under `set -e` a false test on the LAST row makes the
+# loop (and this whole assignment) exit non-zero, which silently truncated the rendered block.
+OWN_LABELS="$(while IFS="$(printf '\t')" read -r svc scope ktype label; do
+  [ -n "${svc:-}" ] || continue
+  if [ "$ktype" = per_user ]; then printf '%s, ' "$label"; fi
+done <<EOF
+$ROWS
+EOF
+)"
+OWN_LABELS="${OWN_LABELS%, }"
+cred_note "$OWN_LABELS"
 while IFS="$(printf '\t')" read -r svc scope ktype label; do
   [ -n "${svc:-}" ] || continue
   detail "$svc" "$scope"
