@@ -238,10 +238,12 @@ n8n_onboard(){ # $1 host  $2 secret-name  $3 label
     c_ok "  valid"; vault_and_distribute n8n "$name" "$H" X-N8N-API-KEY '{value}' "$K"
   else
     c_no "  REFUSED (HTTP $PROBE_CODE) — not vaulted: $PROBE_BODY"
-    echo "     The endpoint itself is fine (without a key it answers 401 \"'X-N8N-API-KEY' header"
-    echo "     required\"), so the key is what n8n rejected. Create it in n8n at Settings ->"
-    echo "     n8n API -> Create an API key, and copy the whole value. Note keys can be given an"
-    echo "     expiry, and the Public API must be enabled on the plan."
+    echo "     n8n read the header and rejected the VALUE (anonymous requests get a different"
+    echo "     error: \"'X-N8N-API-KEY' header required\"). Two things to check, in this order:"
+    echo "       1. Each n8n instance issues its OWN key. A key from the cloud account is not"
+    echo "          valid on the self-hosted one, or vice versa — get this key from $H itself."
+    echo "       2. Settings -> n8n API -> Create an API key. Keys may carry an expiry date, and"
+    echo "          the Public API has to be enabled on the plan."
   fi
 }
 if confirm "Configure n8n (cloud account)?"; then n8n_onboard msgrapple.app.n8n.cloud ms-n8n-cloud cloud; fi
@@ -277,18 +279,37 @@ if confirm "Configure Strapi?"; then
   K="$(ask_secret "Strapi API token (Settings -> API Tokens in the admin panel)")"
   if [ -z "$K" ]; then c_no "  empty — skipped"
   else
-    # This Strapi answers 403 to an ANONYMOUS request and 401 to a token it doesn't recognise,
-    # so 200/403 means the token was accepted (an API token legitimately can't use the
-    # users-permissions /me route) while 401 means it was rejected.
-    http_probe GET "https://$H/api/users/me" "Authorization: Bearer $K"
-    if [ "$PROBE_CODE" = 200 ] || [ "$PROBE_CODE" = 403 ]; then
-      c_ok "  token accepted (HTTP $PROBE_CODE)"
+    # Distinguishing a good API token from a bad one on Strapi needs care — measured against
+    # this instance:
+    #   anonymous                      -> 403 Forbidden
+    #   unrecognised token             -> 401 "Missing or invalid credentials"
+    #   valid ADMIN-PANEL API token     -> 401 "Unauthorized" on /api/users/me, because that
+    #                                      route wants a USER session and an API token has no
+    #                                      user attached. It is NOT a bad token.
+    # So probe a route an API token may actually use, and treat /api/users/me's "Unauthorized"
+    # as success. Judging /api/users/me by status code alone rejects perfectly good tokens.
+    ok=""
+    http_probe GET "https://$H/api/upload/files" "Authorization: Bearer $K"
+    case "$PROBE_CODE" in 200|403) ok="upload/files=$PROBE_CODE" ;; esac
+    if [ -z "$ok" ]; then
+      http_probe GET "https://$H/api/users/me" "Authorization: Bearer $K"
+      case "$PROBE_CODE" in
+        200|403) ok="users/me=$PROBE_CODE" ;;
+        401) case "$PROBE_BODY" in
+               *"Missing or invalid credentials"*) ok="" ;;
+               *) ok="users/me=401 (recognised token, route needs a user session)" ;;
+             esac ;;
+      esac
+    fi
+    if [ -n "$ok" ]; then
+      c_ok "  token accepted ($ok)"
       vault_and_distribute strapi "ms-strapi" "$H" Authorization 'Bearer {value}' "$K"
     else
       c_no "  REFUSED (HTTP $PROBE_CODE) — not vaulted: $PROBE_BODY"
-      echo "     Anonymous requests to this route get 403, so 401 means Strapi did not recognise"
-      echo "     the token. It must be an API token from the admin panel (Settings -> API Tokens"
-      echo "     -> Create new API token), not a user JWT and not the admin login password."
+      echo "     Strapi reports the token itself as unknown (\"Missing or invalid credentials\")."
+      echo "     Create it in the admin panel: Settings -> API Tokens -> Create new API token"
+      echo "     (Full access or a custom read token). A user JWT, the admin password or a"
+      echo "     transfer token will not work here."
     fi
   fi
 fi
@@ -321,10 +342,13 @@ if confirm "Configure Composio (external app connectors, all roles)?"; then
       vault_and_distribute composio "ms-composio-mcp" mcp.composio.dev      x-api-key '{value}' "$K"
     else
       c_no "  REFUSED (HTTP $PROBE_CODE) — not vaulted: $PROBE_BODY"
-      echo "     The path is current (anonymous requests get 401 \"No authentication provided\";"
-      echo "     the older /api/v1/* endpoints are 410 Gone), so this is the key. Take it from the"
-      echo "     Composio dashboard under API Keys — a project/organisation key, not an OAuth"
-      echo "     client secret and not a per-app connection id."
+      echo "     Composio echoes the key it received in masked form above — if that matches the"
+      echo "     key you meant to paste, it arrived intact and Composio itself does not accept it."
+      echo "     Then check in the dashboard that this exact key is still ACTIVE (not rotated or"
+      echo "     revoked) and that it belongs to the project/organisation whose toolkits we should"
+      echo "     see. API keys are project-scoped, so a key from another project authenticates"
+      echo "     nowhere useful. Take it from API Keys — not an OAuth client secret, not a"
+      echo "     connection id."
     fi
   fi
 fi
