@@ -43,6 +43,20 @@ USER_NAME="${POS[0]:?usage: add-user.sh <os_user> <telegram_id> [--is-admin]}"
 TG_ID="${POS[1]:?telegram_id required (the tenant Telegram numeric user id)}"
 [ "$DRY_RUN" = "1" ] || require_root
 
+# Validate the login BEFORE anything is created. Two independent constraints meet here:
+# useradd's NAME_REGEX (lowercase, must not start with a digit) and OneCLI's agent
+# identifier, which accepts dashes but REJECTS underscores with HTTP 400 (proven on the
+# live vault: 'probe-dash-bot' created, 'probe_underscore-bot' refused). Without this check
+# an underscore login half-provisions — OS account, DB rows and CLAUDE.md are created, then
+# the agent step aborts, leaving a tenant with no bot token and a dead pod.
+case "$USER_NAME" in
+  [a-z]*) ;;
+  *) die "invalid login '$USER_NAME': must start with a lowercase letter" ;;
+esac
+case "$USER_NAME" in
+  *[!a-z0-9-]*) die "invalid login '$USER_NAME': only lowercase letters, digits and '-' are allowed (OneCLI rejects '_' in agent identifiers, and useradd rejects uppercase). Try '$(printf '%s' "$USER_NAME" | tr '_' '-' | tr '[:upper:]' '[:lower:]')'." ;;
+esac
+
 onecli_secret_exists() {
   command -v /usr/local/bin/onecli >/dev/null 2>&1 || return 1
   HOME=/root /usr/local/bin/onecli secrets list 2>/dev/null | grep -q "\"name\"[: ]*\"$1\""
