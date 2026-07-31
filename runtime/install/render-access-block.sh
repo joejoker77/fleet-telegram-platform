@@ -12,6 +12,17 @@ ROLE="${1:?usage: render-access-block.sh <admin|manager|finance|basic>}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 MATRIX="${ROLE_MATRIX_JSON:-$HERE/role-matrix.json}"
 
+# Address tenants use for the read-only DB gateway (read tier of Supabase). Taken from the
+# live cl-net gateway so the rendered doc carries the real address; podman assigns that subnet,
+# so it must not be hardcoded. Falls back to the usual value when rendering off-host (e.g. to
+# preview a role), since this is documentation text, not a runtime lookup.
+DBREAD_PORT_DEFAULT=10256
+if [ -f /etc/cl-egress.env ]; then
+  # shellcheck disable=SC1091
+  . /etc/cl-egress.env
+fi
+DBREAD_ENDPOINT="${GW:-10.89.2.1}:${DBREAD_PORT_DEFAULT}"
+
 if [ ! -f "$MATRIX" ]; then
   echo '<!-- BEGIN ROLE-ACCESS -->'
   echo "## Your access (role: $ROLE) — matrix file missing; ask an administrator."
@@ -48,10 +59,14 @@ whatis() { case "$1" in
   *)          echo "-";;
 esac; }
 
-howreach() { # $1=service $2=key_type
+howreach() { # $1=service $2=key_type $3=scope
   case "$1" in
     exa)      echo '`mcp__exa__*` tools';;
     composio) echo "one-click connect (your own account)";;
+    # Supabase read tier goes through the host SQL gateway, not the REST API — a Supabase
+    # secret key bypasses RLS and so cannot be made read-only.
+    supabase) if [ "${3:-}" = read ]; then echo "SQL via the read-only DB gateway"
+              else echo "direct REST, key auto-injected"; fi;;
     *) if [ "$2" = per_user ]; then echo "direct REST, your own key (auto-injected)"; else echo "direct REST, key auto-injected"; fi;;
   esac; }
 
@@ -86,14 +101,43 @@ MD
 # per-service concrete how-to (presentation; emitted only for entitled services)
 detail() { local scope="${2:-rw}"
   case "$1" in
-    supabase) cat <<MD
+    supabase)
+      if [ "$scope" = read ]; then
+        # Read tier = the read-only PostgreSQL role behind the host gateway, NOT the REST
+        # API: a Supabase secret key bypasses RLS and so cannot be made read-only. The
+        # gateway address is baked in from the live bridge gateway at provision time.
+        cat <<MD
+#### Supabase — the firm's database (read-only SQL)
+- You reach it by **sending SQL to the firm's read-only database gateway**, not through the
+  REST API. The credential behind it is a PostgreSQL login that physically cannot write.
+- **Endpoint:** \`POST http://${DBREAD_ENDPOINT}/query\`
+- **Auth:** \`Authorization: Bearer \$(cat ~/.claude/dbread.token)\` — your own token.
+- **Body:** \`{"sql": "...", "params": [...]}\` — one statement, use \`\$1\`/\`\$2\` placeholders
+  for values rather than pasting them into the SQL.
+- **Example:**
+  \`\`\`
+  curl -s -X POST http://${DBREAD_ENDPOINT}/query \\
+    -H "Authorization: Bearer \$(cat ~/.claude/dbread.token)" \\
+    -H 'Content-Type: application/json' \\
+    -d '{"sql":"select id, created_at from conversations where user_id = \$1 limit 20","params":["123"]}'
+  \`\`\`
+- Returns \`{"rows":[…],"rowCount":N,"truncated":bool}\`. Results are capped, so add
+  \`limit\`/filters; \`truncated: true\` means there was more.
+- ⚠️ **Read-only, and enforced** — only SELECT / WITH / EXPLAIN / SHOW / TABLE / VALUES are
+  accepted, and the database itself refuses writes. Don't try to insert or update: report to
+  the user that your access is read-only instead.
+- ⚠️ Shared with **Grapple** — only ever read **Monaco Solutions** data.
+MD
+      else
+        cat <<MD
 #### Supabase — the firm's database (PostgREST + Auth)
 - **Base URL:** \`https://jdjxlczkggckdnpeluuw.supabase.co/rest/v1/\` (prod).
 - **Auto-injected auth:** \`apikey\` **and** \`Authorization: Bearer\` (both, on this host).
 - **Example (read rows):** \`curl "https://jdjxlczkggckdnpeluuw.supabase.co/rest/v1/<table>?select=*&limit=5"\`
-- PostgREST — filter with \`?col=eq.value\`; write with \`-X POST/PATCH\` + JSON body.$([ "$scope" = read ] && printf '\n- ⚠️ **Your access is READ-ONLY** — do not attempt inserts/updates/deletes.')
+- PostgREST — filter with \`?col=eq.value\`; write with \`-X POST/PATCH\` + JSON body.
 - ⚠️ Shared with **Grapple** — only ever read/write **Monaco Solutions** data.
 MD
+      fi
     ;;
     pipedrive) cat <<'MD'
 #### Pipedrive — CRM (client details, lawyers' work, automated emails)
@@ -195,7 +239,7 @@ echo "|---|---|---|"
 while IFS="$(printf '\t')" read -r svc scope ktype label; do
   [ -n "${svc:-}" ] || continue
   note=""; [ "$scope" = read ] && note=" — **read only**"
-  echo "| **${label}**${note} | $(whatis "$svc") | $(howreach "$svc" "$ktype") |"
+  echo "| **${label}**${note} | $(whatis "$svc") | $(howreach "$svc" "$ktype" "$scope") |"
 done <<EOF
 $ROWS
 EOF

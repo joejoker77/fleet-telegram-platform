@@ -144,12 +144,15 @@ echo "For each service: y to configure, Enter to skip. The credential is validat
 echo "against the live service before it is stored. Nothing is written on failure."
 
 # --- Supabase (prod) : jdjxlczkggckdnpeluuw.supabase.co --------------------
-# TWO keys by role scope: a READ/WRITE service_role key for rw roles (admin/manager), and a
-# READ-ONLY credential for read roles (basic). Each is bound ONLY to the roles whose matrix
-# scope matches, so a read role physically cannot write (the injected key is itself read-only).
-# The read-only key must be genuinely read-only ON SUPABASE'S SIDE (anon key + RLS that allows
-# only SELECT, or a read-scoped Postgres role / JWT) — this script only vaults + distributes
-# whatever key you give it; it does not make a key read-only.
+# TWO DIFFERENT MECHANISMS, because a Supabase secret key cannot be made read-only (it
+# bypasses RLS):
+#   rw roles (admin/manager) -> the service_role API key, vaulted and injected as a header
+#     on the REST host, exactly like every other firm service.
+#   read roles (basic)       -> NOT an API key. The firm issued a real read-only PostgreSQL
+#     login (claude_readonly: no write grants, default_transaction_read_only=on). A libpq
+#     credential can't be proxy-injected, and a pod must never hold a database password, so
+#     it is installed into the host-side read-only gateway (cp-dbread) and tenants query
+#     over HTTP. See control-plane/install/m9.1-dbread-gateway.sh.
 if confirm "Configure Supabase?"; then
   H=jdjxlczkggckdnpeluuw.supabase.co
   # 1) read/write (service_role) -> rw roles (admin, manager)
@@ -159,15 +162,35 @@ if confirm "Configure Supabase?"; then
     vault_and_distribute supabase "ms-supabase"      "$H" apikey        '{value}'        "$Krw" rw
     vault_and_distribute supabase "ms-supabase-auth" "$H" Authorization 'Bearer {value}'  "$Krw" rw
   else c_no "  rw key INVALID (HTTP $code) — not vaulted"; fi
-  # 2) read-only -> read roles (basic). If you don't have one yet, skip: basic then simply has
-  #    NO Supabase until it's provided (fail-safe — never falls back to the rw key).
-  if confirm "  Configure a READ-ONLY Supabase key now (for basic)?"; then
-    Kro="$(ask_secret "Supabase READ-ONLY key (anon+RLS, or a read-scoped role/JWT)")"
-    code="$(http_code GET "https://$H/rest/v1/" "apikey: $Kro" "Authorization: Bearer $Kro")"
-    if [ "$code" = 200 ] || [ "$code" = 404 ]; then c_ok "  read-only key valid (HTTP $code)"
-      vault_and_distribute supabase "ms-supabase-read"      "$H" apikey        '{value}'        "$Kro" read
-      vault_and_distribute supabase "ms-supabase-read-auth" "$H" Authorization 'Bearer {value}'  "$Kro" read
-    else c_no "  read-only key INVALID (HTTP $code) — not vaulted"; fi
+
+  # 2) read tier -> the read-only PostgreSQL role behind the gateway. Skipping is fail-safe:
+  #    read roles then simply have NO database access (they never fall back to the rw key).
+  if confirm "  Configure the READ-ONLY database access now (PostgreSQL role, for basic)?"; then
+    GW_INSTALL="$(cd "$HERE/../.." && pwd)/control-plane/install/m9.1-dbread-gateway.sh"
+    if [ ! -x "$GW_INSTALL" ] && [ ! -f "$GW_INSTALL" ]; then
+      c_no "  gateway installer not found at $GW_INSTALL — skipped"
+    else
+      echo "  This is the PostgreSQL login (default: claude_readonly on chatbot_v3_fork_prod),"
+      echo "  NOT a Supabase API key. The password goes straight into a podman secret on this"
+      echo "  host; it is never written to a file and never reaches a tenant container."
+      DBP="$(ask_secret "Password for the read-only PostgreSQL role")"
+      if [ -z "$DBP" ]; then c_no "  empty — skipped"
+      else
+        if DBREAD_PASSWORD="$DBP" bash "$GW_INSTALL" >/tmp/dbread-install.log 2>&1; then
+          c_ok "  read-only gateway up (details: /tmp/dbread-install.log)"
+          # Grant a token to every existing tenant the matrix entitles to Supabase. The
+          # gateway re-checks the role on every request, so this only hands out what the
+          # matrix already allows; tenants added later are granted by add-user.sh.
+          for t in $(tenants_for_role "${ROLES[supabase]}"); do
+            bash "$GW_INSTALL" --grant "$t" >/dev/null 2>&1 && echo "   - $t ✓" || c_no "   - $t grant FAILED"
+          done
+          c_ok "  distributed DB read access per matrix [${ROLES[supabase]}]"
+        else
+          c_no "  gateway install FAILED — see /tmp/dbread-install.log"; tail -5 /tmp/dbread-install.log
+        fi
+        unset DBP
+      fi
+    fi
   fi
 fi
 

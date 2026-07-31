@@ -161,6 +161,23 @@ _bind m-key-vault.sh "${OPENROUTER_KEY:-}" "${USER_NAME}-openrouter-api"     ope
 _bind m-key-vault.sh "${PIPEDRIVE_TOKEN:-}" "${USER_NAME}-pipedrive"         pipedrive         monacosolicitors2.pipedrive.com x-api-token "{value}"
 _bind m-key-vault.sh "${ELEVENLABS_KEY:-}" "${USER_NAME}-elevenlabs-api"     elevenlabs-api    api.elevenlabs.io xi-api-key   "{value}"
 
+# 4b) database read access, if the read-only gateway is installed and this role is entitled.
+#     The firm's read tier is a PostgreSQL role behind cp-dbread (a Supabase secret key can't
+#     be read-only), so entitlement is granted with a token rather than a vaulted header. This
+#     runs here so a tenant onboarded AFTER the shared services still gets access without
+#     re-running the whole integrations script.
+GW_INSTALL="$RT_INSTALL/../../control-plane/install/m9.1-dbread-gateway.sh"
+if [ -f "$GW_INSTALL" ] && role_entitled "$ROLE" supabase; then
+  if [ "$DRY_RUN" = "1" ]; then info "would grant DB read access to $USER_NAME (role $ROLE is entitled)"
+  elif podman container exists cp-dbread 2>/dev/null; then
+    bash "$GW_INSTALL" --grant "$USER_NAME" >/dev/null 2>&1 \
+      && info "granted DB read access (cp-dbread token)" \
+      || warn "could not grant DB read access — run: bash $GW_INSTALL --grant $USER_NAME"
+  else
+    info "cp-dbread not installed — no DB read access yet (set it up via onboard-integrations.sh)"
+  fi
+fi
+
 # 5) admin tier (host-sudo broker) if requested
 if [ "$IS_ADMIN" = "1" ]; then
   log "5/6 admin tier (host-sudo broker)"
