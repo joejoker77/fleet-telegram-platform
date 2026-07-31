@@ -64,8 +64,22 @@ tenants_for_role(){ # $1 = space-separated allowed roles -> prints tenant names
 
 # ---- helpers ---------------------------------------------------------------
 confirm(){ local a; read -rp "$1 [y/N]: " a; [ "$a" = y ] || [ "$a" = Y ]; }
-ask(){ local v; read -rp "  $1: " v; printf '%s' "$v"; }
-ask_secret(){ local v; read -rsp "  $1: " v; echo >&2; printf '%s' "$v"; }
+# Trim surrounding whitespace and CR from pasted values. Copying a key out of a browser, a
+# password manager or an RDP session very often carries a trailing space or \r, which then
+# travels INTO the injected header and makes the service answer 401 — indistinguishable from a
+# genuinely wrong key. Cheap to remove, expensive to debug.
+trim(){ printf '%s' "$1" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
+ask(){ local v; read -rp "  $1: " v; trim "$v"; }
+ask_secret(){ local v; read -rsp "  $1: " v; echo >&2; trim "$v"; }
+
+# http_probe METHOD URL [HEADERS...] — like http_code but also keeps the response body in
+# PROBE_BODY, so a refusal can quote what the service actually said. Call it directly (not in a
+# command substitution) or PROBE_BODY is lost with the subshell.
+PROBE_BODY=""; PROBE_CODE=""
+http_probe(){ local m="$1" url="$2"; shift 2; local args=(-sS -o /tmp/.probe.$$ -w '%{http_code}' -m 20 -X "$m")
+  while [ $# -gt 0 ]; do args+=(-H "$1"); shift; done
+  PROBE_CODE="$(curl "${args[@]}" "$url" 2>/dev/null || echo 000)"
+  PROBE_BODY="$(head -c 200 "/tmp/.probe.$$" 2>/dev/null | tr -d '\n')"; rm -f "/tmp/.probe.$$"; }
 
 http_code(){ local m="$1" url="$2"; shift 2; local args=(-sS -o /dev/null -w '%{http_code}' -m 20 -X "$m") data=""
   while [ $# -gt 0 ]; do case "$1" in --data) data="$2"; shift 2;; *) args+=(-H "$1"); shift;; esac; done
@@ -215,18 +229,23 @@ elif confirm "Configure Pipedrive?"; then
 fi
 
 # --- n8n : two production accounts (cloud + self-hosted) --------------------
-if confirm "Configure n8n (cloud account)?"; then
-  H=msgrapple.app.n8n.cloud
-  K="$(ask_secret "n8n cloud API key")"
-  code="$(http_code GET "https://$H/api/v1/workflows?limit=1" "X-N8N-API-KEY: $K")"
-  [ "$code" = 200 ] && { c_ok "  valid"; vault_and_distribute n8n "ms-n8n-cloud" "$H" X-N8N-API-KEY '{value}' "$K"; } || c_no "  INVALID (HTTP $code)"
-fi
-if confirm "Configure n8n (self-hosted account)?"; then
-  H=n8n.monacosolicitors.co.uk
-  K="$(ask_secret "n8n self-hosted API key")"
-  code="$(http_code GET "https://$H/api/v1/workflows?limit=1" "X-N8N-API-KEY: $K")"
-  [ "$code" = 200 ] && { c_ok "  valid"; vault_and_distribute n8n "ms-n8n-selfhosted" "$H" X-N8N-API-KEY '{value}' "$K"; } || c_no "  INVALID (HTTP $code)"
-fi
+n8n_onboard(){ # $1 host  $2 secret-name  $3 label
+  local H="$1" name="$2" K
+  K="$(ask_secret "n8n $3 API key")"
+  [ -n "$K" ] || { c_no "  empty — skipped"; return 0; }
+  http_probe GET "https://$H/api/v1/workflows?limit=1" "X-N8N-API-KEY: $K"
+  if [ "$PROBE_CODE" = 200 ]; then
+    c_ok "  valid"; vault_and_distribute n8n "$name" "$H" X-N8N-API-KEY '{value}' "$K"
+  else
+    c_no "  REFUSED (HTTP $PROBE_CODE) — not vaulted: $PROBE_BODY"
+    echo "     The endpoint itself is fine (without a key it answers 401 \"'X-N8N-API-KEY' header"
+    echo "     required\"), so the key is what n8n rejected. Create it in n8n at Settings ->"
+    echo "     n8n API -> Create an API key, and copy the whole value. Note keys can be given an"
+    echo "     expiry, and the Public API must be enabled on the plan."
+  fi
+}
+if confirm "Configure n8n (cloud account)?"; then n8n_onboard msgrapple.app.n8n.cloud ms-n8n-cloud cloud; fi
+if confirm "Configure n8n (self-hosted account)?"; then n8n_onboard n8n.monacosolicitors.co.uk ms-n8n-selfhosted "self-hosted"; fi
 
 # --- OpenRouter : openrouter.ai --------------------------------------------
 if [ "${KEYTYPE[openrouter]:-}" = per_user ]; then echo "  OpenRouter is a per-user service (each user self-onboards their own key) — skipped in this admin script."
@@ -255,9 +274,23 @@ fi
 # --- Strapi prod : api.monacosolicitors.grapple.uk -------------------------
 if confirm "Configure Strapi?"; then
   H=api.monacosolicitors.grapple.uk
-  K="$(ask_secret "Strapi API token")"
-  code="$(http_code GET "https://$H/api/users/me" "Authorization: Bearer $K")"
-  { [ "$code" = 200 ] || [ "$code" = 403 ]; } && { c_ok "  token accepted (HTTP $code)"; vault_and_distribute strapi "ms-strapi" "$H" Authorization 'Bearer {value}' "$K"; } || c_no "  INVALID (HTTP $code)"
+  K="$(ask_secret "Strapi API token (Settings -> API Tokens in the admin panel)")"
+  if [ -z "$K" ]; then c_no "  empty — skipped"
+  else
+    # This Strapi answers 403 to an ANONYMOUS request and 401 to a token it doesn't recognise,
+    # so 200/403 means the token was accepted (an API token legitimately can't use the
+    # users-permissions /me route) while 401 means it was rejected.
+    http_probe GET "https://$H/api/users/me" "Authorization: Bearer $K"
+    if [ "$PROBE_CODE" = 200 ] || [ "$PROBE_CODE" = 403 ]; then
+      c_ok "  token accepted (HTTP $PROBE_CODE)"
+      vault_and_distribute strapi "ms-strapi" "$H" Authorization 'Bearer {value}' "$K"
+    else
+      c_no "  REFUSED (HTTP $PROBE_CODE) — not vaulted: $PROBE_BODY"
+      echo "     Anonymous requests to this route get 403, so 401 means Strapi did not recognise"
+      echo "     the token. It must be an API token from the admin panel (Settings -> API Tokens"
+      echo "     -> Create new API token), not a user JWT and not the admin login password."
+    fi
+  fi
 fi
 
 # --- Exa : mcp.exa.ai -------------------------------------------------------
@@ -278,13 +311,22 @@ fi
 # Two secrets because OneCLI host-matching is exact-host and both hosts are used:
 # backend.composio.dev (REST/connection management) + mcp.composio.dev (MCP tools).
 if confirm "Configure Composio (external app connectors, all roles)?"; then
-  K="$(ask_secret "Composio platform API key")"
-  code="$(http_code GET "https://backend.composio.dev/api/v3/toolkits" "x-api-key: $K")"
-  if [ "$code" = 200 ]; then
-    c_ok "  valid"
-    vault_and_distribute composio "ms-composio-api" backend.composio.dev x-api-key '{value}' "$K"
-    vault_and_distribute composio "ms-composio-mcp" mcp.composio.dev      x-api-key '{value}' "$K"
-  else c_no "  INVALID (HTTP $code)"; fi
+  K="$(ask_secret "Composio platform API key (dashboard -> API Keys)")"
+  if [ -z "$K" ]; then c_no "  empty — skipped"
+  else
+    http_probe GET "https://backend.composio.dev/api/v3/toolkits" "x-api-key: $K"
+    if [ "$PROBE_CODE" = 200 ]; then
+      c_ok "  valid"
+      vault_and_distribute composio "ms-composio-api" backend.composio.dev x-api-key '{value}' "$K"
+      vault_and_distribute composio "ms-composio-mcp" mcp.composio.dev      x-api-key '{value}' "$K"
+    else
+      c_no "  REFUSED (HTTP $PROBE_CODE) — not vaulted: $PROBE_BODY"
+      echo "     The path is current (anonymous requests get 401 \"No authentication provided\";"
+      echo "     the older /api/v1/* endpoints are 410 Gone), so this is the key. Take it from the"
+      echo "     Composio dashboard under API Keys — a project/organisation key, not an OAuth"
+      echo "     client secret and not a per-app connection id."
+    fi
+  fi
 fi
 
 # --- ElevenLabs : api.elevenlabs.io -----------------------------------------
