@@ -86,23 +86,38 @@ svc_host(){ case "$1" in
   pipedrive)  echo "monacosolicitors2.pipedrive.com";;
   openrouter) echo "openrouter.ai";;
   *)          echo "";; esac; }
-svc_header(){ case "$1" in
-  pipedrive)  echo "x-api-token";;
-  openrouter) echo "Authorization";;
-  *)          echo "";; esac; }
-svc_format(){ case "$1" in
-  openrouter) echo 'Bearer {value}';;
-  *)          echo '{value}';; esac; }
 svc_suffix(){ case "$1" in
   pipedrive)  echo "pipedrive";;
   openrouter) echo "openrouter-api";;
   *)          echo "$1";; esac; }
-svc_validate(){ # $1 service  $2 key -> prints HTTP code
-  case "$1" in
-    pipedrive)  http_code GET "https://$(svc_host pipedrive)/api/v1/users/me" "x-api-token: $2";;
-    openrouter) http_code GET "https://openrouter.ai/api/v1/key" "Authorization: Bearer $2";;
-    *)          echo 000;;
-  esac; }
+
+# svc_resolve <service> <key> — validate against the LIVE service and echo
+# "header|format|observed-codes" (header/format empty when the key is refused). The header
+# must be the one the API actually accepted, since the proxy replays exactly that on every
+# request. Mirrors onboard-integrations.sh: Pipedrive personal API tokens authenticate via
+# x-api-token on the v2 API, OAuth access tokens via Authorization: Bearer — so try
+# x-api-token first and fall back rather than assuming one of them (assuming v1 +
+# x-api-token is what made this script reject perfectly good tokens).
+# NB: the codes travel in the echoed string, not a variable — this runs inside a command
+# substitution, so a global assignment here would be lost with the subshell.
+svc_resolve(){
+  local svc="$1" key="$2" H c1 c2 c3
+  case "$svc" in
+    pipedrive)
+      H="$(svc_host pipedrive)"
+      c1="$(http_code GET "https://$H/api/v2/users/me"      "x-api-token: $key")"
+      c2="$(http_code GET "https://$H/api/v2/deals?limit=1" "x-api-token: $key")"
+      if [ "$c1" = 200 ] || [ "$c2" = 200 ]; then echo "x-api-token|{value}|users/me=$c1 deals=$c2"; return 0; fi
+      c3="$(http_code GET "https://$H/api/v2/users/me" "Authorization: Bearer $key")"
+      if [ "$c3" = 200 ]; then echo "Authorization|Bearer {value}|bearer=$c3"; return 0; fi
+      echo "||users/me=$c1 deals=$c2 bearer=$c3"; return 1 ;;
+    openrouter)
+      c1="$(http_code GET "https://openrouter.ai/api/v1/key" "Authorization: Bearer $key")"
+      if [ "$c1" = 200 ]; then echo "Authorization|Bearer {value}|key=$c1"; return 0; fi
+      echo "||key=$c1"; return 1 ;;
+    *) echo "||no validator for $svc"; return 1 ;;
+  esac
+}
 
 # ---- main ---------------------------------------------------------------------
 c_hd "Per-user firm service keys (availability by role-matrix.json)"
@@ -136,13 +151,20 @@ while IFS="$(printf '\t')" read -r svc roles <&3; do
     echo "  $u ($r):"
     K="$(ask_secret "$(svc_prompt "$svc") for $u")"
     if [ -z "$K" ]; then echo "    skipped"; continue; fi
-    code="$(svc_validate "$svc" "$K")"
-    if [ "$code" = 200 ]; then
-      c_ok "    key valid (HTTP 200)"
-      bind_key "$u" "$(svc_suffix "$svc")" "$host" "$(svc_header "$svc")" "$(svc_format "$svc")" "$K"
+    hf="$(svc_resolve "$svc" "$K")" || true
+    hdr="$(printf '%s' "$hf" | cut -d'|' -f1)"
+    fmt="$(printf '%s' "$hf" | cut -d'|' -f2)"
+    why="$(printf '%s' "$hf" | cut -d'|' -f3)"
+    if [ -n "$hdr" ]; then
+      c_ok "    key valid (via $hdr)"
+      bind_key "$u" "$(svc_suffix "$svc")" "$host" "$hdr" "$fmt" "$K"
       processed=$((processed+1))
     else
-      c_no "    INVALID (HTTP $code) — nothing stored for $u"
+      c_no "    REFUSED by $svc — nothing stored for $u  [$why]"
+      case "$svc" in
+        pipedrive)  echo "      use a personal API token from Settings -> Personal preferences -> API of the $host account";;
+        openrouter) echo "      the key must start sk-or-v1- and belong to an active OpenRouter account";;
+      esac
     fi
     unset K
   done
