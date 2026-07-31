@@ -51,6 +51,7 @@ svc_of(){ case "$1" in
   ms-n8n-cloud|ms-n8n-selfhosted)      echo "n8n";;
   ms-exa-api)                          echo "exa";;
   ms-composio-api|ms-composio-mcp)     echo "composio";;
+  ms-elevenlabs-api)                   echo "elevenlabs";;
   ms-xero-client)                      echo "xero";;
   *)                                   echo "";; esac; }
 

@@ -55,6 +55,7 @@ whatis() { case "$1" in
   openrouter) echo "unified API gateway to many LLMs (used by the chatbot)";;
   exa)        echo "AI web search";;
   composio)   echo "connect your own external apps (Gmail, Slack, Calendar, …)";;
+  elevenlabs) echo "transcribing the user's voice messages";;
   xero)       echo "billing & invoicing";;
   *)          echo "-";;
 esac; }
@@ -187,6 +188,19 @@ MD
 - **Auto-injected auth:** `Authorization: Bearer`.
 - **Example:** `curl "https://api.monacosolicitors.grapple.uk/api/<content-type>?pagination[pageSize]=5"`
 - Collections under `/api/<plural-name>`.
+MD
+    ;;
+    elevenlabs) cat <<'MD'
+#### ElevenLabs — transcribing the user's voice messages
+When the user sends a Telegram voice message, download it and transcribe it here rather than
+guessing at the content.
+- **Endpoint:** `POST https://api.elevenlabs.io/v1/speech-to-text`
+- **Auto-injected auth:** `xi-api-key` — send no key yourself.
+- **Example:** `curl -X POST https://api.elevenlabs.io/v1/speech-to-text -F model_id=scribe_v1 -F file=@/path/voice.ogg`
+- The reply contains the transcribed `text`. If the user is clearly dictating something to be
+  passed on, give back the clean transcript and don't editorialise.
+- If this returns 401/403 the key isn't set yet; if it can't connect at all, ElevenLabs may be
+  blocked from this region — say so instead of retrying in a loop.
 MD
     ;;
     xero) cat <<'MD'

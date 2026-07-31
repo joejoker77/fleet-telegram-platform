@@ -287,6 +287,23 @@ if confirm "Configure Composio (external app connectors, all roles)?"; then
   else c_no "  INVALID (HTTP $code)"; fi
 fi
 
+# --- ElevenLabs : api.elevenlabs.io -----------------------------------------
+# One firm key for everyone (voice transcription of Telegram voice messages).
+# NOTE: ElevenLabs geo-restricts by IP in some regions, so a refusal here can mean the
+# server's location rather than a bad key — the HTTP code below tells them apart
+# (401/403 = key/permission, 000 = unreachable).
+if confirm "Configure ElevenLabs (voice transcription, all roles)?"; then
+  H=api.elevenlabs.io
+  K="$(ask_secret "ElevenLabs API key")"
+  code="$(http_code GET "https://$H/v1/user" "xi-api-key: $K")"
+  if [ "$code" = 200 ]; then
+    c_ok "  valid"
+    vault_and_distribute elevenlabs "ms-elevenlabs-api" "$H" xi-api-key '{value}' "$K"
+  else
+    c_no "  INVALID (HTTP $code) — not vaulted$([ "$code" = 000 ] && printf ' (host unreachable: could be the region block, not the key)')"
+  fi
+fi
+
 # --- Xero : OAuth2 Custom Connection (identity.xero.com / api.xero.com) -----
 # Custom Connection = 2-legged client_credentials. We vault the client creds as
 # Basic on identity.xero.com; at runtime Claude POSTs the token endpoint (proxy

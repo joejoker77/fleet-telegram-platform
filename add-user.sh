@@ -154,8 +154,11 @@ if offer_own_key pipedrive; then prompt_secret_optional PIPEDRIVE_TOKEN \
   "Pipedrive personal API token for the firm CRM (monacosolicitors2.pipedrive.com). Staged as ${USER_NAME}-pipedrive (x-api-token). Blank to skip."; fi
 prompt_secret_optional GITHUB_PAT \
   "GitHub PAT for skill/MCP sharing + marketplace. Staged as ${USER_NAME}-git-fleet-platform (git @ github.com) AND ${USER_NAME}-github-github_pat (REST @ api.github.com, for marketplace publish). Blank to skip."
-prompt_secret_optional ELEVENLABS_KEY \
-  "ElevenLabs API key (voice STT; note: geo-restricted in some regions). Staged as ${USER_NAME}-elevenlabs-api (xi-api-key @ api.elevenlabs.io). Blank to skip."
+# ElevenLabs is a matrix service now (one firm key for every role, onboarded by
+# onboard-integrations.sh), so it is only asked for here if the matrix says per_user —
+# otherwise a per-tenant key would compete with the shared one for the same host.
+if offer_own_key elevenlabs; then prompt_secret_optional ELEVENLABS_KEY \
+  "ElevenLabs API key (voice STT; note: geo-restricted in some regions). Staged as ${USER_NAME}-elevenlabs-api (xi-api-key @ api.elevenlabs.io). Blank to skip."; fi
 _bind() { # SCRIPT  VALUE  EXISTING_SECRET_NAME  [extra args forwarded to SCRIPT]
   local script="$1" val="$2" sname="$3" base="${1##*/}"; shift 3
   if [ -z "$val" ]; then info "skip $base ($sname) — no key"; return 0; fi
