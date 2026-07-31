@@ -34,7 +34,11 @@ else
 fi
 
 log "4) strip the admin-capability block from CLAUDE.md"
-CLAUDEMD="/home/$U/work/CLAUDE.md"
+# Same file make-admin.sh writes (~/.claude/CLAUDE.md). Only the ADMIN-CAPABILITY
+# markers are stripped — provision-tenant's own MANAGED host-admin section (present
+# when the tenant was provisioned --role admin) is NOT touched here: demoting a role
+# means re-running provision-tenant.sh with the new --role, which regenerates it.
+CLAUDEMD="/home/$U/.claude/CLAUDE.md"
 if [ -f "$CLAUDEMD" ] && grep -qF "BEGIN ADMIN-CAPABILITY" "$CLAUDEMD"; then
   python3 - "$CLAUDEMD" <<'PYEOF'
 import re, sys

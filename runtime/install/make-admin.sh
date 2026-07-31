@@ -73,10 +73,17 @@ log "6) make the admin capability self-documenting in the tenant's CLAUDE.md"
 # A fresh, zero-context session only knows what loads unconditionally at start.
 # CLAUDE.md is injected in full every session, so this is how a brand-new session
 # learns it has host-root. Marker-delimited + idempotent; unmake-admin strips it.
-CLAUDEMD="/home/$U/work/CLAUDE.md"
+# The managed tenant guide lives at ~/.claude/CLAUDE.md (provision-tenant writes it
+# there; it is the file Claude loads unconditionally). For an --role admin tenant,
+# provision-tenant ALREADY appends host-admin.md.snippet inside its MANAGED markers,
+# so this step is a no-op then — detect that ("## Host admin capability") instead of
+# warning about a legacy ~/work/CLAUDE.md path that the current layout never creates.
+CLAUDEMD="/home/$U/.claude/CLAUDE.md"
 ADMARK="<!-- BEGIN ADMIN-CAPABILITY (managed by make-admin.sh) -->"
 if [ ! -f "$CLAUDEMD" ]; then
   echo "  WARN: $CLAUDEMD absent — awareness block skipped"
+elif grep -qF "## Host admin capability" "$CLAUDEMD"; then
+  echo "  CLAUDE.md already documents the admin capability (provision-tenant managed block) — skip"
 elif grep -qF "$ADMARK" "$CLAUDEMD"; then
   echo "  CLAUDE.md already documents the admin capability — skip"
 else
