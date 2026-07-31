@@ -70,7 +70,22 @@ confirm(){ local a; read -rp "$1 [y/N]: " a; [ "$a" = y ] || [ "$a" = Y ]; }
 # genuinely wrong key. Cheap to remove, expensive to debug.
 trim(){ printf '%s' "$1" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
 ask(){ local v; read -rp "  $1: " v; trim "$v"; }
-ask_secret(){ local v; read -rsp "  $1: " v; echo >&2; trim "$v"; }
+
+# Secret input is hidden, so a truncated or mangled paste is invisible — and it looks exactly
+# like a wrong key when the service answers 401. Report what actually arrived: the length and a
+# masked fingerprint (first 3 + last 4, the same way vendors display keys). If the length is
+# far short of what the key should be, `read` stopped at a newline inside the pasted value and
+# the rest never got here — that is the single most common cause of a "valid key" being
+# rejected, and this makes it visible instead of a guessing game.
+ask_secret(){ local v t n
+  read -rsp "  $1: " v; echo >&2
+  t="$(trim "$v")"; n=${#t}
+  if [ "$n" = 0 ]; then printf '    (nothing entered)\n' >&2
+  elif [ "$n" -le 8 ]; then printf '    received %d chars — suspiciously short\n' "$n" >&2
+  else printf '    received %d chars, looks like %s…%s\n' "$n" "${t:0:3}" "${t: -4}" >&2
+  fi
+  [ "$n" = "${#v}" ] || printf '    (stripped surrounding whitespace / newline)\n' >&2
+  printf '%s' "$t"; }
 
 # http_probe METHOD URL [HEADERS...] — like http_code but also keeps the response body in
 # PROBE_BODY, so a refusal can quote what the service actually said. Call it directly (not in a
@@ -238,12 +253,16 @@ n8n_onboard(){ # $1 host  $2 secret-name  $3 label
     c_ok "  valid"; vault_and_distribute n8n "$name" "$H" X-N8N-API-KEY '{value}' "$K"
   else
     c_no "  REFUSED (HTTP $PROBE_CODE) — not vaulted: $PROBE_BODY"
-    echo "     n8n read the header and rejected the VALUE (anonymous requests get a different"
-    echo "     error: \"'X-N8N-API-KEY' header required\"). Two things to check, in this order:"
-    echo "       1. Each n8n instance issues its OWN key. A key from the cloud account is not"
-    echo "          valid on the self-hosted one, or vice versa — get this key from $H itself."
-    echo "       2. Settings -> n8n API -> Create an API key. Keys may carry an expiry date, and"
-    echo "          the Public API has to be enabled on the plan."
+    echo "     What we know: n8n DID read the header (an anonymous request gets a different"
+    echo "     error, \"'X-N8N-API-KEY' header required\") and rejected the value we sent."
+    echo "     Compare the 'received N chars' line above with the key's real length — if it is"
+    echo "     shorter, the paste was cut off (a newline inside the value ends the input) and"
+    echo "     n8n never saw the whole key."
+    echo "     If the length matches, run this from your own machine to see whether the key works"
+    echo "     outside our server at all:"
+    echo "       curl -i -H 'X-N8N-API-KEY: <key>' 'https://$H/api/v1/workflows?limit=1'"
+    echo "     200 there but 401 here means something about this host; 401 in both places means"
+    echo "     n8n itself is refusing the key (check it is current at Settings -> n8n API)."
   fi
 }
 if confirm "Configure n8n (cloud account)?"; then n8n_onboard msgrapple.app.n8n.cloud ms-n8n-cloud cloud; fi
@@ -342,13 +361,14 @@ if confirm "Configure Composio (external app connectors, all roles)?"; then
       vault_and_distribute composio "ms-composio-mcp" mcp.composio.dev      x-api-key '{value}' "$K"
     else
       c_no "  REFUSED (HTTP $PROBE_CODE) — not vaulted: $PROBE_BODY"
-      echo "     Composio echoes the key it received in masked form above — if that matches the"
-      echo "     key you meant to paste, it arrived intact and Composio itself does not accept it."
-      echo "     Then check in the dashboard that this exact key is still ACTIVE (not rotated or"
-      echo "     revoked) and that it belongs to the project/organisation whose toolkits we should"
-      echo "     see. API keys are project-scoped, so a key from another project authenticates"
-      echo "     nowhere useful. Take it from API Keys — not an OAuth client secret, not a"
-      echo "     connection id."
+      echo "     Composio echoes the key it received, masked, in its own error above — compare it"
+      echo "     with the 'received N chars' line and with the key in your dashboard. If the tail"
+      echo "     characters or the length differ from the real key, the paste was cut short and"
+      echo "     Composio never saw all of it."
+      echo "     If both match, the value reached Composio intact and Composio is refusing it, so"
+      echo "     the next check is on their side: is that key still active? Same test from your"
+      echo "     own machine, which takes our server out of the picture:"
+      echo "       curl -i -H 'x-api-key: <key>' https://backend.composio.dev/api/v3/toolkits"
     fi
   fi
 fi
