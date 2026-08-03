@@ -38,11 +38,14 @@ fi
 
 # Best-effort send. Failures don't change the block decision below.
 if [ -n "$TOKEN" ] && [ -n "$CHAT_ID" ]; then
-  TEXT="⚠️ AskUserQuestion перехвачен (попап в терминале подавлён):
+  # English only: this text goes to the firm's users, who do not read Russian. (The Russian
+  # original came straight from the fleet, where the operator does.)
+  TEXT="⚠️ I need to ask you something, but the assistant tried to use an on-screen prompt that
+nobody can answer from Telegram. Here is the question:
 
 $QUESTIONS_TEXT
 
-Ответь обычным сообщением сюда — я обработаю."
+Just reply to this message normally and I will carry on."
   if [ -n "$THREAD_ID" ]; then
     PAYLOAD=$(jq -n --arg c "$CHAT_ID" --argjson t "$THREAD_ID" --arg x "$TEXT" \
       '{chat_id:$c, message_thread_id:$t, text:$x}')
