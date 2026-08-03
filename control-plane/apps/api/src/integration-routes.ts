@@ -46,7 +46,7 @@ function allowNotify(uid: string): boolean {
 
 // UX rule (11-integrations.md): the user never sees "Composio"/"OAuth"/"MCP".
 const page = (title: string, line: string) => `<!doctype html>
-<html lang="ru"><head><meta charset="utf-8">
+<html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${title}</title>
 <style>

@@ -72,6 +72,19 @@ CLAUDE_AUTH_ARGS=()
 CLAUDE_TOKEN_FILE="/etc/claude-auth/$U.token"
 [ -f "$CLAUDE_TOKEN_FILE" ] && CLAUDE_AUTH_ARGS=(-e CLAUDE_CODE_OAUTH_TOKEN="$(cat "$CLAUDE_TOKEN_FILE")")
 
+# Composio OAuth callback base. composio-connect defaults to the FLEET's domain, which on any
+# other deployment silently sends that deployment's users through someone else's host — their
+# Telegram id and connected-account id land there, and the confirmation is attempted by the
+# wrong bot. Observed live on the firm install. So the callback base is read from a host file
+# written at install time; when it is absent the helper keeps its own default.
+COMPOSIO_ARGS=()
+CB_FILE=/etc/claudeapp/composio-callback.env
+if [ -f "$CB_FILE" ]; then
+  # shellcheck disable=SC1090
+  . "$CB_FILE"
+  [ -n "${COMPOSIO_CALLBACK_BASE:-}" ] && COMPOSIO_ARGS=(-e COMPOSIO_CALLBACK_BASE="$COMPOSIO_CALLBACK_BASE")
+fi
+
 # ~/.ssh: mount the tenant's own SSH keys so the agent can reach remote servers
 # (owner decision 2026-06-15; egress is full-outbound). Mounted rw so ssh can
 # append to ~/.ssh/known_hosts on first connect. Only when present — users with
@@ -143,7 +156,7 @@ exec /usr/bin/podman run --rm --name "claude-$U" \
   --cap-drop=ALL \
   --read-only --tmpfs /tmp --tmpfs /run \
   --memory=4g --memory-reservation=3g --cpus=2 --pids-limit=2048 \
-  -e HOME="$HOME_DIR" -e XDG_RUNTIME_DIR=/tmp -e HOST_ADMIN_USER="$U" "${PROXY_ARGS[@]}" "${CLAUDE_AUTH_ARGS[@]}" \
+  -e HOME="$HOME_DIR" -e XDG_RUNTIME_DIR=/tmp -e HOST_ADMIN_USER="$U" "${PROXY_ARGS[@]}" "${CLAUDE_AUTH_ARGS[@]}" "${COMPOSIO_ARGS[@]}" \
   -v "$HOME_DIR/.claude:$HOME_DIR/.claude" \
   -v "$HOME_DIR/work:$HOME_DIR/work" \
   -v "$HOME_DIR/.config:$HOME_DIR/.config" \

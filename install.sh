@@ -16,7 +16,7 @@
 #   sudo ./install.sh [--dry-run] [--phase <name>] [--yes] [--config <file>]
 #     --dry-run     preflight + print the plan + describe every secret; change NOTHING
 #     --phase NAME  run only one phase (secrets|stores|services|image|egress|
-#                   security|authoring|integrations|marketplace|tenants|verify)
+#                   security|authoring|marketplace|callback|tenants|verify)
 #     --yes         non-interactive confirmations (secrets must come from env/--config)
 #     --config F    source F first (sets config vars + any pre-supplied secret values)
 #
@@ -53,6 +53,13 @@ export DRY_RUN ONLY_PHASE ASSUME_YES
 # The bootstrap ADMIN this install creates (the platform's first operator). Every
 # other user is added afterwards with add-user.sh (default role user; --is-admin
 # for more admins). Empty => stand up the platform only, add the admin later.
+# Public domain for THIS deployment's Composio OAUTH CALLBACK. Composio needs a publicly
+# reachable callback URL, and composio-connect otherwise falls back to the FLEET's domain —
+# which silently routes this deployment's users (and their identifiers) through someone else's
+# host. Set it and the callback is served here instead, behind TLS, as the ONLY public path.
+# Empty => skipped, and that fallback stays in effect.
+CALLBACK_DOMAIN="${CALLBACK_DOMAIN:-}"
+CERTBOT_EMAIL="${CERTBOT_EMAIL:-}"
 BOOTSTRAP_ADMIN_USER="${BOOTSTRAP_ADMIN_USER:-}"
 BOOTSTRAP_ADMIN_TG="${BOOTSTRAP_ADMIN_TG:-}"
 
@@ -229,6 +236,16 @@ phase_authoring() {
 # ── PHASE: artifact marketplace ───────────────────────────────────────────────
 phase_marketplace() { run_cmd bash "$RT_INSTALL/m8.1-registry.sh"; }
 
+# ── PHASE: public Composio callback (own domain + TLS) ────────────────────────
+phase_callback() {
+  if [ -z "${CALLBACK_DOMAIN:-}" ]; then
+    info "no CALLBACK_DOMAIN set — skipping. Composio callbacks then use the helper's default"
+    info "  (the FLEET domain), so this deployment's users would traverse a host you don't own."
+    return 0
+  fi
+  run_cmd bash "$CP_INSTALL/m6.3-composio-web.sh" --domain "$CALLBACK_DOMAIN" ${CERTBOT_EMAIL:+--email "$CERTBOT_EMAIL"}
+}
+
 # ── PHASE: bootstrap admin ────────────────────────────────────────────────────
 # install.sh creates exactly ONE user — the bootstrap ADMIN — by handing off to
 # add-user.sh --is-admin (the single onboarding path: provision + token +
@@ -274,6 +291,7 @@ run_phase egress        phase_egress
 run_phase security      phase_security
 run_phase authoring     phase_authoring
 run_phase marketplace   phase_marketplace
+run_phase callback      phase_callback
 run_phase bootstrap_admin phase_bootstrap_admin
 run_phase verify        phase_verify
 log "done."
