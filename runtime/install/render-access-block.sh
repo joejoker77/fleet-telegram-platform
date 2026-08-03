@@ -151,7 +151,7 @@ MD
     ;;
     n8n) cat <<'MD'
 #### n8n — AI workflow automation (two instances)
-- **Cloud:** `https://msgrapple.app.n8n.cloud/api/v1/` · **Self-hosted:** `https://n8n.monacosolicitors.co.uk/api/v1/`
+- **Cloud:** `https://monacosolicitors.app.n8n.cloud/api/v1/` · **Self-hosted:** `https://n8n.monacosolicitors.co.uk/api/v1/`
 - **Auto-injected auth:** `X-N8N-API-KEY` header (on each host).
 - **Example:** `curl "https://n8n.monacosolicitors.co.uk/api/v1/workflows?limit=5"`
 - Common: `/workflows`, `/executions`, `/credentials`. Pick the instance the task refers to.

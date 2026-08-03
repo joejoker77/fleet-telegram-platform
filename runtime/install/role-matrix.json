@@ -26,7 +26,7 @@
     "rota":       { "label": "Rota (WordPress)",  "key_type": "ms_shared", "hosts": ["cms.monacosolicitors.co.uk"], "roles": { "admin": "rw", "manager": "rw" } },
     "strapi":     { "label": "Strapi",            "key_type": "ms_shared", "hosts": ["api.monacosolicitors.grapple.uk"], "roles": { "admin": "rw" } },
     "pipedrive":  { "label": "Pipedrive",         "key_type": "per_user",  "hosts": ["monacosolicitors2.pipedrive.com"], "roles": { "admin": "rw", "manager": "rw", "basic": "rw" } },
-    "n8n":        { "label": "n8n (cloud + self-hosted)", "key_type": "ms_shared", "hosts": ["msgrapple.app.n8n.cloud", "n8n.monacosolicitors.co.uk"], "roles": { "admin": "rw", "manager": "rw" } },
+    "n8n":        { "label": "n8n (cloud + self-hosted)", "key_type": "ms_shared", "hosts": ["monacosolicitors.app.n8n.cloud", "n8n.monacosolicitors.co.uk"], "roles": { "admin": "rw", "manager": "rw" } },
     "openrouter": { "label": "OpenRouter",        "key_type": "per_user",  "hosts": ["openrouter.ai"], "roles": { "admin": "rw", "manager": "rw" } },
     "exa":        { "label": "Exa",               "key_type": "ms_shared", "hosts": ["mcp.exa.ai"], "roles": { "admin": "rw", "manager": "rw", "finance": "rw", "basic": "rw" } },
     "composio":   { "label": "Composio",          "key_type": "ms_shared", "hosts": ["mcp.composio.dev", "backend.composio.dev"], "roles": { "admin": "rw", "manager": "rw", "finance": "rw", "basic": "rw" } },

@@ -282,7 +282,7 @@ n8n_onboard(){ # $1 host  $2 secret-name  $3 label
     store_anyway n8n "$name" "$H" X-N8N-API-KEY '{value}' "$K"
   fi
 }
-if confirm "Configure n8n (cloud account)?"; then n8n_onboard msgrapple.app.n8n.cloud ms-n8n-cloud cloud; fi
+if confirm "Configure n8n (cloud account)?"; then n8n_onboard monacosolicitors.app.n8n.cloud ms-n8n-cloud cloud; fi
 if confirm "Configure n8n (self-hosted account)?"; then n8n_onboard n8n.monacosolicitors.co.uk ms-n8n-selfhosted "self-hosted"; fi
 
 # --- OpenRouter : openrouter.ai --------------------------------------------
