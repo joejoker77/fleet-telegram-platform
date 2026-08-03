@@ -78,7 +78,7 @@ function activeName(p: TenantPaths): string {
 // Supervisor-owned readiness: "switched" (pane respawned) != "ready" (the new
 // claude's telegram plugin is actually polling). The supervisor writes
 // session-state.json when the plugin comes up; a missing file (pre-readiness
-// image) degrades to ready=true so the UI never sticks on "запускается…".
+// image) degrades to ready=true so the UI never sticks on "starting…".
 function activeReady(p: TenantPaths, active: string): boolean {
   try {
     const s = JSON.parse(fs.readFileSync(path.join(p.runDir, "session-state.json"), "utf8")) as {
@@ -207,7 +207,7 @@ async function runSupervisorTask(
     if (res.id !== reqId) continue; // stale result from an earlier task
     return { ok: !!res.ok, error: res.error, checkpoint: res.checkpoint };
   }
-  return { ok: false, timeout: true, error: "задача не подтверждена за 90с (под выключен или старый образ?)" };
+  return { ok: false, timeout: true, error: "the task was not acknowledged within 90s (is the pod stopped, or running an old image?)" };
 }
 
 export function registerSessionRoutes(app: FastifyInstance, deps: SessionDeps): void {
@@ -441,12 +441,12 @@ export function registerSessionRoutes(app: FastifyInstance, deps: SessionDeps): 
       .where(and(eq(schema.sessions.id, id), eq(schema.sessions.userId, ctx.userId)))
       .limit(1);
     const row = rows[0];
-    if (!row || row.state === "closed") return reply.code(404).send({ error: "сессия не найдена" });
+    if (!row || row.state === "closed") return reply.code(404).send({ error: "session not found" });
     const name = row.sessionName;
-    if (name === "default") return reply.code(409).send({ error: "default нельзя удалить" });
+    if (name === "default") return reply.code(409).send({ error: "the default session cannot be deleted" });
     const p = tenantPaths(deps.homeRoot, ctx.osUsername);
     if (name === activeName(p)) {
-      return reply.code(409).send({ error: "сессия активна — сначала переключитесь на другую" });
+      return reply.code(409).send({ error: "that session is active — switch to another one first" });
     }
 
     const dir = path.join(p.projects, name);
@@ -464,7 +464,7 @@ export function registerSessionRoutes(app: FastifyInstance, deps: SessionDeps): 
         fs.renameSync(dir, path.join(trash, `${name}-${stamp}`));
       } catch (err) {
         app.log.error({ err }, "session dir trash failed");
-        return reply.code(500).send({ error: "не удалось переместить папку сессии в .trash" });
+        return reply.code(500).send({ error: "could not move the session folder to .trash" });
       }
     }
 
@@ -502,7 +502,7 @@ export function registerSessionRoutes(app: FastifyInstance, deps: SessionDeps): 
     }
     const id = (req.params as { id?: string })?.id ?? "";
     const row = await sessionById(id, ctx.userId);
-    if (!row) return reply.code(404).send({ error: "сессия не найдена" });
+    if (!row) return reply.code(404).send({ error: "session not found" });
     const p = tenantPaths(deps.homeRoot, ctx.osUsername);
     const checkpoints = readCheckpoints(p, row.sessionName).slice().reverse();
     return reply.send({ name: row.sessionName, checkpoints });
@@ -521,7 +521,7 @@ export function registerSessionRoutes(app: FastifyInstance, deps: SessionDeps): 
     }
     const id = (req.params as { id?: string })?.id ?? "";
     const row = await sessionById(id, ctx.userId);
-    if (!row) return reply.code(404).send({ error: "сессия не найдена" });
+    if (!row) return reply.code(404).send({ error: "session not found" });
     const rawLabel = (req.body as { label?: string } | null)?.label;
     const label = typeof rawLabel === "string" && rawLabel.trim() ? rawLabel.trim().slice(0, 120) : "manual";
     const p = tenantPaths(deps.homeRoot, ctx.osUsername);
@@ -561,11 +561,11 @@ export function registerSessionRoutes(app: FastifyInstance, deps: SessionDeps): 
     }
     const { id = "", cid = "" } = (req.params as { id?: string; cid?: string }) ?? {};
     const row = await sessionById(id, ctx.userId);
-    if (!row) return reply.code(404).send({ error: "сессия не найдена" });
-    if (!CKPT_ID_RE.test(cid)) return reply.code(400).send({ error: "некорректный id чекпоинта" });
+    if (!row) return reply.code(404).send({ error: "session not found" });
+    if (!CKPT_ID_RE.test(cid)) return reply.code(400).send({ error: "malformed checkpoint id" });
     const p = tenantPaths(deps.homeRoot, ctx.osUsername);
     if (!readCheckpoints(p, row.sessionName).some((c) => c.id === cid)) {
-      return reply.code(404).send({ error: "чекпоинт не найден" });
+      return reply.code(404).send({ error: "checkpoint not found" });
     }
 
     let res;
@@ -606,11 +606,11 @@ export function registerSessionRoutes(app: FastifyInstance, deps: SessionDeps): 
     }
     const { id = "", cid = "" } = (req.params as { id?: string; cid?: string }) ?? {};
     const row = await sessionById(id, ctx.userId);
-    if (!row) return reply.code(404).send({ error: "сессия не найдена" });
-    if (!CKPT_ID_RE.test(cid)) return reply.code(400).send({ error: "некорректный id чекпоинта" });
+    if (!row) return reply.code(404).send({ error: "session not found" });
+    if (!CKPT_ID_RE.test(cid)) return reply.code(400).send({ error: "malformed checkpoint id" });
     const p = tenantPaths(deps.homeRoot, ctx.osUsername);
     if (!readCheckpoints(p, row.sessionName).some((c) => c.id === cid)) {
-      return reply.code(404).send({ error: "чекпоинт не найден" });
+      return reply.code(404).send({ error: "checkpoint not found" });
     }
 
     let res;

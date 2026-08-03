@@ -1,4 +1,4 @@
-// BullMQ wiring (docs 09: "Очередь (BullMQ) + rate-limit + circuit breaker").
+// BullMQ wiring (docs 09: queue (BullMQ) + rate limit + circuit breaker).
 // The queue gives us: (a) job-id coalescing — concurrent identical requests share
 // ONE worker run, so two callers can never both trigger an LLM call for the same
 // (artifact,ruleset,model); (b) a global rate limiter on the capped judge key;

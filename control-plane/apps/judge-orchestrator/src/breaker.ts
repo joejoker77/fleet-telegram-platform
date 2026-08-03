@@ -1,5 +1,5 @@
-// Circuit breaker for the LLM judge leg (docs 09: "circuit breaker при деградации
-// судьи"). After `threshold` consecutive failures the breaker OPENS and the judge
+// Circuit breaker for the LLM judge leg (docs 09: a circuit breaker for when the judge
+// degrades). After `threshold` consecutive failures the breaker OPENS and the judge
 // leg is short-circuited for `cooldownMs` — callers get verdict=error and the
 // scanners FAIL-CLOSED (artifact not installed), so a degraded judge can never be
 // mistaken for a pass. After the cooldown it goes HALF-OPEN: one trial call is

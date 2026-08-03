@@ -430,7 +430,7 @@ export function registerRegistryRoutes(app: FastifyInstance, deps: RegistryDeps)
         payload: { type, name, version, verdict: scan.verdict, severity: scan.severity, decidedBy: scan.decidedBy },
       }).catch(() => {});
       return reply.code(422).send({
-        error: scan.verdict === "error" ? "сканер недоступен — отказ (fail-closed)" : "артефакт не прошёл сканер",
+        error: scan.verdict === "error" ? "scanner unavailable — refused (fail-closed)" : "the artefact did not pass the scanner",
         verdict: scan.verdict,
         severity: scan.severity,
         decidedBy: scan.decidedBy,
@@ -460,7 +460,7 @@ export function registerRegistryRoutes(app: FastifyInstance, deps: RegistryDeps)
     const approval = await createApproval(deps.approvals, {
       userId: ctx.userId,
       kind: REGISTRY_PUBLISH_KIND,
-      title: `Опубликовать ${type} «${name}» v${version} (${visibility})`,
+      title: `Publish ${type} "${name}" v${version} (${visibility})`,
       payload,
       ttlSeconds: APPROVAL_TTL,
     });
@@ -519,14 +519,14 @@ export function registerRegistryRoutes(app: FastifyInstance, deps: RegistryDeps)
         actor: `miniapp:${ctx.osUsername}`,
         payload: { artifactVersionId: ver.vId, verdict: scan.verdict, severity: scan.severity },
       }).catch(() => {});
-      return reply.code(422).send({ error: "импорт не прошёл повторный скан (fail-closed)", verdict: scan.verdict, severity: scan.severity });
+      return reply.code(422).send({ error: "the import did not pass the re-scan (fail-closed)", verdict: scan.verdict, severity: scan.severity });
     }
 
     // import ALWAYS requires an approval (crosses the trust boundary), incl. admins
     const approval = await createApproval(deps.approvals, {
       userId: ctx.userId,
       kind: REGISTRY_IMPORT_KIND,
-      title: `Импортировать ${type} «${ver.name}» v${ver.version}`,
+      title: `Import ${type} "${ver.name}" v${ver.version}`,
       payload: {
         osUsername: ctx.osUsername,
         ownerUserId: ctx.userId,

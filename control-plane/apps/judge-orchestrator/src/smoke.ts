@@ -2,7 +2,7 @@
 // criteria WITHOUT a real LLM call, Redis, or Postgres (in-memory cache + a fake
 // judge that counts calls). Run: pnpm --filter @fleet/judge-orchestrator smoke
 //
-// Asserts (docs 09 "Критерии приёмки"):
+// Asserts (docs 09, acceptance criteria):
 //   1. dedup/cache_hit — same artifact twice → 2nd is cache_hit, judge called ONCE.
 //   2. distinct artifacts are judged independently.
 //   3. circuit breaker opens after N consecutive judge failures → fail-closed

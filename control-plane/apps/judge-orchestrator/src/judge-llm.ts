@@ -1,5 +1,5 @@
-// The single LLM-as-judge call (docs 09: "Single-pass — одна оценка на артефакт,
-// без итеративных доуточнений"). Invoked ONLY on a cache-miss, ONLY from inside
+// The single LLM-as-judge call (docs 09: single-pass — one assessment per artefact,
+// with no iterative refinement). Invoked ONLY on a cache-miss, ONLY from inside
 // the rate-limited + circuit-broken worker — never on a schedule, never recursively
 // (the judge is told it is the terminal authority and must not request sub-judging;
 // the orchestrator also never calls /judge from within a judge run). One request,

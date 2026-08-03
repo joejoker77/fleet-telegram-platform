@@ -102,8 +102,8 @@ export function registerIntegrationRoutes(app: FastifyInstance, deps: Integratio
       const botToken = (osUsername && readTenantBotToken(deps.tenantHomeRoot, osUsername)) || deps.botToken;
       if (botToken && allowNotify(uid)) {
         const text = okFlow
-          ? `✅ ${nice} подключён — можно возвращаться в чат и пользоваться.`
-          : `⚠️ Подключить ${nice} не получилось. Вернитесь в чат и попросите ссылку ещё раз.`;
+          ? `✅ ${nice} is connected — go back to the chat and use it.`
+          : `⚠️ Could not connect ${nice}. Go back to the chat and ask for a new link.`;
         await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -127,8 +127,8 @@ export function registerIntegrationRoutes(app: FastifyInstance, deps: Integratio
     reply.header("cache-control", "no-store");
     return reply.type("text/html; charset=utf-8").send(
       okFlow
-        ? page("✅", `${nice} подключён. Эту вкладку можно закрыть — возвращайтесь в Telegram.`)
-        : page("⚠️", `Подключение ${nice} не завершилось. Закройте вкладку и попросите в чате новую ссылку.`),
+        ? page("✅", `${nice} is connected. You can close this tab and return to Telegram.`)
+        : page("⚠️", `${nice} was not connected. Close this tab and ask for a new link in the chat.`),
     );
   });
 }

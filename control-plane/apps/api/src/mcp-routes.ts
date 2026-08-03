@@ -87,7 +87,7 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRoutesDeps): vo
         payload: { name, verdict: scan.verdict, severity: scan.severity, decidedBy: scan.decidedBy },
       }).catch(() => {});
       return reply.code(422).send({
-        error: scan.verdict === "error" ? "сканер недоступен — отказ (fail-closed)" : "станса не прошла сканер",
+        error: scan.verdict === "error" ? "scanner unavailable — refused (fail-closed)" : "the MCP stanza did not pass the scanner",
         verdict: scan.verdict,
         severity: scan.severity,
         decidedBy: scan.decidedBy,
@@ -117,7 +117,7 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRoutesDeps): vo
     const approval = await createApproval(deps.approvals, {
       userId: ctx.userId,
       kind: MCP_APPROVAL_KIND,
-      title: `${overwrite ? "⚠️ Перезаписать" : "Подключить"} MCP «${name}»${secretMeta ? " 🔑" : ""}`,
+      title: `${overwrite ? "⚠️ Overwrite" : "Connect"} MCP "${name}"${secretMeta ? " 🔑" : ""}`,
       payload: {
         name,
         stanza,

@@ -1,5 +1,5 @@
 // M6.2 acceptance — Composio callback route in cp-api (no Composio account
-// needed; this validates only OUR surface). The full OAuth e2e («подключи
+// needed; this validates only OUR surface). The full OAuth e2e ("connect
 // Gmail») is M6.4, after the vault staging.
 //
 // Checks:
@@ -40,7 +40,7 @@ ok(!/[Cc]omposio|OAuth|MCP/.test(s.body), "page never says Composio/OAuth/MCP (U
 
 // 3) failed landing
 const f = await get(`?uid=${FAKE_UID}&toolkit=slack&status=failed`);
-ok(f.status === 200 && /не заверш|не получилось/i.test(f.body), `failed callback → 200 with failure wording (got ${f.status})`);
+ok(f.status === 200 && /was not connected|could not connect/i.test(f.body), `failed callback → 200 with failure wording (got ${f.status})`);
 
 // 4) param validation
 const noUid = await get(`?toolkit=gmail&status=success`);

@@ -111,24 +111,24 @@ const MAX_SECRET_VALUE = 4096;
 
 export function validateSecretSpec(mcpName: string, spec: unknown): string | null {
   if (typeof spec !== "object" || spec === null || Array.isArray(spec)) {
-    return "secretSpec: должен быть объектом { value, hostPattern, headerName, valueFormat }";
+    return "secretSpec: must be an object { value, hostPattern, headerName, valueFormat }";
   }
   const s = spec as Record<string, unknown>;
   if (!SECRET_MCP_NAME_RE.test(mcpName)) {
-    return "имя MCP с секретом: строчные латиница/цифры/._-, до 49 символов (имя секрета строится из него)";
+    return "name of an MCP with a secret: lowercase letters/digits/._- , up to 49 chars (the secret name is derived from it)";
   }
   if (typeof s.value !== "string" || s.value.trim() === "" || s.value.length > MAX_SECRET_VALUE) {
-    return `секрет: непустая строка до ${MAX_SECRET_VALUE} символов`;
+    return `secret: a non-empty string of up to ${MAX_SECRET_VALUE} chars`;
   }
-  if (/[\n\r\0]/.test(s.value)) return "секрет: без переводов строк";
+  if (/[\n\r\0]/.test(s.value)) return "secret: must not contain line breaks";
   if (typeof s.hostPattern !== "string" || !HOST_PATTERN_RE.test(s.hostPattern)) {
-    return "hostPattern: домен вида api.example.com или *.example.com";
+    return "hostPattern: a domain such as api.example.com or *.example.com";
   }
   if (typeof s.headerName !== "string" || !HEADER_NAME_RE.test(s.headerName)) {
-    return "headerName: 1–64 символа [A-Za-z0-9-]";
+    return "headerName: 1-64 characters [A-Za-z0-9-]";
   }
   if (typeof s.valueFormat !== "string" || !s.valueFormat.includes("{value}") || s.valueFormat.length > 64) {
-    return 'valueFormat: до 64 символов, обязан содержать "{value}"';
+    return 'valueFormat: up to 64 characters and must contain "{value}"';
   }
   return null;
 }
@@ -226,10 +226,10 @@ function isStringRecord(v: unknown): v is Record<string, string> {
 function secretIn(values: Record<string, string>, where: string): string | null {
   for (const [k, v] of Object.entries(values)) {
     if (SECRET_VALUE_RE.test(v)) {
-      return `${where}.${k} выглядит как живой секрет — в v1 секреты в стансу нельзя (M5.5b: ключ → OneCLI)`;
+      return `${where}.${k} looks like a live secret — v1 does not allow secrets inside a stanza (M5.5b: the key goes to OneCLI)`;
     }
     if (SECRETY_KEY_RE.test(k) && v.trim() !== "" && !PLACEHOLDER_RE.test(v)) {
-      return `${where}.${k}: значение секретного ключа должно быть заполнителем \${…}, не сырым значением`;
+      return `${where}.${k}: a secret key must be a \${…} placeholder, not the raw value`;
     }
   }
   return null;
@@ -237,42 +237,42 @@ function secretIn(values: Record<string, string>, where: string): string | null 
 
 // Returns a user-facing error message, or null when the stanza is acceptable.
 export function validateStanza(name: string, stanza: unknown): string | null {
-  if (!NAME_RE.test(name)) return "имя: латиница/цифры/._-, до 64 символов, начинается с буквы или цифры";
-  if (typeof stanza !== "object" || stanza === null || Array.isArray(stanza)) return "станса должна быть JSON-объектом";
-  if (Buffer.byteLength(JSON.stringify(stanza), "utf8") > MAX_STANZA_BYTES) return "станса больше 16 КиБ";
+  if (!NAME_RE.test(name)) return "name: letters/digits/._- , up to 64 chars, starting with a letter or digit";
+  if (typeof stanza !== "object" || stanza === null || Array.isArray(stanza)) return "the stanza must be a JSON object";
+  if (Buffer.byteLength(JSON.stringify(stanza), "utf8") > MAX_STANZA_BYTES) return "the stanza is larger than 16 KiB";
   const s = stanza as McpStanza;
 
   const isRemote = typeof s.url === "string" || s.type === "http" || s.type === "sse";
   const allowed = isRemote ? REMOTE_KEYS : STDIO_KEYS;
   for (const k of Object.keys(s)) {
-    if (!allowed.has(k)) return `неизвестный ключ "${k}" (разрешены: ${[...allowed].join(", ")})`;
+    if (!allowed.has(k)) return `unknown key "${k}" (allowed: ${[...allowed].join(", ")})`;
   }
   if (s.timeout !== undefined && (typeof s.timeout !== "number" || s.timeout < 1 || s.timeout > 600_000)) {
-    return "timeout: число миллисекунд 1…600000";
+    return "timeout: a number of milliseconds, 1-600000";
   }
 
   if (isRemote) {
-    if (s.type !== undefined && s.type !== "http" && s.type !== "sse") return 'type: "http" или "sse"';
-    if (typeof s.url !== "string" || !/^https:\/\/[^\s]+$/.test(s.url)) return "url: обязателен и только https://";
+    if (s.type !== undefined && s.type !== "http" && s.type !== "sse") return 'type: "http" or "sse"';
+    if (typeof s.url !== "string" || !/^https:\/\/[^\s]+$/.test(s.url)) return "url: required, and https:// only";
     if (s.headers !== undefined) {
-      if (!isStringRecord(s.headers)) return "headers: объект строка→строка";
+      if (!isStringRecord(s.headers)) return "headers: an object of string to string";
       const sec = secretIn(s.headers, "headers");
       if (sec) return sec;
     }
-    if (SECRET_VALUE_RE.test(s.url)) return "url содержит токеноподобный фрагмент — секреты в v1 нельзя";
+    if (SECRET_VALUE_RE.test(s.url)) return "the url contains something token-like — v1 does not allow secrets";
     return null;
   }
 
-  if (s.type !== undefined && s.type !== "stdio") return 'type: для локального сервера — "stdio" (или убери поле)';
-  if (typeof s.command !== "string" || s.command.trim() === "") return "command: обязателен для stdio-сервера";
+  if (s.type !== undefined && s.type !== "stdio") return 'type: for a local server use "stdio" (or omit the field)';
+  if (typeof s.command !== "string" || s.command.trim() === "") return "command: required for an stdio server";
   if (s.args !== undefined) {
-    if (!Array.isArray(s.args) || !s.args.every((a) => typeof a === "string")) return "args: массив строк";
+    if (!Array.isArray(s.args) || !s.args.every((a) => typeof a === "string")) return "args: an array of strings";
     const argRec = Object.fromEntries(s.args.map((a, i) => [String(i), a as string]));
     const sec = secretIn(argRec, "args");
     if (sec) return sec;
   }
   if (s.env !== undefined) {
-    if (!isStringRecord(s.env)) return "env: объект строка→строка";
+    if (!isStringRecord(s.env)) return "env: an object of string to string";
     const sec = secretIn(s.env, "env");
     if (sec) return sec;
   }
@@ -497,7 +497,7 @@ export async function disconnectMcp(
       }
     }
 
-    if (!removed) return { ok: false, name: args.name, committed: false, error: "нет такого MCP" };
+    if (!removed) return { ok: false, name: args.name, committed: false, error: "no such MCP" };
     const committed = await commitSettings(deps, args.osUsername, `mcp-gate: disconnect ${args.name}`);
 
     // M5.5b: drop the paired vault secret. Idempotent (deleted:false when none);

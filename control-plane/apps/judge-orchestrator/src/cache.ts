@@ -1,5 +1,5 @@
-// Two-tier verdict cache backing the dedup guarantee (docs 09: "контент-хеш
-// дедупликация", "кэш вердиктов с TTL и инвалидацией по версии правил/модели").
+// Two-tier verdict cache backing the dedup guarantee (docs 09: content-hash dedup, and a verdict cache with a TTL that is
+// invalidated when the rule set or model version changes).
 // Key = (artifactHash, rulesetVersion, modelVersion). Redis is the hot tier
 // (TTL); Postgres judge_verdicts is the durable tier (survives a Redis flush).
 // A hit at EITHER tier means NO LLM call — this is what keeps the judge from

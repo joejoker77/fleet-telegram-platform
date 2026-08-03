@@ -216,7 +216,7 @@ async function notifyTelegram(deps: ApprovalsDeps, userId: string, title: string
 
   const body: Record<string, unknown> = {
     chat_id: chatId,
-    text: `⚠️ Запрос на подтверждение: ${title}\n\nОткрой аппрувы в mini-app, чтобы разрешить или отклонить.`,
+    text: `⚠️ Approval needed: ${title}\n\nOpen the approvals screen to allow or reject it.`,
   };
   if (deps.miniappUrl) {
     // web_app button: allowed in private chats, opens the Mini App directly.
@@ -226,13 +226,13 @@ async function notifyTelegram(deps: ApprovalsDeps, userId: string, title: string
     // Cache-Control:no-cache suspenders (deploy/nginx-miniapp.conf).
     body.reply_markup = {
       inline_keyboard: [
-        [{ text: "Открыть аппрувы", web_app: { url: `${deps.miniappUrl}/?screen=approvals&v=2` } }],
+        [{ text: "Open approvals", web_app: { url: `${deps.miniappUrl}/?screen=approvals&v=2` } }],
       ],
     };
   } else if (deps.botUsername) {
     body.reply_markup = {
       inline_keyboard: [
-        [{ text: "Открыть аппрувы", url: `https://t.me/${deps.botUsername}?startapp=approvals` }],
+        [{ text: "Open approvals", url: `https://t.me/${deps.botUsername}?startapp=approvals` }],
       ],
     };
   }

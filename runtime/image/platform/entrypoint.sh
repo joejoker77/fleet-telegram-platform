@@ -375,7 +375,7 @@ PY
 # M5.7 readiness: "switched" (pane respawned) != "ready" (bot actually answers).
 # Ready = the telegram plugin of the NEW claude is polling. The supervisor is
 # the only place that can see pod processes, so it owns the state file; cp-api
-# exposes it and the Mini App shows "запускается…" until ready — no timeouts.
+# exposes it and the Mini App shows "starting…" until ready — no timeouts.
 SESSION_STATE="$RUN_DIR/session-state.json"
 set_session_state() { # $1 = name, $2 = starting|ready
   printf '{"name":"%s","status":"%s"}\n' "$1" "$2" > "$SESSION_STATE.tmp" \

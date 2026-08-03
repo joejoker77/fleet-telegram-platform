@@ -15,7 +15,7 @@
 //     don't fire every second and trip Telegram flood-bans. Never raw args.
 //   • Leading icon = the SAME animated Telegram Premium custom emoji the fleet
 //     uses (tg-emoji id 5377731669467884550, parse_mode=HTML; non-Premium
-//     clients fall back to the 🟠 glyph) — the "мигающая красная точка".
+//     clients fall back to the 🟠 glyph) — the blinking red dot.
 //   • Tool-line fallback (`● Tool(`) → friendly labelForTool map.
 //   • Hysteresis: placeholder appears after ACTIVE_CREATE_TICKS active ticks,
 //     retires after IDLE_RETIRE_TICKS idle ticks. Idle but no fresh phrase →

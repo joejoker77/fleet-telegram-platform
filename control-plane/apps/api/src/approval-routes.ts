@@ -105,7 +105,7 @@ export function registerApprovalRoutes(
     const approval = await createApproval(deps, {
       userId: ctx.userId,
       kind: "test",
-      title: body.title ?? "Тестовый аппрув (m5.4b acceptance)",
+      title: body.title ?? "Test approval (m5.4b acceptance)",
       payload: { source: "POST /approvals/test" },
       ttlSeconds,
     });

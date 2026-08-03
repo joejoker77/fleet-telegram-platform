@@ -34,7 +34,7 @@ export function callSecretd(
     });
     sock.setTimeout(timeoutMs, () => {
       sock.destroy();
-      finish({ ok: false, error: "cp-secretd: таймаут" });
+      finish({ ok: false, error: "cp-secretd: timed out" });
     });
     sock.on("data", (c) => {
       buf += c.toString();
@@ -43,13 +43,13 @@ export function callSecretd(
       try {
         finish(JSON.parse(buf) as SecretdResponse);
       } catch {
-        finish({ ok: false, error: "cp-secretd: пустой/некорректный ответ" });
+        finish({ ok: false, error: "cp-secretd: empty or malformed response" });
       }
     });
     sock.on("error", (e: NodeJS.ErrnoException) => {
       const hint =
         e.code === "ENOENT" || e.code === "ECONNREFUSED"
-          ? "cp-secretd недоступен (установлен ли m5.5b-secretd.sh на хосте?)"
+          ? "cp-secretd unavailable (is m5.5b-secretd.sh installed on the host?)"
           : `cp-secretd: ${e.code ?? e.message}`;
       finish({ ok: false, error: hint });
     });
