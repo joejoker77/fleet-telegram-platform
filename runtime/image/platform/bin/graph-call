@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# graph-call — runtime Microsoft Graph helper (app-only, OAuth2 client credentials).
+#
+# Graph needs two steps and a SHORT-LIVED bearer token that the egress proxy cannot inject
+# (it only injects static secrets), so this helper does both and the agent makes ONE call:
+#   1. POST login.microsoftonline.com/<tenant>/oauth2/v2.0/token — the proxy injects the firm's
+#      Basic client credentials (vault secret `ms-graph-client`, bound to your agent only if
+#      your role is entitled to Graph) and returns a ~1h access_token. This helper sends NO
+#      auth of its own on that call.
+#   2. Call graph.microsoft.com/v1.0/<resource> with `Authorization: Bearer <token>`.
+# The token is fetched fresh per call and never written to disk.
+#
+# Usage:
+#   graph-call <METHOD> <resource> [extra curl args...]
+#   graph-call GET  users
+#   graph-call GET  'users/lawyer@firm.co.uk/messages?$top=5&$select=subject,from,receivedDateTime'
+#   graph-call GET  'users/lawyer@firm.co.uk/calendar/events?$top=10'
+#   graph-call POST 'users/lawyer@firm.co.uk/sendMail' --data @/tmp/mail.json
+#
+# APP-ONLY means there is no signed-in user: /me does NOT work. Always address a specific
+# mailbox or drive, e.g. users/<upn>/messages, users/<upn>/drive, sites/<id>.
+#
+# Env overrides: GRAPH_TENANT_ID, GRAPH_API_VERSION (v1.0 | beta).
+set -euo pipefail
+
+GRAPH_TENANT_ID="${GRAPH_TENANT_ID:-431277f3-d970-475d-8efe-bd475d689a8f}"
+GRAPH_API_VERSION="${GRAPH_API_VERSION:-v1.0}"
+
+METHOD="${1:?usage: graph-call <METHOD> <resource> [curl-args...]  (e.g. graph-call GET users)}"
+RES="${2:?resource required, e.g. users / users/<upn>/messages}"
+shift 2
+RES="${RES#/}"
+
+# Step 1 — token. No Authorization header here on purpose: the proxy injects the Basic client
+# credentials for login.microsoftonline.com. If nothing is injected (role not entitled, or the
+# secret is not vaulted yet) Azure answers invalid_client and we say so plainly.
+tok_resp="$(curl -sS -m 30 -X POST \
+  "https://login.microsoftonline.com/${GRAPH_TENANT_ID}/oauth2/v2.0/token" \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  --data-urlencode 'grant_type=client_credentials' \
+  --data-urlencode 'scope=https://graph.microsoft.com/.default' 2>&1)" || {
+    echo "graph-call: token request to login.microsoftonline.com failed (network/egress)." >&2; exit 1; }
+
+token="$(printf '%s' "$tok_resp" | python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("access_token",""))
+except Exception: print("")' 2>/dev/null || true)"
+
+if [ -z "$token" ]; then
+  echo "graph-call: no access_token." >&2
+  echo "  Likely: your role is not entitled to Microsoft Graph, or the firm's Azure client" >&2
+  echo "  credentials are not in the vault yet (ask an administrator to run the onboarding" >&2
+  echo "  script). Azure said:" >&2
+  printf '%s\n' "$tok_resp" | head -c 400 >&2; echo >&2
+  exit 1
+fi
+
+# Step 2 — the actual Graph call.
+exec curl -sS -m 60 -X "$METHOD" \
+  "https://graph.microsoft.com/${GRAPH_API_VERSION}/${RES}" \
+  -H "Authorization: Bearer $token" \
+  -H 'Content-Type: application/json' \
+  -H 'ConsistencyLevel: eventual' \
+  "$@"

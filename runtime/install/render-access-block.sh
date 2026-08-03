@@ -56,6 +56,7 @@ whatis() { case "$1" in
   exa)        echo "AI web search";;
   composio)   echo "connect your own external apps (Gmail, Slack, Calendar, …)";;
   elevenlabs) echo "transcribing the user's voice messages";;
+  msgraph)    echo "the firm's Microsoft 365 — mailboxes, calendars, files, users";;
   xero)       echo "billing & invoicing";;
   *)          echo "-";;
 esac; }
@@ -66,6 +67,7 @@ howreach() { # $1=service $2=key_type $3=scope
     composio) echo "one-click connect (your own account)";;
     # Supabase read tier goes through the host SQL gateway, not the REST API — a Supabase
     # secret key bypasses RLS and so cannot be made read-only.
+    msgraph)  echo '`graph-call` helper';;
     supabase) if [ "${3:-}" = read ]; then echo "SQL via the read-only DB gateway"
               else echo "direct REST, key auto-injected"; fi;;
     *) if [ "$2" = per_user ]; then echo "direct REST, your own key (auto-injected)"; else echo "direct REST, key auto-injected"; fi;;
@@ -201,6 +203,22 @@ guessing at the content.
   passed on, give back the clean transcript and don't editorialise.
 - If this returns 401/403 the key isn't set yet; if it can't connect at all, ElevenLabs may be
   blocked from this region — say so instead of retrying in a loop.
+MD
+    ;;
+    msgraph) cat <<'MD'
+#### Microsoft Graph — the firm's Microsoft 365 (app-only)
+Use the **`graph-call`** helper; it does the two-step token exchange for you, so you never hold
+a credential:
+- `graph-call GET users` · `graph-call GET 'users/<upn>/messages?$top=5'`
+- `graph-call GET 'users/<upn>/calendar/events?$top=10'`
+- `graph-call POST 'users/<upn>/sendMail' --data @/tmp/mail.json`
+- **APP-ONLY: there is no signed-in user, so `/me` does NOT work.** Always name the mailbox or
+  drive explicitly — `users/<upn>/...`, `sites/<id>/...`.
+- `$select` / `$top` / `$filter` matter here: mailboxes are large and the default page is not.
+- ⚠️ This credential is tenant-wide: it can read and send mail as ANY user in the firm, and read
+  files and user records across it. Touch only the mailbox or file the user actually asked about,
+  show what you are about to send before sending it, and never browse someone else's mail out of
+  curiosity.
 MD
     ;;
     xero) cat <<'MD'

@@ -105,7 +105,9 @@ RUN chmod 0755 /opt/platform/entrypoint.sh /opt/platform/session-ctl /opt/platfo
  # C: full-text search over this bot's own session logs (FTS5; indexer loop in entrypoint)
  && ln -sf /opt/platform/bin/session-search /usr/local/bin/session-search \
  # firm: Xero runtime helper — 2-step Custom Connection (Basic client-creds proxy-injected)
- && ln -sf /opt/platform/bin/xero-call /usr/local/bin/xero-call
+ && ln -sf /opt/platform/bin/xero-call /usr/local/bin/xero-call \
+ # firm: Microsoft Graph runtime helper — app-only client-credentials, same 2-step shape
+ && ln -sf /opt/platform/bin/graph-call /usr/local/bin/graph-call
 
 # Sanity: fail the build early if a core tool is missing.
 RUN claude --version && bun --version && node --version \
