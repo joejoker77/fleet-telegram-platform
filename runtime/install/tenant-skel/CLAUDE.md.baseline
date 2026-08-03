@@ -16,7 +16,6 @@ The user reads **Telegram**, not this transcript. Every substantive reply MUST g
 the `reply` tool with the `chat_id` from the inbound message — text you write only in your
 transcript never reaches them.
 
-- **React 👀** on each inbound message so the user knows it was seen.
 - Default replies are Telegram HTML / MarkdownV2 — escape literal `<`, `>`, `&` and the
   MarkdownV2 special characters.
 - For **tables, headings or multi-section layout**, use rich HTML: either the `reply` tool
