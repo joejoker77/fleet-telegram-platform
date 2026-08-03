@@ -110,10 +110,20 @@ fi
 
 # Claude + official Telegram plugin channel (no patch), or remote-only if opted out.
 REMOTE_CONTROL_NAME="${REMOTE_CONTROL_NAME:-$USER_NAME-main}"
+
+# Automatic model fallback. The model is pinned (unset => Claude Code silently uses Sonnet),
+# but pinning one exact version means the day it stops being usable EVERY tenant goes mute at
+# once — which is exactly what happened when the pinned fable-5 started answering
+# "requires usage credits". A fallback chain keeps a tenant answering on the next model in the
+# list instead. Comma-separated, tried in order; set per deployment from the host, so changing
+# it needs no image rebuild.
+FALLBACK_ARG=""
+[ -n "${CLAUDE_FALLBACK_MODEL:-}" ] && FALLBACK_ARG=" --fallback-model $CLAUDE_FALLBACK_MODEL"
+
 if [ "${DISABLE_TELEGRAM_CHANNEL:-0}" = "1" ]; then
-  CLAUDE_CMD="/usr/bin/claude --remote-control $REMOTE_CONTROL_NAME"
+  CLAUDE_CMD="/usr/bin/claude --remote-control $REMOTE_CONTROL_NAME$FALLBACK_ARG"
 else
-  CLAUDE_CMD="/usr/bin/claude --channels plugin:telegram@claude-plugins-official --remote-control $REMOTE_CONTROL_NAME"
+  CLAUDE_CMD="/usr/bin/claude --channels plugin:telegram@claude-plugins-official --remote-control $REMOTE_CONTROL_NAME$FALLBACK_ARG"
 fi
 
 # ── M5.7 named sessions/projects (docs/M5.7-sessions-design.md) ──────────────

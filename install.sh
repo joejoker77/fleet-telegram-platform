@@ -16,7 +16,7 @@
 #   sudo ./install.sh [--dry-run] [--phase <name>] [--yes] [--config <file>]
 #     --dry-run     preflight + print the plan + describe every secret; change NOTHING
 #     --phase NAME  run only one phase (secrets|stores|services|image|egress|
-#                   security|authoring|marketplace|callback|tenants|verify)
+#                   security|authoring|marketplace|model|callback|tenants|verify)
 #     --yes         non-interactive confirmations (secrets must come from env/--config)
 #     --config F    source F first (sets config vars + any pre-supplied secret values)
 #
@@ -58,6 +58,12 @@ export DRY_RUN ONLY_PHASE ASSUME_YES
 # which silently routes this deployment's users (and their identifiers) through someone else's
 # host. Set it and the callback is served here instead, behind TLS, as the ONLY public path.
 # Empty => skipped, and that fallback stays in effect.
+# Model fallback chain for tenant sessions (comma-separated, tried in order). The pinned model
+# lives in the tenant settings template; THIS is what keeps a tenant answering when that model
+# becomes unusable — a pinned version that stops working otherwise mutes every tenant at once.
+# Stays inside the Opus family by default, so quality does not silently collapse; add a smaller
+# model at the end if availability matters more than consistency.
+MODEL_FALLBACK="${MODEL_FALLBACK:-opus}"
 CALLBACK_DOMAIN="${CALLBACK_DOMAIN:-}"
 CERTBOT_EMAIL="${CERTBOT_EMAIL:-}"
 BOOTSTRAP_ADMIN_USER="${BOOTSTRAP_ADMIN_USER:-}"
@@ -236,6 +242,18 @@ phase_authoring() {
 # ── PHASE: artifact marketplace ───────────────────────────────────────────────
 phase_marketplace() { run_cmd bash "$RT_INSTALL/m8.1-registry.sh"; }
 
+# ── PHASE: runtime model policy ───────────────────────────────────────────────
+phase_model() {
+  if [ "$DRY_RUN" = "1" ]; then
+    info "would write /etc/claudeapp/model.env with CLAUDE_FALLBACK_MODEL=$MODEL_FALLBACK"
+    return 0
+  fi
+  install -d -m 0755 /etc/claudeapp
+  printf 'CLAUDE_FALLBACK_MODEL=%s\n' "$MODEL_FALLBACK" > /etc/claudeapp/model.env
+  chmod 0644 /etc/claudeapp/model.env
+  info "model fallback chain: $MODEL_FALLBACK (claude-pod-run passes it; entrypoint turns it into --fallback-model)"
+}
+
 # ── PHASE: public Composio callback (own domain + TLS) ────────────────────────
 phase_callback() {
   if [ -z "${CALLBACK_DOMAIN:-}" ]; then
@@ -291,6 +309,7 @@ run_phase egress        phase_egress
 run_phase security      phase_security
 run_phase authoring     phase_authoring
 run_phase marketplace   phase_marketplace
+run_phase model         phase_model
 run_phase callback      phase_callback
 run_phase bootstrap_admin phase_bootstrap_admin
 run_phase verify        phase_verify

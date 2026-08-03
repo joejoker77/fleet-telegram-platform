@@ -85,6 +85,17 @@ if [ -f "$CB_FILE" ]; then
   [ -n "${COMPOSIO_CALLBACK_BASE:-}" ] && COMPOSIO_ARGS=(-e COMPOSIO_CALLBACK_BASE="$COMPOSIO_CALLBACK_BASE")
 fi
 
+# Model fallback chain (comma-separated, tried in order). The entrypoint turns this into
+# --fallback-model, so a pinned model that becomes unusable degrades to the next one instead of
+# muting every tenant at once. Host-configurable: no image rebuild to change it.
+MODEL_ARGS=()
+MODEL_FILE=/etc/claudeapp/model.env
+if [ -f "$MODEL_FILE" ]; then
+  # shellcheck disable=SC1090
+  . "$MODEL_FILE"
+  [ -n "${CLAUDE_FALLBACK_MODEL:-}" ] && MODEL_ARGS=(-e CLAUDE_FALLBACK_MODEL="$CLAUDE_FALLBACK_MODEL")
+fi
+
 # ~/.ssh: mount the tenant's own SSH keys so the agent can reach remote servers
 # (owner decision 2026-06-15; egress is full-outbound). Mounted rw so ssh can
 # append to ~/.ssh/known_hosts on first connect. Only when present — users with
@@ -156,7 +167,7 @@ exec /usr/bin/podman run --rm --name "claude-$U" \
   --cap-drop=ALL \
   --read-only --tmpfs /tmp --tmpfs /run \
   --memory=4g --memory-reservation=3g --cpus=2 --pids-limit=2048 \
-  -e HOME="$HOME_DIR" -e XDG_RUNTIME_DIR=/tmp -e HOST_ADMIN_USER="$U" "${PROXY_ARGS[@]}" "${CLAUDE_AUTH_ARGS[@]}" "${COMPOSIO_ARGS[@]}" \
+  -e HOME="$HOME_DIR" -e XDG_RUNTIME_DIR=/tmp -e HOST_ADMIN_USER="$U" "${PROXY_ARGS[@]}" "${CLAUDE_AUTH_ARGS[@]}" "${COMPOSIO_ARGS[@]}" "${MODEL_ARGS[@]}" \
   -v "$HOME_DIR/.claude:$HOME_DIR/.claude" \
   -v "$HOME_DIR/work:$HOME_DIR/work" \
   -v "$HOME_DIR/.config:$HOME_DIR/.config" \
