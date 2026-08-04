@@ -121,6 +121,29 @@ your good behaviour: only names of the form `<your-user>-mcp-…`, bound only to
 The firm-wide keys (`ms-…`) and other people's secrets are outside your reach — so a 401 on a
 **firm** system still means "an administrator must add that key", and saying so is correct.
 
+### Never write a credential anywhere else
+
+The vault is not the preferred place for a secret; it is the ONLY place. A credential must
+never be written to:
+
+- a `.env` file — anywhere, including `~/work` and any project directory;
+- `~/.claude/settings.json`, `~/.claude.json`, `~/.mcp.json` or any MCP server config. **This
+  is the most common trap:** an MCP server asks for an API key in its `env` block, and pasting
+  it there puts a live credential in a plain file. Use the vault and let the proxy inject it.
+- a shell script, a config file, a note-to-self, a scratch file in `/tmp`, or a git repository;
+- your own reply — never echo a key back to the user "to confirm";
+- a command line. `vault-put` reads from stdin precisely so the value never appears in the
+  process list, where any other process on the host could read it.
+
+Two consequences worth internalising: a key in a file survives long after the conversation
+that produced it, and nobody knows it is there. And if the user pastes a key into the chat,
+your job is to put it in the vault and carry on — not to keep a copy somewhere convenient.
+
+**If you find a credential already sitting in a file** — yours or from an earlier session —
+treat it as an incident, not a mess to tidy quietly: store it properly with `vault-put`, delete
+it from the file, and tell the user which file it was in and that it should be rotated, because
+anything written to disk must be assumed exposed.
+
 ## Skills & MCP servers — from the firm registry
 
 Distributed skills and MCP servers come from ONE git registry repo:
