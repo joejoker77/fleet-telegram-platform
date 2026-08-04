@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# vault-put — store a credential the USER gave you into the vault, yourself.
+#
+# WHY THIS EXISTS. The rule is that a credential never lives in a file and never stays in your
+# context — it belongs in the vault, where the egress proxy injects it into outbound requests and
+# your process never sees the value again. Until now the only way in was an administrator running
+# an onboarding script, so when a user handed you a key you had to send them away. You don't.
+#
+# WHAT YOU CAN AND CANNOT DO. The privileged helper identifies you from the kernel (the socket
+# peer), not from anything you send, so:
+#   * you may create, rotate and delete ONLY secrets named  <your-user>-mcp-<something>
+#   * you may bind them ONLY to your own agent
+#   * you can NOT touch the firm-wide ms-* keys or another user's secrets — those stay with an
+#     administrator. If a firm system returns 401, that is still "ask an administrator".
+#
+# Usage (the value is read from STDIN — never put a secret on a command line):
+#   printf %s "$KEY" | vault-put <name> <host-pattern> <header-name> ['<format>']
+#
+#   printf %s "$KEY" | vault-put me-mcp-notion api.notion.com Authorization 'Bearer {value}'
+#   printf %s "$KEY" | vault-put me-mcp-weather api.weather.com x-api-key
+#
+# Other verbs:
+#   vault-put --has <name>      is it stored / bound?
+#   vault-put --del <name>      remove it
+#
+# After storing, just make the request to that host normally: the proxy adds the header. Confirm
+# to the user in plain words that their key is stored and that you cannot read it back — do not
+# echo the value, and do not write it to a file "just in case".
+set -uo pipefail
+SOCK=/run/cp-secretd/secretd.sock
+
+die(){ printf 'vault-put: %s\n' "$*" >&2; exit 1; }
+[ -S "$SOCK" ] || die "the vault intake socket is not available in this session ($SOCK).
+  Nothing is broken on your side — the platform has not exposed it here. Tell the user their key
+  cannot be stored yet and must go through an administrator; do NOT keep it in a file."
+
+send(){ # JSON request on stdin of the socket, one JSON line back
+  command -v socat >/dev/null 2>&1 || die "socat is missing in this image"
+  socat -t 15 - "UNIX-CONNECT:$SOCK" 2>/dev/null
+}
+
+case "${1:-}" in
+  --has)
+    N="${2:?usage: vault-put --has <name>}"
+    printf '{"verb":"secret_exists","name":"%s"}\n' "$N" | send; exit 0 ;;
+  --del)
+    N="${2:?usage: vault-put --del <name>}"
+    printf '{"verb":"delete_secret","name":"%s"}\n' "$N" | send; exit 0 ;;
+  -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+esac
+
+NAME="${1:?usage: printf %s \"\$KEY\" | vault-put <name> <host> <header> ['<format>']}"
+HOST="${2:?host-pattern required, e.g. api.example.com}"
+HEADER="${3:?header-name required, e.g. Authorization or x-api-key}"
+FMT="${4:-{value\}}"
+
+VALUE="$(cat)"
+VALUE="${VALUE%$'\n'}"
+[ -n "$VALUE" ] || die "no value on stdin — pipe the key in, do not pass it as an argument"
+
+# Build the request with python so the value is JSON-escaped properly and never reaches argv.
+REQ="$(NAME="$NAME" HOST="$HOST" HEADER="$HEADER" FMT="$FMT" VALUE="$VALUE" python3 -c '
+import json, os
+print(json.dumps({
+  "verb": "stage_secret",
+  "name": os.environ["NAME"],
+  "hostPattern": os.environ["HOST"],
+  "headerName": os.environ["HEADER"],
+  "valueFormat": os.environ["FMT"],
+  "value": os.environ["VALUE"],
+}))')"
+unset VALUE
+
+RESP="$(printf '%s\n' "$REQ" | send)"
+unset REQ
+printf '%s\n' "$RESP"
+
+# Staging leaves the secret unbound; bind it to this agent so requests actually carry it.
+case "$RESP" in
+  *'"ok": true'*|*'"ok":true'*)
+    printf '{"verb":"bind_secret","name":"%s"}\n' "$NAME" | send ;;
+esac

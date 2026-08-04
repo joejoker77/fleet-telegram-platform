@@ -148,6 +148,18 @@ if podman volume exists cp-audit-run >/dev/null 2>&1; then
   [ -n "${AGID:-}" ] && AUDIT_ARGS+=(--group-add "$AGID")
 fi
 
+# Secret intake: expose the cp-secretd socket so the agent can put a credential the USER gave
+# it straight into the vault, instead of telling them to find an administrator. The helper
+# identifies the caller by SO_PEERCRED and only ever accepts <user>-mcp-* names bound to that
+# user's own agent, so mounting it grants no reach over firm-wide or other tenants' secrets.
+# The socket is root:cp-secret 0660, hence the supplementary group.
+SECRETD_ARGS=()
+if [ -S /run/cp-secretd/secretd.sock ]; then
+  SECRETD_ARGS=(-v /run/cp-secretd:/run/cp-secretd)
+  SGID="$(getent group cp-secret 2>/dev/null | cut -d: -f3 || true)"
+  [ -n "${SGID:-}" ] && SECRETD_ARGS+=(--group-add "$SGID")
+fi
+
 # (web-IDE / code-server removed for the firm build — no IDE socket bind here.)
 
 # NOTE: do NOT add `--security-opt=no-new-privileges`. The PR_SET_NO_NEW_PRIVS
@@ -167,7 +179,7 @@ exec /usr/bin/podman run --rm --name "claude-$U" \
   --cap-drop=ALL \
   --read-only --tmpfs /tmp --tmpfs /run \
   --memory=4g --memory-reservation=3g --cpus=2 --pids-limit=2048 \
-  -e HOME="$HOME_DIR" -e XDG_RUNTIME_DIR=/tmp -e HOST_ADMIN_USER="$U" "${PROXY_ARGS[@]}" "${CLAUDE_AUTH_ARGS[@]}" "${COMPOSIO_ARGS[@]}" "${MODEL_ARGS[@]}" \
+  -e HOME="$HOME_DIR" -e XDG_RUNTIME_DIR=/tmp -e HOST_ADMIN_USER="$U" "${PROXY_ARGS[@]}" "${CLAUDE_AUTH_ARGS[@]}" "${COMPOSIO_ARGS[@]}" "${MODEL_ARGS[@]}" "${SECRETD_ARGS[@]}" \
   -v "$HOME_DIR/.claude:$HOME_DIR/.claude" \
   -v "$HOME_DIR/work:$HOME_DIR/work" \
   -v "$HOME_DIR/.config:$HOME_DIR/.config" \

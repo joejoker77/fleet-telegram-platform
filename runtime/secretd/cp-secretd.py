@@ -6,25 +6,69 @@
 #
 # Hardwired invariants (NOT parameters — the whole point of this helper over
 # handing cp-api the OneCLI admin key):
-#   * secret names must match ^vitaliy-mcp-[a-z0-9][a-z0-9._-]{0,48}$
-#   * binds go to the vitaliy-bot agent ONLY
+#   * secret names must match ^<caller>-mcp-[a-z0-9][a-z0-9._-]{0,48}$
+#   * binds go to the CALLER's own <caller>-bot agent ONLY
 #   * secret values are never returned, never logged, never audited
 #   * additive bind with verify-after-set + pre-state restore (the
 #     git-pat-vault.sh pattern: set-secrets replace-vs-append semantics are
 #     unknown, so losing an existing binding rolls back and errors)
 #
 # Verbs: stage_secret | bind_secret | delete_secret | secret_exists
-# Pilot: vitaliy only (M1+ rule).
+# Multi-tenant: the caller is identified by SO_PEERCRED, so each tenant can manage only
+# its own <user>-mcp-* secrets and can never touch ms-* (firm-wide) or another tenant's.
 import json
 import os
 import re
+import pwd
 import socket
+import struct
 import subprocess
 import sys
 
 ONECLI = "/usr/local/bin/onecli"
-AGENT_IDENT = "vitaliy-bot"
-NAME_RE = re.compile(r"^vitaliy-mcp-[a-z0-9][a-z0-9._-]{0,48}$")
+
+# WHO is calling is decided by the KERNEL, not by the request. With socket activation
+# (Accept=yes) the connected socket is our stdin, so SO_PEERCRED gives the peer's uid and we
+# map it to a tenant. That is what makes this safe to expose to tenants directly: a tenant
+# cannot ask to write a secret belonging to another tenant, because it never gets to say who it
+# is. Previously both the agent and the name pattern were hardcoded to the pilot tenant
+# ("vitaliy"), so on any other deployment this helper could not be used at all.
+#
+# A peer uid of 0 is a trusted local caller (cp-api on behalf of an approved request); only
+# then may the request name the tenant explicitly.
+def peer_user():
+    try:
+        s = socket.fromfd(0, socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            raw = s.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+            _pid, uid, _gid = struct.unpack("3i", raw)
+        finally:
+            s.close()
+    except OSError:
+        return None
+    if uid == 0:
+        return None
+    try:
+        return pwd.getpwuid(uid).pw_name
+    except KeyError:
+        raise ValueError(f"calling uid {uid} maps to no local user")
+
+
+def tenant_of(req):
+    """Tenant this request acts for: from the kernel for tenants, from the request for root."""
+    who = peer_user()
+    if who:
+        if req.get("user") and req["user"] != who:
+            raise ValueError("you may only manage your own secrets")
+        return who
+    who = req.get("user", "")
+    if not isinstance(who, str) or not re.match(r"^[a-z][a-z0-9-]{0,32}$", who):
+        raise ValueError("user: required for a root caller, lowercase letters/digits/-")
+    return who
+
+
+def name_re(user):
+    return re.compile(rf"^{re.escape(user)}-mcp-[a-z0-9][a-z0-9._-]{{0,48}}$")
 HOST_RE = re.compile(r"^(\*\.)?[A-Za-z0-9][A-Za-z0-9.-]{1,200}\.[A-Za-z]{2,}$")
 HEADER_RE = re.compile(r"^[A-Za-z0-9-]{1,64}$")
 MAX_VALUE = 4096
@@ -53,11 +97,12 @@ def find_secret_id(name):
     return None
 
 
-def agent_id():
+def agent_id(user):
+    want = f"{user}-bot"
     for a in rows(onecli("agents", "list")):
-        if isinstance(a, dict) and a.get("identifier") == AGENT_IDENT:
+        if isinstance(a, dict) and a.get("identifier") == want:
             return a["id"]
-    raise RuntimeError(f"agent {AGENT_IDENT} not found")
+    raise RuntimeError(f"agent {want} not found")
 
 
 def agent_secret_ids(aid):
@@ -113,10 +158,10 @@ def audit(kind, payload):
         pass
 
 
-def validate(req):
+def validate(req, user):
     name = req.get("name", "")
-    if not isinstance(name, str) or not NAME_RE.match(name):
-        raise ValueError("name must match ^vitaliy-mcp-[a-z0-9][a-z0-9._-]{0,48}$")
+    if not isinstance(name, str) or not name_re(user).match(name):
+        raise ValueError(f"name must match ^{user}-mcp-[a-z0-9][a-z0-9._-]{{0,48}}$")
     if req["verb"] != "stage_secret":
         return
     host = req.get("hostPattern", "")
@@ -139,9 +184,10 @@ def handle(req):
     verb = req.get("verb")
     if verb not in ("stage_secret", "bind_secret", "delete_secret", "secret_exists"):
         raise ValueError("verb: stage_secret | bind_secret | delete_secret | secret_exists")
-    validate(req)
+    user = tenant_of(req)
+    validate(req, user)
     name = req["name"]
-    aid = agent_id()
+    aid = agent_id(user)
     sid = find_secret_id(name)
 
     if verb == "secret_exists":
@@ -173,7 +219,7 @@ def handle(req):
         if not sid:
             raise RuntimeError(f"secret {name} not found (stage it first)")
         bind_verified(aid, sid)
-        audit("mcp.secret.bound", {"name": name, "agent": AGENT_IDENT})
+        audit("mcp.secret.bound", {"name": name, "agent": f"{user}-bot"})
         return {"ok": True, "bound": name}
 
     # delete_secret — idempotent: absent secret is success (it's a cleanup verb).

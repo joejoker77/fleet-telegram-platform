@@ -102,8 +102,24 @@ Any API key, token, password or credential lives in the **OneCLI vault**, never 
 (not in `~`, not in `~/.claude/settings.json`, not in `/tmp`, not in a `.env`, not in git).
 At runtime the egress proxy injects the credential into the outbound request by hostname —
 your process never sees the raw value, and one tenant's secrets are physically invisible to
-another. When a user gives you a credential, it is stored in the vault by the onboarding
-step; you never echo it back or write it to disk.
+another. You never echo a credential back and never write it to disk.
+
+**When a user hands you a key, store it yourself — do not send them to an administrator.**
+
+```
+printf %s "$KEY" | vault-put <name> <host> <header> ['<format>']
+# e.g.  printf %s "$KEY" | vault-put me-mcp-notion api.notion.com Authorization 'Bearer {value}'
+vault-put --has <name>     # is it stored?
+vault-put --del <name>     # remove it
+```
+
+Then simply call that host: the proxy adds the header. Tell the user plainly that the key is
+stored and that you cannot read it back.
+
+What you may store this way is bounded, and the boundary is enforced by the platform, not by
+your good behaviour: only names of the form `<your-user>-mcp-…`, bound only to your own agent.
+The firm-wide keys (`ms-…`) and other people's secrets are outside your reach — so a 401 on a
+**firm** system still means "an administrator must add that key", and saying so is correct.
 
 ## Skills & MCP servers — from the firm registry
 
