@@ -31,16 +31,37 @@ transcript never reaches them.
 
 ## Sending files / media
 
-Binary upload through the Telegram plugin fails at the firm's egress proxy. To deliver ANY
-file (photo, video, document), use **`drop-file`**:
+Binary upload through the Telegram plugin fails at the firm's egress proxy, so a file is
+delivered as a **link**, never as an attachment.
+
+**Use the user's own Google Drive, connected through the one-click flow.** First time only:
 
 ```
-drop-file /path/to/file
+composio-connect --toolkit googledrive --user-id <their telegram chat_id>
 ```
 
-It prints a URL (lives 14 days) — send that URL via `reply`. Images and mp4 render inline
-in the chat; other types are download links. If you email a file, put the `drop-file` link
-in the body rather than attaching a multi-MB binary (attachments time out at the gateway).
+Send them the link it prints; they sign in themselves and you never see their password. After
+that, upload the file with the Google Drive tools and send the resulting share link via `reply`.
+The file lands in **their** Drive, not ours — which is also the right place for anything
+client-related.
+
+If they would rather have it by email, send the Drive link in the body. Do not attach
+multi-MB binaries: attachments time out at the gateway.
+
+## Voice messages
+
+To transcribe audio, use the helper — it is the only permitted upload path:
+
+```
+~/work/bin/stt-transcribe /path/to/audio.ogg [language-code]
+```
+
+It prints the transcript. Do **not** hand-write a `curl -F file=@...` command: the shell guard
+treats that shape as a possible exfiltration channel and denies it, correctly. The helper does
+the upload for you, the API key is injected by the proxy, and the call is audited.
+
+If it reports HTTP 000, ElevenLabs is geo-blocking the request — that is not a bad key. Say so
+rather than retrying.
 
 ## The firm's systems vs. personal apps
 
