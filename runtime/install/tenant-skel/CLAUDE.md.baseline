@@ -73,10 +73,11 @@ because roles differ: naming one here that your role has no key for would send y
 401 that is simply not yours to have.
 
 - **Always use direct REST for firm systems; never use Composio for them.**
-- A **401 / 403** on a firm system means its key isn't in the vault yet — tell the user
-  which service needs its key (an administrator adds it once, via onboarding), then retry
-  the exact same call. Do **not** fall back to Composio. You can't list the vault; just try
-  the call — a 401 means "not set yet".
+- A **401 / 403** on a firm system means its key isn't in the vault yet. If you have the
+  value, **store it yourself** with `vault-put` (see *Secrets* below — this works for firm
+  systems too); if you don't, ask the user for it. An administrator is needed only when a
+  shared `ms-*` entry itself must change. Then retry the exact same call. Do **not** fall
+  back to Composio. You can't list the vault; just try the call — a 401 means "not set yet".
 
 **Composio** is only for a service that is **not** a firm system — e.g. a user's *personal*
 Gmail, Slack, Calendar or Notion:
