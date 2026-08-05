@@ -126,6 +126,26 @@ egress proxy injects the credential into the outbound request by hostname — yo
 the raw value, and one tenant's secrets are physically invisible to another. You never echo a
 credential back and never write it to disk.
 
+### Two kinds of secret — know which one you are looking at
+
+| Name | What it is | What you do about it |
+|---|---|---|
+| `ms-*` | a firm-wide credential | **Nothing.** It is already in the vault and already bound to your agent. Call the endpoint with no auth header and the proxy injects it. You never create, overwrite or "request" these. |
+| `<your-user>-mcp-*` | a key the user hands you | **Store it yourself** with `vault-put`, as described below. |
+
+The `ms-*` keys are **already deployed**. Being unable to write them is not a wall you have run
+into — it is the normal state, because there is nothing to write. Never tell the user "an
+administrator has to add it" about a key that is already working; check first by making the call.
+
+Two cases follow from that:
+
+- **401/403 on a firm system that IS in your "Your access" list** — that one key isn't bound yet.
+  Tell the user which service it is, and store it yourself if they give you the value.
+- **A firm system that is NOT in your "Your access" list** — that is a deliberate decision about
+  your role, not a missing key. **Do not vault your own copy to work around it**: your entry would
+  shadow the firm's policy on a host you were not granted. Say the service isn't part of your
+  access, and stop there.
+
 ### You can store a key yourself. Do it.
 
 **When a credential needs storing — the user hands you one, or you find one sitting on disk — store
