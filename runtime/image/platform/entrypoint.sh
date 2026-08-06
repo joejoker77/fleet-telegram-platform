@@ -571,6 +571,12 @@ CHAN_START_GRACE="${CHANNEL_START_GRACE:-150}"
 # pairs in the wild) before declaring the channel dead.
 CHAN_FLAP_GRACE="${CHANNEL_FLAP_GRACE:-60}"
 
+logged_in() {
+  # The one fact that decides whether a missing channel is a fault or a not-yet. Claude writes
+  # this file when /login completes; before that it refuses to load channels at all and says so.
+  [ -s "$HOME/.claude/.credentials.json" ]
+}
+
 channel_alive() {
   # Healthy iff the plugin PROCESS is alive in THIS pid namespace. The naive
   # check (bot.pid exists + kill -0) false-positives: bot.pid lives on the
@@ -589,6 +595,30 @@ channel_alive() {
 
 # Phase 1 — wait for the channel to come up the first time (skip if disabled).
 if [ "${DISABLE_TELEGRAM_CHANNEL:-0}" != "1" ]; then
+  # A tenant who has never logged in cannot have a channel: claude decides about channels at
+  # startup and, unauthenticated, prints "--channels ignored / Channels are not currently
+  # available". Enforcing the start grace in that state is a trap. The pod kills itself every
+  # 150s precisely BECAUSE nobody has logged in, systemd gives up after four attempts, and the
+  # person who arrives to do the login finds no container at all. That happened on a real
+  # onboarding, twice in one evening, and it is not something to work around by hurrying.
+  #
+  # So while there are no credentials, wait as long as it takes and say so out loud. When they
+  # appear, relaunch claude: the decision it made about channels while logged out is not one it
+  # revisits on its own.
+  if ! logged_in; then
+    echo "[supervise] no credentials yet — waiting for the first /login, for as long as it takes"
+    login_waited=0
+    until logged_in; do
+      tmux has-session -t "$SESSION" 2>/dev/null || {
+        echo "[supervise] claude session gone while waiting for the first login → exit for restart"; exit 1; }
+      sleep 5; login_waited=$((login_waited + 5))
+      [ $((login_waited % 300)) -eq 0 ] && \
+        echo "[supervise] still waiting for the first login (${login_waited}s so far — this is not an error)"
+    done
+    echo "[supervise] credentials appeared after ${login_waited}s → relaunching claude so it picks up the channel"
+    launch_claude "$ACTIVE_DIR" boot
+    sleep 5
+  fi
   waited=0
   until channel_alive; do
     # If claude itself died while we waited, restart now.
@@ -642,7 +672,9 @@ while tmux has-session -t "$SESSION" 2>/dev/null; do
   if [ -f "$REGISTRY_REQ" ]; then
     process_registry_request
   fi
-  if [ "${DISABLE_TELEGRAM_CHANNEL:-0}" != "1" ] && ! channel_alive; then
+  # Same reasoning as Phase 1: a logged-out tenant has no channel by design, and restarting the
+  # pod over it only takes away the terminal somebody needs in order to log in.
+  if [ "${DISABLE_TELEGRAM_CHANNEL:-0}" != "1" ] && logged_in && ! channel_alive; then
     down=$((down + 5))
     if [ "$down" -ge "$CHAN_FLAP_GRACE" ]; then
       echo "[supervise] telegram channel down for ${down}s → exit for restart"
