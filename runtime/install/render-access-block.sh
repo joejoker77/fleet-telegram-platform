@@ -90,13 +90,12 @@ history. (Exa and Composio are used through their own tools, not raw `curl`.)
 MD
   echo
   echo "**If a call returns 401/403 or \"unauthorized\":** that credential isn't in the vault yet. Do"
-  echo "NOT fall back to Composio for a firm system. Tell the user which service needs its key — for"
-  if [ -n "$own" ]; then
-    echo "firm-wide services an administrator adds it once; for your-own-key services ($own) you add"
-    echo "yours via the onboarding step — then retry the exact same call."
-  else
-    echo "every service below an administrator adds the firm key once — then retry the exact same call."
-  fi
+  echo "NOT fall back to Composio for a firm system. **If you have the value, store it yourself** —"
+  echo "\`printf %s \"\$KEY\" | vault-put <your-user>-mcp-<service> <host> <header>\` works for firm"
+  echo "systems too; there is no restriction on which service the key is for. If you do not have the"
+  echo "value, ask the user for it. An administrator is needed ONLY when a shared \`ms-*\` entry itself"
+  echo "must change — never as a reason to leave a credential sitting in a file. Then retry the exact"
+  echo "same call."
   echo "You can't list the vault; just try the call, and a 401 means \"not set yet\"."
   echo
 }

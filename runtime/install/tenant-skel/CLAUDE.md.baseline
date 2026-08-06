@@ -31,16 +31,42 @@ transcript never reaches them.
 
 ## Sending files / media
 
-Binary upload through the Telegram plugin fails at the firm's egress proxy. To deliver ANY
-file (photo, video, document), use **`drop-file`**:
+**Send the file straight to the chat.** Use the helper — it uploads through the same path the
+platform verified works, so a report, CSV, PDF or screenshot lands in Telegram as a real file:
 
 ```
-drop-file /path/to/file
+~/work/bin/tg-file /path/to/report.csv "Q1 win rates"
 ```
 
-It prints a URL (lives 14 days) — send that URL via `reply`. Images and mp4 render inline
-in the chat; other types are download links. If you email a file, put the `drop-file` link
-in the body rather than attaching a multi-MB binary (attachments time out at the gateway).
+It picks the right kind automatically (photo / video / document), replies into the same topic, and
+prints the message id. Do **not** pass files through the `reply` tool — that path fails on this
+host, and the failure is in the plugin's uploader, not in the network.
+
+Telegram's limit for a bot is **50 MB**. Above that, or when the user would rather keep the file,
+put it in **their own Google Drive** and send the link:
+
+```
+composio-connect --toolkit googledrive --user-id <their telegram chat_id>
+```
+
+They sign in once with one click and you never see their password; the file lands in their Drive,
+not ours — which is also the right place for anything client-related. If they want it by email,
+send the Drive link in the body rather than attaching a multi-MB binary.
+
+## Voice messages
+
+To transcribe audio, use the helper — it is the only permitted upload path:
+
+```
+~/work/bin/stt-transcribe /path/to/audio.ogg [language-code]
+```
+
+It prints the transcript. Do **not** hand-write a `curl -F file=@...` command: the shell guard
+treats that shape as a possible exfiltration channel and denies it, correctly. The helper does
+the upload for you, the API key is injected by the proxy, and the call is audited.
+
+If it reports HTTP 000, ElevenLabs is geo-blocking the request — that is not a bad key. Say so
+rather than retrying.
 
 ## The firm's systems vs. personal apps
 
@@ -52,10 +78,11 @@ because roles differ: naming one here that your role has no key for would send y
 401 that is simply not yours to have.
 
 - **Always use direct REST for firm systems; never use Composio for them.**
-- A **401 / 403** on a firm system means its key isn't in the vault yet — tell the user
-  which service needs its key (an administrator adds it once, via onboarding), then retry
-  the exact same call. Do **not** fall back to Composio. You can't list the vault; just try
-  the call — a 401 means "not set yet".
+- A **401 / 403** on a firm system means its key isn't in the vault yet. If you have the
+  value, **store it yourself** with `vault-put` (see *Secrets* below — this works for firm
+  systems too); if you don't, ask the user for it. An administrator is needed only when a
+  shared `ms-*` entry itself must change. Then retry the exact same call. Do **not** fall
+  back to Composio. You can't list the vault; just try the call — a 401 means "not set yet".
 
 **Composio** is only for a service that is **not** a firm system — e.g. a user's *personal*
 Gmail, Slack, Calendar or Notion:
@@ -98,52 +125,113 @@ disabled in this runtime — do not use them.
 
 ## Secrets — the OneCLI vault only
 
-Any API key, token, password or credential lives in the **OneCLI vault**, never in a file
-(not in `~`, not in `~/.claude/settings.json`, not in `/tmp`, not in a `.env`, not in git).
-At runtime the egress proxy injects the credential into the outbound request by hostname —
-your process never sees the raw value, and one tenant's secrets are physically invisible to
-another. You never echo a credential back and never write it to disk.
+Any API key, token, password or credential lives in the **OneCLI vault**, never in a file (not in
+`~`, not in `~/.claude/settings.json`, not in `/tmp`, not in a `.env`, not in git). At runtime the
+egress proxy injects the credential into the outbound request by hostname — your process never sees
+the raw value, and one tenant's secrets are physically invisible to another. You never echo a
+credential back and never write it to disk.
 
-**When a user hands you a key, store it yourself — do not send them to an administrator.**
+### Two kinds of secret — know which one you are looking at
+
+| Name | What it is | What you do about it |
+|---|---|---|
+| `ms-*` | a firm-wide credential | **Nothing.** It is already in the vault and already bound to your agent. Call the endpoint with no auth header and the proxy injects it. You never create, overwrite or "request" these. |
+| `<your-user>-mcp-*` | a key the user hands you | **Store it yourself** with `vault-put`, as described below. |
+
+The `ms-*` keys are **already deployed**. Being unable to write them is not a wall you have run
+into — it is the normal state, because there is nothing to write. Never tell the user "an
+administrator has to add it" about a key that is already working; check first by making the call.
+
+Two cases follow from that:
+
+- **401/403 on a firm system that IS in your "Your access" list** — that one key isn't bound yet.
+  Tell the user which service it is, and store it yourself if they give you the value.
+- **A firm system that is NOT in your "Your access" list** — that is a deliberate decision about
+  your role, not a missing key. **Do not vault your own copy to work around it**: your entry would
+  shadow the firm's policy on a host you were not granted. Say the service isn't part of your
+  access, and stop there.
+
+### You can store a key yourself. Do it.
+
+**When a credential needs storing — the user hands you one, or you find one sitting on disk — store
+it yourself. Do not send the user to an administrator.**
 
 ```
 printf %s "$KEY" | vault-put <name> <host> <header> ['<format>']
-# e.g.  printf %s "$KEY" | vault-put me-mcp-notion api.notion.com Authorization 'Bearer {value}'
-vault-put --has <name>     # is it stored?
+vault-put --has <name>     # is it stored / bound?
 vault-put --del <name>     # remove it
 ```
 
-Then simply call that host: the proxy adds the header. Tell the user plainly that the key is
-stored and that you cannot read it back.
+The **only** constraint is the name prefix: `<your-user>-mcp-<something>`, bound to your own agent.
+There is **no restriction on which service the key is for.** A credential for one of the firm's own
+systems goes in exactly the same way — `<your-user>-mcp-payload`, `<your-user>-mcp-jira` — and the
+proxy will inject it on that host just like a shared `ms-*` entry does.
 
-What you may store this way is bounded, and the boundary is enforced by the platform, not by
-your good behaviour: only names of the form `<your-user>-mcp-…`, bound only to your own agent.
-The firm-wide keys (`ms-…`) and other people's secrets are outside your reach — so a 401 on a
-**firm** system still means "an administrator must add that key", and saying so is correct.
+What you cannot do is create or overwrite the **shared `ms-*` entries**, because those are bound to
+other people's agents as well. That is the whole of the limit.
+
+So:
+
+- ✅ "This key is for a firm system, so I'll store it as `<your-user>-mcp-<service>` and verify it."
+- ❌ "This is a firm-wide key, so an administrator has to add it." — **Wrong, and not an excuse for
+  leaving a credential in a file.** Say an administrator is needed ONLY when a shared `ms-*` entry
+  itself must change.
+
+Pipe the value in from a script's stdout so it never appears in a command line (where any process on
+the host can read it) or in your own context. `vault-put` reads stdin for exactly this reason.
+
+**Verify before you trust it.** After storing, call the host with **no auth of your own**. A 2xx
+proves the proxy is injecting correctly. Only then delete any cleartext copy.
+
+Tell the user plainly that the key is stored and that you cannot read it back.
+
+### Check whether you even need to store it
+
+For the firm systems listed in your "Your access" section, the proxy is **already** injecting a
+working credential — just `curl` the endpoint with no auth header and see. If that returns 2xx, a
+copy of that key found in a file is pure redundancy: **delete the copy, don't vault a second one.**
+Binding your own entry to a host that already has a working shared key risks shadowing it with a
+stale value. Vaulting is for services the proxy does **not** yet cover, where a file is currently
+the only copy of the key.
+
+A **401/403** on a firm system means that credential isn't in the vault yet. Store it yourself if
+you have the value; if you don't, ask the user for it — don't fall back to a personal-app
+integration for a firm system.
 
 ### Never write a credential anywhere else
 
-The vault is not the preferred place for a secret; it is the ONLY place. A credential must
-never be written to:
+The vault is not the preferred place for a secret; it is the ONLY place. A credential must never be
+written to:
 
-- a `.env` file — anywhere, including `~/work` and any project directory;
-- `~/.claude/settings.json`, `~/.claude.json`, `~/.mcp.json` or any MCP server config. **This
-  is the most common trap:** an MCP server asks for an API key in its `env` block, and pasting
-  it there puts a live credential in a plain file. Use the vault and let the proxy inject it.
+- a `.env` file — anywhere, including project directories;
+- `~/.claude/settings.json`, `~/.claude.json`, `~/.mcp.json` or any MCP server config. **This is the
+  most common trap:** an MCP server asks for an API key in its `env` block, and pasting it there
+  puts a live credential in a plain file. Use the vault and let the proxy inject it.
 - a shell script, a config file, a note-to-self, a scratch file in `/tmp`, or a git repository;
+- **your own memory files** — a memory file is a plain file on disk that gets loaded into every
+  future session. Write the *host and header* there, never the value;
 - your own reply — never echo a key back to the user "to confirm";
-- a command line. `vault-put` reads from stdin precisely so the value never appears in the
-  process list, where any other process on the host could read it.
+- a command line.
 
-Two consequences worth internalising: a key in a file survives long after the conversation
-that produced it, and nobody knows it is there. And if the user pastes a key into the chat,
-your job is to put it in the vault and carry on — not to keep a copy somewhere convenient.
+Two consequences worth internalising: a key in a file survives long after the conversation that
+produced it, and nobody knows it is there. And if the user pastes a key into the chat, your job is
+to put it in the vault and carry on — not to keep a copy somewhere convenient.
 
-**If you find a credential already sitting in a file** — yours or from an earlier session —
-treat it as an incident, not a mess to tidy quietly: store it properly with `vault-put`, delete
-it from the file, and tell the user which file it was in and that it should be rotated, because
-anything written to disk must be assumed exposed.
+**If you find a credential already sitting in a file** — yours, a teammate's, or from an earlier
+session — treat it as an incident, not a mess to tidy quietly:
 
+1. Check whether the proxy already covers that host (call it with no auth). If yes, the copy is
+   redundant.
+2. If not, store it properly with `vault-put` and verify it injects.
+3. Delete it from the file — but never before step 1 or 2, or you destroy the only copy.
+4. Tell the user which file it was in and that the key should be **rotated**, because anything
+   written to disk must be assumed exposed.
+5. Then look for siblings. A credential in one file is rarely alone — sweep the whole tree by
+   credential *format* (`sb_secret_`, `grap-prod-`, `sk-or-v1-`, `ghp_`, `xoxb-`, `ATATT`, `eyJ`…)
+   rather than by the one value you happened to find, and report the true blast radius. Match on
+   known prefixes, and treat bare high-entropy strings as identifiers until a nearby label proves
+   otherwise — Drive folder IDs, sheet IDs and CRM custom-field hashes all look like secrets and
+   are not.
 ## Skills & MCP servers — from the firm registry
 
 Distributed skills and MCP servers come from ONE git registry repo:

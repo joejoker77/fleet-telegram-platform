@@ -232,6 +232,10 @@ phase_security() {
 # ── PHASE: authoring host side (cp-secretd) ───────────────────────────────────
 # (web-IDE removed for the firm — Telegram-only, no public web surface.)
 phase_authoring() {
+  # Admin helper: restart a tenant pod only after it goes idle, so a live session is
+  # never cut mid-task. Shipped in the repo but no phase installed it (found 2026-08-05).
+  run_cmd bash "$RT_INSTALL/graceful-restart-pod-bot-install.sh" apply
+
   run_cmd bash "$RT_INSTALL/m5.5b-secretd.sh"
 }
 

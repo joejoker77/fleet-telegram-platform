@@ -32,6 +32,6 @@
     "composio":   { "label": "Composio",          "key_type": "ms_shared", "hosts": ["mcp.composio.dev", "backend.composio.dev"], "roles": { "admin": "rw", "manager": "rw", "finance": "rw", "basic": "rw" } },
     "elevenlabs": { "label": "ElevenLabs",        "key_type": "ms_shared", "hosts": ["api.elevenlabs.io"], "roles": { "admin": "rw", "manager": "rw", "finance": "rw", "basic": "rw" } },
     "msgraph":    { "label": "Microsoft Graph",  "key_type": "ms_shared", "hosts": ["graph.microsoft.com", "login.microsoftonline.com"], "roles": { "admin": "rw" } },
-    "xero":       { "label": "Xero",              "key_type": "ms_shared", "hosts": ["api.xero.com", "identity.xero.com"], "roles": { "admin": "rw", "manager": "rw", "finance": "rw" } }
+    "xero":       { "label": "Xero",              "key_type": "ms_shared", "hosts": ["api.xero.com", "identity.xero.com"], "roles": { "admin": "rw", "finance": "rw" } }
   }
 }

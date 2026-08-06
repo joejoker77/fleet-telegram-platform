@@ -97,6 +97,30 @@ install -d -o "$USER_NAME" -g "$USER_NAME" -m 0755 "$CLAUDE_DIR/hooks" "$CLAUDE_
 sed "s#__TENANT_HOME__#/home/$USER_NAME#g" "$SKEL/settings.json.tmpl" > "$CLAUDE_DIR/settings.json"
 install -m 0755 "$SKEL/hooks/telegram-track-chat.sh"    "$CLAUDE_DIR/hooks/telegram-track-chat.sh"
 install -m 0755 "$SKEL/hooks/telegram-block-askuser.sh" "$CLAUDE_DIR/hooks/telegram-block-askuser.sh"
+
+# Project MCP servers. settings.json enables `exa` via enabledMcpjsonServers, but the file that
+# DEFINES it is per-project — without it the promised mcp__exa__* tools simply do not exist
+# (found 2026-08-05: every tenant had the enable and none had the definition). The x-api-key
+# value is a placeholder on purpose: the egress proxy swaps it for the real key on mcp.exa.ai,
+# so no credential is ever written to disk. Written once; a tenant edit is not clobbered.
+WORK_DIR="/home/$USER_NAME/work"
+install -d -o "$USER_NAME" -g "$USER_NAME" -m 0755 "$WORK_DIR"
+if [ ! -s "$WORK_DIR/.mcp.json" ] || ! grep -q '"exa"' "$WORK_DIR/.mcp.json" 2>/dev/null; then
+  cat > "$WORK_DIR/.mcp.json" <<'MCPJSON'
+{
+  "mcpServers": {
+    "exa": {
+      "type": "http",
+      "url": "https://mcp.exa.ai/mcp?tools=web_search_exa,web_search_advanced_exa,get_code_context_exa,crawling_exa,company_research_exa,people_search_exa,deep_researcher_start,deep_researcher_check",
+      "headers": { "x-api-key": "${ONECLI:ms-exa-api}" }
+    }
+  }
+}
+MCPJSON
+  chown "$USER_NAME:$USER_NAME" "$WORK_DIR/.mcp.json"
+  chmod 0600 "$WORK_DIR/.mcp.json"
+  log "seeded $WORK_DIR/.mcp.json (exa)"
+fi
 # Managed firm CLAUDE.md = static base (English; Telegram + infra/security behavior,
 # tenant name substituted) + the per-ROLE access block (which firm systems this role may
 # use and exactly how to call each — from render-access-block.sh, role/scope driven by
