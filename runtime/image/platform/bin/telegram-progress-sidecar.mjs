@@ -19,7 +19,8 @@
 //   • Tool-line fallback (`● Tool(`) → friendly labelForTool map.
 //   • Hysteresis: placeholder appears after ACTIVE_CREATE_TICKS active ticks,
 //     retires after IDLE_RETIRE_TICKS idle ticks. Idle but no fresh phrase →
-//     rotate a FUN_STATUS every STATUS_ROTATE_MS so it never looks frozen.
+//     one slow refresh every STATUS_ROTATE_MS (a minute), not an animation: the
+//     "never looks frozen" job belongs to the typing pulse, which is free.
 //   • Blocked TUI (permission prompt / unrecoverable error) → one-shot ⚠️ line
 //     after BLOCKED_WARNING_DELAY_MS of continuous blocked state.
 //
@@ -53,7 +54,16 @@ function logln(msg) {
 }
 
 // ─── tunables (ported) ───────────────────────────────────────────────────
-const STATUS_ROTATE_MS = 4000
+// A decorative phrase used to rotate every 4 seconds so the message "never looks frozen". That
+// rotation carried no information — "Nebulizing…" becoming "Sprouting…" tells the reader nothing —
+// and each one is a write to Telegram. Sustained across a long turn it is what earned this bot a
+// flood-wait of 10156 seconds, measured, in its own log. Liveness is shown by the typing pulse
+// below, which Telegram does not count as a message; the text now changes only when something
+// changed.
+const STATUS_ROTATE_MS = 60000
+// Never two edits closer together than this, whatever wants one. The floor is the guarantee: no
+// scraped status flapping between two strings can turn into a write storm.
+const MIN_EDIT_MS = 10000
 const IDLE_RETIRE_TICKS = 3
 const ACTIVE_CREATE_TICKS = 3
 const PROBE_INTERVAL_MS = 100
@@ -401,6 +411,9 @@ async function fsmTick() {
           if (candidate !== state.last_status) next = candidate
         }
         if (next == null) return
+        // Real change or not, not sooner than the floor. The user is already being shown that
+        // work is happening — by the typing indicator, continuously and for free.
+        if (now - state.last_edit_at < MIN_EDIT_MS) return
         const r = await tg('editMessageText', { chat_id, message_id: state.message_id, text: next, parse_mode: 'HTML' })
         if (r.ok) {
           state.last_status = next
