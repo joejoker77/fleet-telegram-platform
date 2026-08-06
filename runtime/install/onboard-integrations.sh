@@ -406,12 +406,32 @@ fi
 if confirm "Configure ElevenLabs (voice transcription, all roles)?"; then
   H=api.elevenlabs.io
   K="$(ask_secret "ElevenLabs API key")"
-  code="$(http_code GET "https://$H/v1/user" "xi-api-key: $K")"
-  if [ "$code" = 200 ]; then
+  # Ask twice, and keep the body. /v1/user needs the "user read" permission, which a key scoped
+  # to speech-to-text does not have — rejecting such a key would be rejecting a correct one. The
+  # models endpoint is what a transcription key must be able to reach, so it decides.
+  probe() { # probe <path> -> "<code>|<body>"
+    curl -sS -m 20 -w '|%{http_code}' -H "xi-api-key: $K" "https://$H$1" 2>/dev/null \
+      | python3 -c 'import sys; raw=sys.stdin.read(); body,_,code=raw.rpartition("|"); print(code.strip()+"|"+body.strip()[:300])'
+  }
+  r1="$(probe /v1/user)";   code="${r1%%|*}"; body="${r1#*|}"
+  if [ "$code" != 200 ]; then
+    r2="$(probe /v1/models)"; code2="${r2%%|*}"; body2="${r2#*|}"
+    if [ "$code2" = 200 ]; then
+      c_ok "  valid for transcription (the key is scoped: /v1/user says $code, /v1/models says 200)"
+      code=200
+    else
+      code="$code2"; body="$body2"
+    fi
+  else
     c_ok "  valid"
+  fi
+  if [ "$code" = 200 ]; then
     vault_and_distribute elevenlabs "ms-elevenlabs-api" "$H" xi-api-key '{value}' "$K"
   else
-    c_no "  INVALID (HTTP $code) — not vaulted$([ "$code" = 000 ] && printf ' (host unreachable: could be the region block, not the key)')"
+    c_no "  NOT STORED (HTTP $code)$([ "$code" = 000 ] && printf ' — host unreachable: could be the region block, not the key')"
+    # The service's own words. A number alone sends people to guess; this is the difference
+    # between "wrong key", "key without the right permission" and "account flagged".
+    [ -n "$body" ] && echo "     ElevenLabs said: $body"
   fi
 fi
 
