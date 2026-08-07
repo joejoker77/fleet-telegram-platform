@@ -68,6 +68,10 @@ howreach() { # $1=service $2=key_type $3=scope
     # Supabase read tier goes through the host SQL gateway, not the REST API — a Supabase
     # secret key bypasses RLS and so cannot be made read-only.
     msgraph)  echo '`graph-call` helper';;
+    # Xero is a two-step OAuth service like Graph: the credential is injected on the TOKEN host,
+    # not on the API host. Calling api.xero.com "directly" fails, and an agent told otherwise
+    # will invent a reason — one did, and told its user our firewall was blocking the address.
+    xero)     echo '`xero-call` helper';;
     supabase) if [ "${3:-}" = read ]; then echo "SQL via the read-only DB gateway"
               else echo "direct REST, key auto-injected"; fi;;
     *) if [ "$2" = per_user ]; then echo "direct REST, your own key (auto-injected)"; else echo "direct REST, key auto-injected"; fi;;

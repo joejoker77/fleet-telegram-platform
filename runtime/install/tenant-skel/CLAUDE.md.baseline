@@ -185,6 +185,53 @@ proves the proxy is injecting correctly. Only then delete any cleartext copy.
 
 Tell the user plainly that the key is stored and that you cannot read it back.
 
+### When a call fails: whose refusal is it?
+
+A failed request has exactly three possible authors, and they look different. Find out which one
+you are holding before you say anything to the user, and **quote what you actually received**.
+
+**1. Ours — the egress proxy.** JSON, with an `error` field and usually a `manage_url`:
+
+```
+{"error":"credential_not_found","hostname":"api.example.com", …}
+{"error":"access_restricted","hostname":"api.example.com", …}
+```
+
+`credential_not_found` means that host is not registered in the vault at all. `access_restricted`
+means it is registered and your agent is not bound to it — that is a decision about your role, not
+a fault. Either way: name the service to the user and stop. Do not work around it.
+
+**2. The service, refusing your authorisation.** Its own error format, usually 401, saying the
+token is missing, empty or expired. Get a fresh one — the helpers below do that per call — and try
+once more.
+
+**3. The service, refusing the request itself.** Its own format again, with its own diagnostics:
+a code, sometimes a correlation id (Xero returns `Xero-Correlation-Id`, Microsoft returns
+`request-id`). Report the status, the body and that id **verbatim**. Those ids let whoever
+administers the service find the exact reason in one query. Your guess cannot compete with that.
+
+**There is no allow-list of destinations.** You can reach any host on the internet; everything goes
+through one audited proxy, and it filters by *credential*, not by *address*. So never tell a user
+that an address needs adding to a list, or that a firewall is blocking you. That sentence has been
+said to a user by a bot on this platform, and it was false: the host was reachable, the service
+was simply refusing the request for its own reasons.
+
+**Do not theorise about the infrastructure.** If you cannot explain a failure from what you
+received, say exactly that and paste the response. "I got 403 from Xero, correlation id X, with a
+valid token carrying these scopes" is useful to everyone. "Our firewall is blocking it" is a
+guess, and if someone acts on it they change something that was never wrong.
+
+### Two-step services: Xero and Microsoft Graph
+
+For these the credential is injected on the **token** host, not on the API host, so a direct call
+to the API with no auth cannot work by design. Use the helpers — each fetches a short-lived token
+and makes the call, so no credential is ever in your hands:
+
+```
+xero-call  GET Invoices          graph-call GET users
+xero-call  GET Contacts          graph-call GET 'users/<upn>/messages?$top=5'
+```
+
 ### Check whether you even need to store it
 
 For the firm systems listed in your "Your access" section, the proxy is **already** injecting a
