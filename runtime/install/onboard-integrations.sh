@@ -148,14 +148,19 @@ store_anyway(){
   fi
 }
 
-# vault_and_distribute <service> <secret-name> <host> <header> <fmt> <value> [scope]
+# vault_and_distribute <service> <secret-name> <host> <header> <fmt> <value> [scope] [path]
+# [path]: restrict injection to one URL path on <host>. Needed when TWO different secrets
+# live on the SAME hostname — without it the proxy matches on host alone and can inject the
+# wrong credential. Real case: cms.monacosolicitors.co.uk already carries ms-wordpress
+# (Basic), and the Xero token endpoint on that same host needs a different Bearer.
 # Without [scope]: bind to every role entitled to <service> (ms_shared, uniform scope).
 # With [scope] (rw|read): bind ONLY to roles whose matrix scope == that value — so a
 # read-only key reaches read-scoped roles and the rw key reaches rw roles. This is what makes
 # "basic = read-only Supabase" actually enforced (the injected key is itself read-only), not a
 # doc promise; a read role never gets the rw key bound.
 vault_and_distribute(){
-  local svc="$1" name="$2" host="$3" hdr="$4" fmt="$5" val="$6" scope="${7:-}" sid allowed
+  local svc="$1" name="$2" host="$3" hdr="$4" fmt="$5" val="$6" scope="${7:-}" path="${8:-}" sid allowed
+  local pathargs=(); [ -n "$path" ] && pathargs=(--path-pattern "$path")
   if [ "${KEYTYPE[$svc]:-ms_shared}" = per_user ]; then
     c_no "  [$svc] is a PER-USER service — each user adds their OWN key via self-onboarding; this admin script does NOT create a shared key for it."
     return 0
@@ -166,11 +171,11 @@ vault_and_distribute(){
   fi
   if [ -z "$sid" ]; then
     "$ONECLI" secrets create --name "$name" --type generic --value "$val" \
-      --host-pattern "$host" --header-name "$hdr" --value-format "$fmt" >/dev/null \
+      --host-pattern "$host" "${pathargs[@]}" --header-name "$hdr" --value-format "$fmt" >/dev/null \
       || { c_no "  vault create failed"; return 1; }
     sid="$(secret_id "$name")"; [ -n "$sid" ] || { c_no "  secret not found after create"; return 1; }
   fi
-  c_ok "  ✓ vaulted $name ($host / $hdr)"
+  c_ok "  ✓ vaulted $name ($host${path} / $hdr)"
   if [ -n "$scope" ]; then allowed="$(roles_with_scope "$svc" "$scope")"; else allowed="${ROLES[$svc]}"; fi
   local bound=0 t aid
   echo "  binding to tenants with role in: [${allowed:-none}]${scope:+  scope=$scope}"
@@ -435,43 +440,95 @@ if confirm "Configure ElevenLabs (voice transcription, all roles)?"; then
   fi
 fi
 
-# --- Xero : OAuth2 Custom Connection (identity.xero.com / api.xero.com) -----
-# Custom Connection = 2-legged client_credentials. We vault the client creds as
-# Basic on identity.xero.com; at runtime Claude POSTs the token endpoint (proxy
-# injects Basic), gets a ~30-min access_token, then calls api.xero.com with
-# Bearer + the fixed Xero-tenant-id (baked into CLAUDE.md, not a secret).
-XERO_TENANT_ID=7bb6bd0a-fccc-4421-b949-ddcdd28ece62
-if confirm "Configure Xero? (OAuth2 Custom Connection)"; then
-  CID="$(ask "Xero client_id")"; CSEC="$(ask_secret "Xero client_secret")"; BASIC="$(printf '%s:%s' "$CID" "$CSEC" | base64 -w0)"
-  # Custom Connection: request NO scope. Xero issues a token scoped to whatever the
-  # connection was granted; passing explicit scopes is filtered to empty -> invalid_scope.
-  R="$(curl -sS -m 20 -X POST https://identity.xero.com/connect/token -H "Authorization: Basic $BASIC" \
-        -H "Content-Type: application/x-www-form-urlencoded" --data-urlencode "grant_type=client_credentials" 2>/dev/null)"
-  TOK="$(printf '%s' "$R" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null || true)"
-  if [ -n "$TOK" ]; then
-    # A token proves the client_id/secret pair is valid. It proves NOTHING about being
-    # able to read the ledger: a Custom Connection is bound to ONE organisation, and if
-    # the Xero-tenant-id we send is not that organisation, every Accounting call returns
-    # 403 with an empty body. That is how this install spent three weeks "connected"
-    # while every data call failed. So the check below is the real gate.
-    http_probe GET "https://api.xero.com/api.xro/2.0/Organisation" \
-      "Authorization: Bearer $TOK" "Xero-tenant-id: $XERO_TENANT_ID" "Accept: application/json"
-    if [ "$PROBE_CODE" != 200 ]; then
-      c_no "  token issued, but reading data FAILED — HTTP $PROBE_CODE from api.xero.com"
-      echo "         tenant id used: $XERO_TENANT_ID"
-      echo "         Xero said: ${PROBE_BODY:-<empty body>}"
-      echo "         403 here means the Custom Connection is not attached to THAT organisation."
-      echo "         Open the connection in the Xero developer portal, read the organisation it"
-      echo "         is connected to, and set XERO_TENANT_ID to that organisation's tenant id."
-      c_no "  nothing vaulted."
-    else
-    c_ok "  OAuth token OK and Organisation readable (HTTP 200) — this is a working Xero"
-    vault_and_distribute xero "ms-xero-client" identity.xero.com Authorization 'Basic {value}' "$BASIC"
-    echo "  runtime: Claude POSTs identity.xero.com/connect/token (grant_type=client_credentials, NO scope;"
-    echo "           proxy injects Basic) -> access_token, then calls api.xero.com with"
-    echo "           'Authorization: Bearer <token>' + 'Xero-tenant-id: $XERO_TENANT_ID'."
-    fi
-  else c_no "  INVALID — no token. Response: $(printf '%s' "$R" | tr -d '\n' | head -c 200)"; fi
+# --- Xero : the firm's own token services (NOT a Custom Connection) ----------
+# We do not run the Xero OAuth flow and we never hold Xero client credentials or refresh
+# tokens. The firm already operates two token services that do that job, and both are in
+# production use by their n8n invoice bot:
+#
+#   monaco   -> WordPress CMS endpoint
+#   grapple  -> n8n webhook service; it caches the access token, rotates the refresh token
+#               itself, and returns the tenant id alongside the token
+#
+# Each is protected by its own static bearer. That bearer is all this script asks for.
+#
+# The previous flow here vaulted Xero client credentials and used grant_type=client_credentials
+# against identity.xero.com. It is gone deliberately: that Custom Connection issues perfectly
+# valid tokens carrying all 46 scopes, yet Xero refuses every data call with HTTP 403 and an
+# EMPTY body because the paid Custom Connection entitlement is not active. Confirmed by
+# decoding the JWT. Keeping that path would only invite someone to re-enter credentials that
+# cannot work. The old ms-xero-client secret is left in the vault untouched — deleting it is a
+# separate decision, and it is what identifies who is entitled to Xero.
+#
+# Both services answer {..., data:{access_token, tenant_id, ...}}; xero-call reads either that
+# or a flat shape, so this validation mirrors the runtime exactly.
+XERO_MONACO_HOST=cms.monacosolicitors.co.uk
+XERO_MONACO_PATH=/wp-json/rota/v1/xero-get-tokens
+XERO_MONACO_TENANT=7bb6bd0a-fccc-4421-b949-ddcdd28ece62
+XERO_GRAPPLE_HOST=n8n.monacosolicitors.co.uk
+XERO_GRAPPLE_PATH=/webhook/grapple-xero-get-tokens
+
+# xero_token_service <label> <secret-name> <host> <path> <tenant-or-empty>
+# Asks for one bearer, proves it end to end, and only then vaults + distributes it.
+# "Proves" means BOTH: the token service answers 200 with an access_token, AND that token
+# reads a real organisation out of Xero. A token on its own is not success — that assumption
+# is exactly why this integration looked healthy for three weeks while every call failed.
+xero_token_service(){
+  local label="$1" name="$2" host="$3" path="$4" tenant="$5" url B R TOK TEN
+  url="https://$host$path"
+  confirm "  Configure Xero for $label?" || { echo "    skipped"; return 0; }
+  echo "    endpoint: $url"
+  B="$(ask_secret "bearer secret for $label")"
+  [ -n "$B" ] || { c_no "    nothing entered — skipped"; return 1; }
+
+  R="$(curl -sS -m 20 -H "Authorization: Bearer $B" -H "Accept: application/json" "$url" 2>/dev/null)"
+  TOK="$(printf '%s' "$R" | python3 -c 'import json,sys
+try:
+  d=json.load(sys.stdin); i=d.get("data") if isinstance(d.get("data"),dict) else d
+  print(i.get("access_token") or "")
+except Exception: print("")' 2>/dev/null || true)"
+  if [ -z "$TOK" ]; then
+    c_no "    the token service did not return an access_token."
+    echo "    it said: $(printf '%s' "$R" | tr -d '\n' | head -c 200)"
+    echo "    a 401/403 here means the bearer is wrong; a 200 with no token means the firm's"
+    echo "    Xero authorisation behind that service has lapsed and they must re-connect it."
+    c_no "    nothing vaulted."
+    return 1
+  fi
+  TEN="$(printf '%s' "$R" | python3 -c 'import json,sys
+try:
+  d=json.load(sys.stdin); i=d.get("data") if isinstance(d.get("data"),dict) else d
+  print(i.get("tenant_id") or "")
+except Exception: print("")' 2>/dev/null || true)"
+  [ -n "$tenant" ] || tenant="$TEN"
+  if [ -z "$tenant" ]; then
+    c_no "    no tenant id: the service returned none and none is configured. nothing vaulted."
+    return 1
+  fi
+
+  http_probe GET "https://api.xero.com/api.xro/2.0/Organisation" \
+    "Authorization: Bearer $TOK" "Xero-tenant-id: $tenant" "Accept: application/json"
+  if [ "$PROBE_CODE" != 200 ]; then
+    c_no "    token obtained, but reading Xero FAILED — HTTP $PROBE_CODE"
+    echo "    tenant id used: $tenant"
+    echo "    Xero said: ${PROBE_BODY:-<empty body>}"
+    c_no "    nothing vaulted."
+    return 1
+  fi
+  c_ok "    verified: real HTTP 200 from Xero for organisation $tenant"
+  # path pattern is required, not optional: another secret already claims each of these hosts.
+  vault_and_distribute xero "$name" "$host" Authorization 'Bearer {value}' "$B" "" "$path"
+}
+
+if confirm "Configure Xero? (token services — Monaco CMS and Grapple n8n)"; then
+  xero_token_service "Monaco Solicitors" ms-xero-token-monaco \
+    "$XERO_MONACO_HOST" "$XERO_MONACO_PATH" "$XERO_MONACO_TENANT"
+  xero_token_service "Grapple Ltd" ms-xero-token-grapple \
+    "$XERO_GRAPPLE_HOST" "$XERO_GRAPPLE_PATH" ""
+  echo "  runtime: xero-call --profile monaco|grapple fetches a token from the service above"
+  echo "           (proxy injects the bearer) and calls api.xero.com with it."
+  echo "  verify from inside a tenant pod — this is the only check that proves anything:"
+  echo "           xero-call --profile monaco  --health"
+  echo "           xero-call --profile grapple --health"
 fi
 
 # --- Dialpad : dialpad.com ---------------------------------------------------
