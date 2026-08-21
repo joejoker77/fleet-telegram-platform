@@ -172,6 +172,16 @@ fi
 # (block setuid/file-cap privilege gain at execve) is already covered here by
 # --cap-drop=ALL (no caps to escalate to) + non-root --user + --read-only rootfs
 # (no setuid binary can be written) + the cl-net default-deny egress lockdown.
+# xero-call: the Xero helper is a plain script, so mount the host copy over the one baked
+# into the image. A one-file fix then ships on the next pod restart without an image
+# rebuild dragging along every other change sitting in :latest. Source of truth stays
+# runtime/image/platform/bin/xero-call — the image still carries it, so a pod without the
+# mount is not broken, only older.
+XEROCALL_ARGS=()
+if [ -x /usr/local/bin/xero-call ]; then
+  XEROCALL_ARGS=(-v /usr/local/bin/xero-call:/usr/local/bin/xero-call:ro)
+fi
+
 exec /usr/bin/podman run --rm --name "claude-$U" \
   --init \
   --user "${UID_N}:${GID_N}" \
@@ -184,6 +194,6 @@ exec /usr/bin/podman run --rm --name "claude-$U" \
   -v "$HOME_DIR/work:$HOME_DIR/work" \
   -v "$HOME_DIR/.config:$HOME_DIR/.config" \
   -v "$HOME_DIR/.local:$HOME_DIR/.local" \
-  "${CFG_ARGS[@]}" "${SSH_ARGS[@]}" "${ICLOUD_ARGS[@]}" "${AUDIT_ARGS[@]}" \
+  "${XEROCALL_ARGS[@]}" "${CFG_ARGS[@]}" "${SSH_ARGS[@]}" "${ICLOUD_ARGS[@]}" "${AUDIT_ARGS[@]}" \
   -w "$HOME_DIR/work" \
   "$IMAGE"

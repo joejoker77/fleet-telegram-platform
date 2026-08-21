@@ -58,6 +58,7 @@ whatis() { case "$1" in
   elevenlabs) echo "transcribing the user's voice messages";;
   msgraph)    echo "the firm's Microsoft 365 — mailboxes, calendars, files, users";;
   xero)       echo "billing & invoicing";;
+  dialpad)    echo "the firm's phone system — calls, SMS, contacts";;
   *)          echo "-";;
 esac; }
 
@@ -142,6 +143,12 @@ MD
 - **Example (read rows):** \`curl "https://jdjxlczkggckdnpeluuw.supabase.co/rest/v1/<table>?select=*&limit=5"\`
 - PostgREST — filter with \`?col=eq.value\`; write with \`-X POST/PATCH\` + JSON body.
 - ⚠️ Shared with **Grapple** — only ever read/write **Monaco Solutions** data.
+- **There is a second Supabase project** at
+  \`onfqcdtgmamjrihytnzi.supabase.co\`. Reach it exactly like production: same two headers,
+  injected for you, same PostgREST syntax. If it answers \`access_restricted\`, that means the
+  firm has not vaulted a key for it — it does **not** mean you have lost Supabase, the
+  production host above is unaffected, and it is **not** something to fix in the Supabase UI.
+  Say which host refused rather than reporting "no Supabase access".
 MD
       fi
     ;;
@@ -152,6 +159,27 @@ MD
   `x-api-token` — NOT `Authorization: Bearer`).
 - **Example (list deals):** `curl "https://monacosolicitors2.pipedrive.com/api/v2/deals?limit=5"`
 - Common: `/persons`, `/deals`, `/organizations`, `/activities`.
+
+**Files and email attachments — use `pd-attachments`, and do not improvise.**
+- `pd-attachments list <deal-id>` — every attachment on that deal's emails, with ids and sizes
+- `pd-attachments get <attachment-id> [dir]` — downloads it (saved under `~/work/downloads`)
+- `pd-attachments send <attachment-id> [chat-id]` — downloads it and sends it to the person in
+  Telegram, which is usually what they actually want
+
+Two endpoints will lie to you here, and both answer with success, so you cannot tell from the
+response that you have been misled:
+- `GET /api/v1/deals/{id}/files` returns **0 items with `success: true`** on a deal whose email
+  carries attachments. Files and mail attachments are separate stores.
+- `GET /api/v1/files?deal_id={id}` **ignores the filter** and returns the whole account's file
+  list. A deal id that does not exist returns the same list, so a hit proves nothing.
+
+**Never tell anyone "there is no copy" on the strength of those two.** Check with
+`pd-attachments list` first; if it reports nothing, say that the deal's emails carry no
+attachments, which is a different statement from "the file does not exist".
+
+If you ever call the download endpoint by hand, follow redirects (`curl -L`): it answers 302 to
+presigned storage and without `-L` you get about 500 bytes of nothing that looks like an empty
+file. The Files API is **v1 only** — `/api/v2/files` and `/api/v2/deals/{id}/files` are 404.
 MD
     ;;
     n8n) cat <<'MD'
@@ -195,6 +223,23 @@ MD
 - Collections under `/api/<plural-name>`.
 MD
     ;;
+    dialpad) cat <<'MD'
+#### Dialpad — the firm's phone system
+- **Base URL:** `https://dialpad.com/api/v2/`
+- **Auto-injected auth:** `Authorization: Bearer` — send no key yourself.
+- **Example:** `curl "https://dialpad.com/api/v2/users?limit=5"`
+- Lists page with `limit` plus a `cursor` returned in the response; pass the cursor back for
+  the next page.
+- `GET /api/v2/users/me` **does not exist** on Dialpad and always answers 404. Use
+  `/api/v2/users` to check the connection.
+- Call history (`/api/v2/call`), recording exports and SMS bodies each need their own scope on
+  the key. A 403 there means the key was minted without that scope, not that you called it
+  wrong — say so rather than retrying.
+- The key belongs to the **whole company**, so anything you do is attributed to the firm's
+  integration and not to your user. Placing calls and sending SMS are real actions against real
+  numbers: confirm with your user before doing either.
+MD
+    ;;
     elevenlabs) cat <<'MD'
 #### ElevenLabs — transcribing the user's voice messages
 When the user sends a Telegram voice message, download it and transcribe it here rather than
@@ -233,7 +278,14 @@ token + the firm's `Xero-tenant-id`):
 - filter: `xero-call GET 'Invoices?where=Type=="ACCREC"&page=1'`
 - write: `xero-call POST Invoices --data @/tmp/invoice.json`
 A "no access_token / invalid_client" error means Xero isn't set up for your role yet — tell
-the user. (Under the hood: `POST identity.xero.com/connect/token` grant_type=client_credentials,
+the user.
+- **More than one organisation.** The firm keeps separate Xero organisations (Monaco Solicitors
+  and Grapple Tech). \`xero-call\` talks to Monaco Solicitors unless told otherwise; point it at
+  another one with the \`XERO_TENANT_ID\` environment variable for that call:
+  \`XERO_TENANT_ID=<tenant-id> xero-call GET Invoices\`. Get the id from
+  \`xero-call GET Organisation\` while pointed at it, or ask an administrator — do not guess it.
+  When a question spans both entities, run each one separately and say which figure came from
+  which; never present a single total as if it covered both. (Under the hood: `POST identity.xero.com/connect/token` grant_type=client_credentials,
 NO scope, Basic client-creds proxy-injected → token → `api.xero.com/api.xro/2.0/<Resource>`.)
 MD
     ;;

@@ -448,13 +448,87 @@ if confirm "Configure Xero? (OAuth2 Custom Connection)"; then
   R="$(curl -sS -m 20 -X POST https://identity.xero.com/connect/token -H "Authorization: Basic $BASIC" \
         -H "Content-Type: application/x-www-form-urlencoded" --data-urlencode "grant_type=client_credentials" 2>/dev/null)"
   TOK="$(printf '%s' "$R" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null || true)"
-  if [ -n "$TOK" ]; then conn="$(http_code GET https://api.xero.com/connections "Authorization: Bearer $TOK")"
-    c_ok "  OAuth token OK; /connections HTTP $conn"
+  if [ -n "$TOK" ]; then
+    # A token proves the client_id/secret pair is valid. It proves NOTHING about being
+    # able to read the ledger: a Custom Connection is bound to ONE organisation, and if
+    # the Xero-tenant-id we send is not that organisation, every Accounting call returns
+    # 403 with an empty body. That is how this install spent three weeks "connected"
+    # while every data call failed. So the check below is the real gate.
+    http_probe GET "https://api.xero.com/api.xro/2.0/Organisation" \
+      "Authorization: Bearer $TOK" "Xero-tenant-id: $XERO_TENANT_ID" "Accept: application/json"
+    if [ "$PROBE_CODE" != 200 ]; then
+      c_no "  token issued, but reading data FAILED — HTTP $PROBE_CODE from api.xero.com"
+      echo "         tenant id used: $XERO_TENANT_ID"
+      echo "         Xero said: ${PROBE_BODY:-<empty body>}"
+      echo "         403 here means the Custom Connection is not attached to THAT organisation."
+      echo "         Open the connection in the Xero developer portal, read the organisation it"
+      echo "         is connected to, and set XERO_TENANT_ID to that organisation's tenant id."
+      c_no "  nothing vaulted."
+    else
+    c_ok "  OAuth token OK and Organisation readable (HTTP 200) — this is a working Xero"
     vault_and_distribute xero "ms-xero-client" identity.xero.com Authorization 'Basic {value}' "$BASIC"
     echo "  runtime: Claude POSTs identity.xero.com/connect/token (grant_type=client_credentials, NO scope;"
     echo "           proxy injects Basic) -> access_token, then calls api.xero.com with"
     echo "           'Authorization: Bearer <token>' + 'Xero-tenant-id: $XERO_TENANT_ID'."
+    fi
   else c_no "  INVALID — no token. Response: $(printf '%s' "$R" | tr -d '\n' | head -c 200)"; fi
+fi
+
+# --- Dialpad : dialpad.com ---------------------------------------------------
+# ONE company key. Dialpad has no per-user API key: only a company admin can mint
+# one (Admin Settings > My Company > Authentication > API keys, Pro/Enterprise
+# plans), and it acts across every user in the company. There is also no
+# read-only mode — scopes only ADD access — so every role that gets it gets the
+# same reach. That is why the matrix gives it to all roles rather than pretending
+# a "read" column means something here.
+#
+# Validation uses /api/v2/users. NOT /api/v2/users/me: that route does not exist
+# on Dialpad and answers 404 for a perfectly good key.
+if confirm "Configure Dialpad (calls, SMS, contacts — all roles)?"; then
+  H=dialpad.com
+  K="$(ask_secret "Dialpad API key (company admin key)")"
+  http_probe GET "https://$H/api/v2/users?limit=1" "Authorization: Bearer $K"
+  if [ "$PROBE_CODE" = 200 ]; then
+    c_ok "  valid"
+    vault_and_distribute dialpad "ms-dialpad-api" "$H" Authorization 'Bearer {value}' "$K"
+    # Call history, recordings and SMS bodies each need a scope ticked when the key
+    # is minted. Report what this key can actually reach so nobody discovers it
+    # from a 403 three weeks later.
+    CL="$(http_code GET "https://$H/api/v2/call?limit=1" "Authorization: Bearer $K")"
+    case "$CL" in
+      200) c_ok  "  call history readable (calls:list scope present)" ;;
+      403) c_no  "  call history NOT readable — the key was minted without calls:list."
+           echo  "         Re-mint it with that scope if people need call history." ;;
+      *)   echo  "  call history: could not tell (HTTP $CL) — check by hand if it matters" ;;
+    esac
+  else
+    c_no "  INVALID — /api/v2/users says $PROBE_CODE. $PROBE_BODY"
+    echo "         The key must be created by a Dialpad COMPANY ADMIN."
+    echo "         Nothing was stored."
+  fi
+fi
+
+# --- Supabase (staging project) : onfqcdtgmamjrihytnzi.supabase.co -----------------
+# The second Supabase project. It has been declared in role-matrix.json all along
+# while having no shared key, so the gateway answered `access_restricted` and at
+# least one agent read that as "I have lost Supabase" and told its user so.
+#
+# Same shape as production: PostgREST wants BOTH `apikey` and
+# `Authorization: Bearer`, so one key is vaulted under two names. Scope rw, so it
+# reaches the roles the matrix marks rw for supabase (admin, manager) — the read
+# tier goes through the read-only database gateway, never through a service key.
+if confirm "Configure the SECOND Supabase project (onfqcdtgmamjrihytnzi.supabase.co)?"; then
+  H=onfqcdtgmamjrihytnzi.supabase.co
+  K="$(ask_secret "Supabase key for that project (service_role)")"
+  code="$(http_code GET "https://$H/rest/v1/" "apikey: $K" "Authorization: Bearer $K")"
+  if [ "$code" = 200 ] || [ "$code" = 404 ]; then
+    c_ok "  key valid (HTTP $code)"
+    vault_and_distribute supabase "ms-supabase-stage"      "$H" apikey        '{value}'       "$K" rw
+    vault_and_distribute supabase "ms-supabase-stage-auth" "$H" Authorization 'Bearer {value}' "$K" rw
+  else
+    c_no "  key INVALID (HTTP $code) — nothing vaulted"
+    echo  "         Take it from Supabase > Project Settings > API > service_role."
+  fi
 fi
 
 c_hd "Done"

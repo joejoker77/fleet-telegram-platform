@@ -472,7 +472,7 @@ fi
 echo "${ACTIVE_NAME:-default}" > "$ACTIVE_FILE"
 
 tmux kill-session -t "$SESSION" 2>/dev/null || true
-TMUX_CFG="$(mktemp)"; trap 'rm -f "$TMUX_CFG"; for _p in "${PROGRESS_SIDECAR_PID:-}" "${SESSION_INDEXER_PID:-}"; do [ -n "$_p" ] && kill "$_p" 2>/dev/null; done' EXIT
+TMUX_CFG="$(mktemp)"; trap 'rm -f "$TMUX_CFG"; for _p in "${PROGRESS_SIDECAR_PID:-}" "${SESSION_INDEXER_PID:-}" "${TRANSCRIPT_EXPORTER_PID:-}"; do [ -n "$_p" ] && kill "$_p" 2>/dev/null; done' EXIT
 echo "set-option -g history-limit 100000" > "$TMUX_CFG"
 mkdir -p "$TELEGRAM_STATE_DIR/logs"
 
@@ -503,6 +503,23 @@ if [ "${DISABLE_PROGRESS_SIDECAR:-0}" != "1" ] && [ "${DISABLE_TELEGRAM_CHANNEL:
     >>"$TELEGRAM_STATE_DIR/logs/progress-sidecar.log" 2>&1 &
   PROGRESS_SIDECAR_PID=$!
   echo "[progress] sidecar launched (pid $PROGRESS_SIDECAR_PID)"
+fi
+
+# Transcript exporter: Claude Code writes one .jsonl per session (Telegram,
+# project sessions and sessions opened from the Claude App over remote control
+# alike).  This renders them into readable per-session archives under
+# logs/sessions/, which is what the indexer below actually indexes — the clean
+# baked plugin never writes session_current.txt, so without this the FTS index
+# has no source at all.  Pure python, NO LLM.  Reaped by the EXIT trap.
+TRANSCRIPT_EXPORTER_PID=""
+if [ "${DISABLE_TRANSCRIPT_EXPORTER:-0}" != "1" ] && command -v python3 >/dev/null 2>&1; then
+  ( while true; do
+      python3 /opt/platform/bin/transcript-exporter.py \
+        >>"$TELEGRAM_STATE_DIR/logs/transcript-exporter.log" 2>&1 || true
+      sleep "${TRANSCRIPT_EXPORT_INTERVAL:-120}"
+    done ) &
+  TRANSCRIPT_EXPORTER_PID=$!
+  echo "[transcript] exporter loop launched (pid $TRANSCRIPT_EXPORTER_PID)"
 fi
 
 # Session-search indexer (C): keep the FTS5 index over this bot's own session

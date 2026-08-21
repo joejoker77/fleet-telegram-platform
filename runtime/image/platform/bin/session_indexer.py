@@ -116,7 +116,15 @@ def main() -> int:
     try:
         total_added = 0
         files_touched = 0
-        for path in sorted(log_dir.glob("session_*.txt")):
+        # Two sources.  The flat session_*.txt is what the fleet's PATCHED
+        # telegram plugin writes; the clean plugin baked into this image does
+        # not, which is why the index was empty here.  logs/sessions/ holds the
+        # per-session archives transcript-exporter.py renders from Claude Code's
+        # own .jsonl transcripts — those also cover project and Claude App
+        # (remote-control) sessions, which never reach the tmux pane dump.
+        sources = sorted(log_dir.glob("session_*.txt"))
+        sources += sorted((log_dir / "sessions").glob("session_*.txt"))
+        for path in sources:
             added, did_work = index_file(conn, path)
             total_added += added
             if did_work:
