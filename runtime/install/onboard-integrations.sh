@@ -15,11 +15,22 @@
 # role-matrix.json: ms_shared services are asked for below; per_user ones (each
 # tenant supplies their own) are skipped here and prompted by add-user.sh instead.
 #
-#   sudo ./onboard-integrations.sh
+#   sudo ./onboard-integrations.sh              # every service, in order
+#   sudo ./onboard-integrations.sh --only xero  # just that one
 #
 set -uo pipefail
 ONECLI=/usr/local/bin/onecli
 export HOME=/root
+
+# --only <service>: ask ONLY that service's questions. Every other prompt is answered "no"
+# automatically. This exists because sending someone in to fix one integration otherwise
+# means walking them past a dozen unrelated prompts, where a single stray "y" reconfigures
+# a service that was working. Without the flag, behaviour is exactly as before.
+ONLY=""
+case "${1:-}" in
+  --only)   ONLY="${2:-}"; shift 2 ;;
+  --only=*) ONLY="${1#*=}"; shift ;;
+esac
 
 c_ok(){ printf '\033[32m%s\033[0m\n' "$*"; }
 c_no(){ printf '\033[31m%s\033[0m\n' "$*"; }
@@ -63,7 +74,12 @@ tenants_for_role(){ # $1 = space-separated allowed roles -> prints tenant names
 }
 
 # ---- helpers ---------------------------------------------------------------
-confirm(){ local a; read -rp "$1 [y/N]: " a; [ "$a" = y ] || [ "$a" = Y ]; }
+# With --only set, a prompt that does not name the wanted service is answered "no" without
+# being shown. Every service prompt carries its own name ("Configure Xero? ..."), which is
+# what makes the filter reliable.
+confirm(){ local a
+  if [ -n "$ONLY" ] && ! printf '%s' "$1" | grep -qi -- "$ONLY"; then return 1; fi
+  read -rp "$1 [y/N]: " a; [ "$a" = y ] || [ "$a" = Y ]; }
 # Trim surrounding whitespace and CR from pasted values. Copying a key out of a browser, a
 # password manager or an RDP session very often carries a trailing space or \r, which then
 # travels INTO the injected header and makes the service answer 401 — indistinguishable from a
