@@ -29,7 +29,7 @@
 #   xero-call --profile grapple GET Organisation
 #   xero-call --profile grapple --health
 #   xero-call GET 'Invoices?where=Type=="ACCREC"&page=1'
-#   xero-call POST Invoices --data @/tmp/invoice.json
+#   (writes are refused: this role's Xero access is READ ONLY)
 #
 # Env overrides (rarely needed): XERO_PROFILE, XERO_TOKEN_URL, XERO_TENANT_ID.
 set -euo pipefail
@@ -145,6 +145,20 @@ fi
 METHOD="${1:?usage: xero-call [--profile monaco|grapple] <METHOD> <resource> [curl-args...]}"
 RES="${2:?resource required, e.g. Invoices / Contacts / Organisation}"
 shift 2
+
+# READ ONLY (firm policy, 2026-08-21). No Claude session raises, edits, voids, approves or pays
+# anything in Xero: writes go through the Invoice Bot in n8n or a person in the Xero UI. This
+# check is a guard rail, not a security control — the token this helper fetches still carries
+# write scopes, so the rule is also the agent's to keep, and going round the helper is a breach
+# of it. Lifting the rule means giving these roles "rw" in role-matrix.json again.
+case "$(printf '%s' "$METHOD" | tr a-z A-Z)" in
+  GET|HEAD) ;;
+  *)
+    echo "xero-call: refused — Xero access is READ ONLY for this role, so $METHOD is not allowed." >&2
+    echo "  Writes are done by the Invoice Bot (n8n) or by a person in Xero. Tell the user that" >&2
+    echo "  rather than fetching a token and calling api.xero.com yourself: same rule applies." >&2
+    exit 4 ;;
+esac
 
 fetch_token
 
