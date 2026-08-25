@@ -1,56 +1,222 @@
 #!/usr/bin/env bash
-# xero-call — runtime Xero helper (OAuth2 Custom Connection, 2-legged).
+# xero-call — runtime Xero helper for the firm's TWO organisations.
 #
-# Xero needs two steps and a SHORT-LIVED bearer token that the egress proxy cannot inject
-# (it only injects static secrets). This helper does both steps so the agent makes ONE call:
-#   1. POST identity.xero.com/connect/token (grant_type=client_credentials, NO scope) — the
-#      egress proxy injects the firm's Basic client-creds (vault secret `ms-xero-client`,
-#      bound to your agent only if your role is entitled to Xero) and returns a ~30-min
-#      access_token. This helper does NOT send its own auth on this call.
-#   2. Call api.xero.com/api.xro/2.0/<resource> with `Authorization: Bearer <token>` +
-#      `Xero-tenant-id` + JSON headers.
-# The token is fetched fresh per call and NEVER written to disk.
+# WHY IT LOOKS LIKE THIS
+# ----------------------
+# We do NOT run the Xero OAuth flow ourselves and we do NOT hold Xero client
+# credentials or refresh tokens. The firm already operates two token services that
+# do that job, and this helper simply consumes them:
+#
+#   monaco   -> WordPress CMS endpoint   (the same one their n8n invoice bot uses)
+#   grapple  -> n8n webhook token service (caches the access token, rotates the
+#               refresh token itself, and returns the tenant id with the token)
+#
+# Each token service is protected by its own static bearer. That bearer lives in the
+# OneCLI vault, bound to your agent, and is injected into the outbound request by the
+# egress proxy — it is never present in this script, in argv, or in the Claude session.
+# The bearer is bound to a single host AND url path, so it cannot leak to another
+# endpoint on the same host.
+#
+# The previous implementation used grant_type=client_credentials against
+# identity.xero.com (a Xero "Custom Connection"). That path is abandoned, not broken by
+# us: the connection issues perfectly valid tokens carrying all 46 scopes, but Xero
+# refuses every data call with HTTP 403 and an empty body because the paid Custom
+# Connection entitlement is not active. Diagnosis confirmed by decoding the JWT.
 #
 # Usage:
-#   xero-call <METHOD> <resource> [extra curl args...]
-#   xero-call GET  Invoices
-#   xero-call GET  'Invoices?where=Type=="ACCREC"&page=1'
-#   xero-call GET  Contacts
-#   xero-call POST Invoices --data @/tmp/invoice.json
+#   xero-call [--profile monaco|grapple] <METHOD> <resource> [extra curl args...]
+#   xero-call GET Invoices                          # monaco (default)
+#   xero-call --profile grapple GET Organisation
+#   xero-call --profile grapple --health
+#   xero-call GET 'Invoices?where=Type=="ACCREC"&page=1'
+#   (writes are refused: this role's Xero access is READ ONLY)
 #
-# Env overrides: XERO_TENANT_ID (defaults to the firm's MS tenant).
+# Env overrides (rarely needed): XERO_PROFILE, XERO_TOKEN_URL, XERO_TENANT_ID.
 set -euo pipefail
 
-XERO_TENANT_ID="${XERO_TENANT_ID:-7bb6bd0a-fccc-4421-b949-ddcdd28ece62}"
+PROFILE="${XERO_PROFILE:-monaco}"
+HEALTH=0
+ARGS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --profile) PROFILE="${2:?--profile needs a value: monaco|grapple}"; shift 2 ;;
+    --profile=*) PROFILE="${1#*=}"; shift ;;
+    --health) HEALTH=1; shift ;;
+    *) ARGS+=("$1"); shift ;;
+  esac
+done
+set -- ${ARGS[@]+"${ARGS[@]}"}
 
-METHOD="${1:?usage: xero-call <METHOD> <resource> [curl-args...]  (e.g. xero-call GET Invoices)}"
-RES="${2:?resource required, e.g. Invoices / Contacts / Accounts}"
-shift 2
+case "$PROFILE" in
+  monaco)
+    TOKEN_URL="https://cms.monacosolicitors.co.uk/wp-json/rota/v1/xero-get-tokens"
+    TENANT_DEFAULT="7bb6bd0a-fccc-4421-b949-ddcdd28ece62"
+    ORG_LABEL="Monaco Solicitors" ;;
+  grapple)
+    TOKEN_URL="https://n8n.monacosolicitors.co.uk/webhook/grapple-xero-get-tokens"
+    TENANT_DEFAULT=""            # the token service returns the tenant id itself
+    ORG_LABEL="Grapple Ltd" ;;
+  *)
+    echo "xero-call: unknown profile '$PROFILE' (expected: monaco | grapple)" >&2; exit 2 ;;
+esac
+TOKEN_URL="${XERO_TOKEN_URL:-$TOKEN_URL}"
 
-# Step 1 — token. Do NOT add an Authorization header: the proxy injects the Basic client
-# creds on identity.xero.com. If nothing is injected (role not entitled / key not vaulted),
-# Xero returns invalid_client and we surface a clear message.
-tok_resp="$(curl -sS -m 30 -X POST https://identity.xero.com/connect/token \
-  -H 'Content-Type: application/x-www-form-urlencoded' \
-  --data-urlencode 'grant_type=client_credentials' 2>&1)" || {
-    echo "xero-call: token request to identity.xero.com failed (network/egress)." >&2; exit 1; }
+# --- token ---------------------------------------------------------------------------
+# Sets TOKEN and TENANT. Never echoes the token. The bearer for the token service is
+# injected by the proxy; we deliberately send no Authorization header of our own.
+TOKEN=""; TENANT=""
+fetch_token(){
+  local body code
+  body="$(mktemp)"; TRAPFILES="${TRAPFILES:-} $body"
+  code="$(curl -sS -m 30 -o "$body" -w '%{http_code}' \
+            -H 'Accept: application/json' "$TOKEN_URL" 2>/dev/null)" || {
+    rm -f "$body"
+    echo "xero-call: could not reach the $PROFILE token service ($TOKEN_URL)." >&2
+    echo "  Network or egress failure — Xero itself was never contacted." >&2
+    exit 1; }
 
-token="$(printf '%s' "$tok_resp" | python3 -c 'import json,sys
-try: print(json.load(sys.stdin).get("access_token",""))
-except Exception: print("")' 2>/dev/null || true)"
+  if [ "$code" != 200 ]; then
+    echo "xero-call: the $PROFILE token service refused us — HTTP $code." >&2
+    if [ "$code" = 401 ] || [ "$code" = 403 ]; then
+      echo "  The bearer for this token service is missing, wrong, or not bound to your" >&2
+      echo "  agent. Your role may not be entitled to Xero. Ask an administrator to run" >&2
+      echo "  onboard-integrations.sh and choose the Xero token services section." >&2
+    fi
+    [ -s "$body" ] && echo "  service said: $(tr -d '\n' < "$body" | head -c 300)" >&2
+    rm -f "$body"; exit 1
+  fi
 
-if [ -z "$token" ]; then
-  echo "xero-call: no access_token." >&2
-  echo "  Likely: your role isn't entitled to Xero, or the firm's Xero client creds aren't in" >&2
-  echo "  the vault yet (ask an administrator to run onboarding). Token endpoint said:" >&2
-  echo "  $(printf '%s' "$tok_resp" | tr -d '\n' | head -c 240)" >&2
-  exit 1
+  # Both services answer {..., data:{access_token, tenant_id, ...}}; tolerate a flat shape.
+  eval "$(python3 - "$body" <<'PY'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    print("TOKEN=''; TENANT=''"); raise SystemExit
+inner = d.get("data") if isinstance(d.get("data"), dict) else d
+tok = str(inner.get("access_token") or d.get("access_token") or "")
+ten = str(inner.get("tenant_id") or d.get("tenant_id") or "")
+# shell-quote defensively; these are opaque values from an external service
+print("TOKEN=%s; TENANT=%s" % ("'" + tok.replace("'", "") + "'",
+                               "'" + ten.replace("'", "") + "'"))
+PY
+)"
+  rm -f "$body"
+
+  if [ -z "$TOKEN" ]; then
+    echo "xero-call: the $PROFILE token service answered 200 but returned no access_token." >&2
+    echo "  Its Xero authorisation has probably expired and needs re-connecting by the firm." >&2
+    exit 1
+  fi
+  TENANT="${XERO_TENANT_ID:-${TENANT:-$TENANT_DEFAULT}}"
+  if [ -z "$TENANT" ]; then
+    echo "xero-call: no tenant id — the $PROFILE token service did not return one and no" >&2
+    echo "  default is configured for this profile." >&2
+    exit 1
+  fi
+}
+
+# --- xero-call --health ---------------------------------------------------------------
+# Truthful end-to-end check. Reports OK only when real ledger data comes back. Obtaining a
+# token is NOT success: it proves the token service works, and nothing about Xero.
+if [ "$HEALTH" = 1 ]; then
+  echo "Xero health check — profile: $PROFILE ($ORG_LABEL)"
+  fetch_token
+  echo "  1. token service ...... ok (${#TOKEN} chars, tenant ${TENANT:0:8}…)"
+
+  hb="$(mktemp)"
+  hd="$(curl -sS -m 30 -o "$hb" -w '%{http_code}' \
+        -H "Authorization: Bearer $TOKEN" -H "Xero-tenant-id: $TENANT" \
+        -H 'Accept: application/json' \
+        https://api.xero.com/api.xro/2.0/Organisation 2>/dev/null)"
+  hsz="$(wc -c < "$hb" 2>/dev/null || echo 0)"
+  if [ "$hd" = 200 ]; then
+    name="$(sed -n 's/.*"Name":"\([^"]*\)".*/\1/p' "$hb" | head -1)"
+    echo "  2. read ledger data ... ok (HTTP 200, $hsz bytes${name:+, org: $name})"
+    rm -f "$hb"; echo "  VERDICT: OK"; exit 0
+  fi
+  echo "  2. read ledger data ... FAIL (HTTP $hd, $hsz bytes of body)"
+  [ "$hsz" -gt 0 ] && echo "     Xero said: $(tr -d '\n' < "$hb" | head -c 300)"
+  rm -f "$hb"
+  echo "  VERDICT: BROKEN — do not report Xero figures to users while this says BROKEN."
+  exit 3
 fi
 
-# Step 2 — the actual Accounting API call.
-exec curl -sS -m 60 -X "$METHOD" "https://api.xero.com/api.xro/2.0/${RES}" \
-  -H "Authorization: Bearer ${token}" \
-  -H "Xero-tenant-id: ${XERO_TENANT_ID}" \
-  -H "Accept: application/json" \
-  -H "Content-Type: application/json" \
-  "$@"
+METHOD="${1:?usage: xero-call [--profile monaco|grapple] <METHOD> <resource> [curl-args...]}"
+RES="${2:?resource required, e.g. Invoices / Contacts / Organisation}"
+shift 2
+
+# READ ONLY (firm policy, 2026-08-21). No Claude session raises, edits, voids, approves or pays
+# anything in Xero: writes go through the Invoice Bot in n8n or a person in the Xero UI. This
+# check is a guard rail, not a security control — the token this helper fetches still carries
+# write scopes, so the rule is also the agent's to keep, and going round the helper is a breach
+# of it. Lifting the rule means giving these roles "rw" in role-matrix.json again.
+case "$(printf '%s' "$METHOD" | tr a-z A-Z)" in
+  GET|HEAD) ;;
+  *)
+    echo "xero-call: refused — Xero access is READ ONLY for this role, so $METHOD is not allowed." >&2
+    echo "  Writes are done by the Invoice Bot (n8n) or by a person in Xero. Tell the user that" >&2
+    echo "  rather than fetching a token and calling api.xero.com yourself: same rule applies." >&2
+    exit 4 ;;
+esac
+
+fetch_token
+
+_hdr="$(mktemp)"; _body="$(mktemp)"
+trap 'rm -f "$_hdr" "$_body"' EXIT
+
+# Do NOT `exec curl` blind. Xero can answer with HTTP 403 and a COMPLETELY EMPTY body, so a
+# bare `curl -sS` hands the caller an empty string and exit code 0 — indistinguishable from
+# "no records matched". That is exactly how this integration looked healthy for weeks while
+# all 79 calls over 7 days failed. Capture the status; never fail silently.
+do_call(){
+  curl -sS -m 60 -o "$_body" -D "$_hdr" -w '%{http_code}' \
+    -X "$METHOD" "https://api.xero.com/api.xro/2.0/${RES}" \
+    -H "Authorization: Bearer ${TOKEN}" \
+    -H "Xero-tenant-id: ${TENANT}" \
+    -H "Accept: application/json" \
+    -H "Content-Type: application/json" \
+    "$@"
+}
+
+code="$(do_call "$@")" || {
+  echo "xero-call: request to api.xero.com failed (network/egress)." >&2; exit 1; }
+
+# A cached access token can expire between the token service and Xero. One refetch, one retry.
+if [ "$code" = 401 ]; then
+  fetch_token
+  code="$(do_call "$@")" || {
+    echo "xero-call: request to api.xero.com failed on retry (network/egress)." >&2; exit 1; }
+fi
+
+case "$code" in
+  2*) cat "$_body"; exit 0 ;;
+esac
+
+# --- failure path: be loud, be accurate ------------------------------------------------
+corr="$(sed -n 's/^[Xx]ero-[Cc]orrelation-[Ii]d: *//p' "$_hdr" | tr -d '\r')"
+echo "xero-call: Xero REFUSED the call — HTTP $code (profile: $PROFILE / $ORG_LABEL)." >&2
+echo "  NO DATA WAS RETURNED." >&2
+if [ -s "$_body" ]; then
+  echo "  Xero said: $(tr -d '\n' < "$_body" | head -c 400)" >&2
+fi
+if [ "$code" = 401 ]; then
+  echo "  Still 401 after refreshing the token. The firm's $PROFILE Xero authorisation" >&2
+  echo "  needs re-connecting — the token service can no longer mint a usable token." >&2
+fi
+if [ "$code" = 403 ] && [ ! -s "$_body" ]; then
+  cat >&2 <<'XDIAG'
+  A 403 with an empty body means Xero refused before binding the request to the
+  organisation. This is NOT a bug in your query and NOT an empty result set.
+  It usually means this organisation's connection lost its entitlement or its
+  authorisation. A Xero administrator at the firm must check the connection at
+  apps.xero.com/connected and re-authorise it.
+XDIAG
+fi
+cat >&2 <<'XAGENT'
+  IMPORTANT FOR THE AGENT READING THIS: do not report this as "no records found", do
+  not retry in a loop, and do not state or estimate any financial figure. Tell the user
+  Xero is unavailable and that the firm needs to look at the connection.
+XAGENT
+[ -n "$corr" ] && echo "  xero-correlation-id: $corr  (quote this to Xero support)" >&2
+exit 3

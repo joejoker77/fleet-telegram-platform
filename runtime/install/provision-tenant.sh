@@ -98,29 +98,37 @@ sed "s#__TENANT_HOME__#/home/$USER_NAME#g" "$SKEL/settings.json.tmpl" > "$CLAUDE
 install -m 0755 "$SKEL/hooks/telegram-track-chat.sh"    "$CLAUDE_DIR/hooks/telegram-track-chat.sh"
 install -m 0755 "$SKEL/hooks/telegram-block-askuser.sh" "$CLAUDE_DIR/hooks/telegram-block-askuser.sh"
 
-# Project MCP servers. settings.json enables `exa` via enabledMcpjsonServers, but the file that
-# DEFINES it is per-project — without it the promised mcp__exa__* tools simply do not exist
-# (found 2026-08-05: every tenant had the enable and none had the definition). The x-api-key
-# value is a placeholder on purpose: the egress proxy swaps it for the real key on mcp.exa.ai,
-# so no credential is ever written to disk. Written once; a tenant edit is not clobbered.
-WORK_DIR="/home/$USER_NAME/work"
-install -d -o "$USER_NAME" -g "$USER_NAME" -m 0755 "$WORK_DIR"
-if [ ! -s "$WORK_DIR/.mcp.json" ] || ! grep -q '"exa"' "$WORK_DIR/.mcp.json" 2>/dev/null; then
-  cat > "$WORK_DIR/.mcp.json" <<'MCPJSON'
-{
-  "mcpServers": {
-    "exa": {
-      "type": "http",
-      "url": "https://mcp.exa.ai/mcp?tools=web_search_exa,web_search_advanced_exa,get_code_context_exa,crawling_exa,company_research_exa,people_search_exa,deep_researcher_start,deep_researcher_check",
-      "headers": { "x-api-key": "${ONECLI:ms-exa-api}" }
-    }
-  }
-}
-MCPJSON
-  chown "$USER_NAME:$USER_NAME" "$WORK_DIR/.mcp.json"
-  chmod 0600 "$WORK_DIR/.mcp.json"
-  log "seeded $WORK_DIR/.mcp.json (exa)"
+# writing-lint.py — lints the bot's outgoing Telegram messages. Was rolled out by
+# hand to the first wave (deploy-writing-rules.py) and therefore missing from every
+# tenant provisioned afterwards; its settings.json entry now ships in
+# settings.json.tmpl, so the guard's golden copy matches from the first run.
+if [ -f "$SKEL/hooks/writing-lint.py" ]; then
+  install -m 0755 "$SKEL/hooks/writing-lint.py" "$CLAUDE_DIR/hooks/writing-lint.py"
 fi
+
+# The firm's matter tools + their guide. Nothing installed these before, so a new
+# hire arrived with an empty ~/work and a bot that could not answer "my matters"
+# or "my deadlines". Copied only when absent: ~/work is the tenant's own space and
+# anything they wrote there must survive re-provisioning.
+if [ -d "$SKEL/work" ]; then
+  for _p in bin CLAUDE.md .claude; do
+    if [ -e "$SKEL/work/$_p" ] && [ ! -e "/home/$USER_NAME/work/$_p" ]; then
+      cp -a "$SKEL/work/$_p" "/home/$USER_NAME/work/$_p"
+      chown -R "$USER_NAME:$USER_NAME" "/home/$USER_NAME/work/$_p"
+    fi
+  done
+  unset _p
+fi
+
+# agentshield settings guard: watches ~/.claude/settings.json against a root-owned
+# golden copy and reverts unsanctioned edits. Found active on only 18 of 28 tenants
+# (2026-08-25) because nothing enabled it at provisioning time.
+if systemctl list-unit-files 'agentshield-settings-guard@*' >/dev/null 2>&1; then
+  systemctl enable --now "agentshield-settings-guard@$USER_NAME.path" >/dev/null 2>&1 \
+    && echo "  agentshield settings guard enabled" \
+    || echo "  WARN: could not enable agentshield settings guard"
+fi
+
 # Managed firm CLAUDE.md = static base (English; Telegram + infra/security behavior,
 # tenant name substituted) + the per-ROLE access block (which firm systems this role may
 # use and exactly how to call each — from render-access-block.sh, role/scope driven by
@@ -221,6 +229,45 @@ onecli agents set-secret-mode --id "$AID" --mode selective >/dev/null
 TOKEN="$(onecli agents regenerate-token --id "$AID" | python3 -c "import json,sys;d=json.load(sys.stdin);a=d.get('data',d) if isinstance(d,dict) else d;print(a.get('accessToken',''))")"
 [ -n "$TOKEN" ] || die "no token for $AID"
 umask 077; printf '%s' "$TOKEN" > "$TOKFILE"; chmod 0600 "$TOKFILE"
+
+# 3b) shared firm secrets by role + the MCP stanza the gate points at.
+# Without this, a tenant provisioned AFTER the shared keys were onboarded gets an
+# agent with zero grants. jenny-monaco (created 2026-08-06) had 2 of the 11 her
+# role entitles, so her bot could not offer Drive, search or voice at all.
+# rebind-shared-secrets.sh is additive, idempotent and derives entitlement from
+# role-matrix.json — the same single source the CLAUDE.md access block uses, so
+# this grants exactly what the matrix already promises and nothing more.
+# Per-user credentials (Pipedrive, OpenRouter) are NOT bound here by design:
+# key_type=per_user in the matrix, each tenant supplies their own.
+log "binding shared firm secrets entitled to role '$ROLE'"
+if [ -x "$RT/install/rebind-shared-secrets.sh" ]; then
+  "$RT/install/rebind-shared-secrets.sh" --user "$USER_NAME" \
+    || echo "  WARNING: rebind-shared-secrets.sh failed — run it manually for $USER_NAME"
+else
+  echo "  WARNING: rebind-shared-secrets.sh missing — $USER_NAME gets no shared keys"
+fi
+
+# settings.json already gates Exa through enabledMcpjsonServers, but that gate
+# points at nothing until ~/work/.mcp.json exists. The ${ONECLI:...} value is a
+# marker, never a key — the egress proxy injects the real one by host pattern.
+MCPJSON="/home/$USER_NAME/work/.mcp.json"
+if [ ! -f "$MCPJSON" ]; then
+  log "seeding $MCPJSON (exa)"
+  cat > "$MCPJSON" <<'MCPEOF'
+{
+  "mcpServers": {
+    "exa": {
+      "type": "http",
+      "url": "https://mcp.exa.ai/mcp?tools=web_search_exa,web_search_advanced_exa,get_code_context_exa,crawling_exa,company_research_exa,people_search_exa,deep_researcher_start,deep_researcher_check",
+      "headers": {
+        "x-api-key": "${ONECLI:ms-exa-api}"
+      }
+    }
+  }
+}
+MCPEOF
+  chown "$USER_NAME:$USER_NAME" "$MCPJSON"; chmod 0644 "$MCPJSON"
+fi
 
 # 4) install latest wrapper + unit, enable the pod
 log "installing runtime unit + wrapper, enabling claude-pod@$USER_NAME"

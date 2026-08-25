@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+# pd-attachments — get the files off a Pipedrive deal's emails, and hand them to the
+# person in Telegram.
+#
+# WHY THIS EXISTS. Pipedrive keeps email attachments in a different store from the
+# deal's Files tab, and the obvious endpoints answer with a success that is wrong:
+#
+#   GET /api/v1/deals/{id}/files      -> 0 items, success:true, on a deal whose email
+#                                        carries attachments. Measured 18 Aug 2026.
+#   GET /api/v1/files?deal_id={id}    -> ignores the filter completely and returns the
+#                                        whole account's file list. A made-up deal id
+#                                        returns the identical 100 files from 2017.
+#   .../download without -L           -> 302 to presigned S3; you get ~576 bytes of
+#                                        nothing, which reads like an empty file.
+#   GET /api/v1/mailbox/mailMessages/{id} -> no attachments array; only the
+#                                        deal-scoped listing has it.
+#   There is no v2: /api/v2/files and /api/v2/deals/{id}/files both 404.
+#
+# Two lawyers were told "no copy exists" because of the first two. Never conclude
+# anything about a deal's attachments from those endpoints — use this.
+#
+#   pd-attachments list <deal-id>
+#   pd-attachments get  <attachment-id> [directory]      (default ~/work/downloads)
+#   pd-attachments send <attachment-id> [chat-id]        fetch + deliver to Telegram
+#
+# The Pipedrive token is injected by the egress proxy; this script never sees it.
+set -uo pipefail
+
+HOST=monacosolicitors2.pipedrive.com
+API="https://$HOST/api/v1"
+DEST_DEFAULT="$HOME/work/downloads"
+STATE="$(ls -d "$HOME"/.claude/channels/telegram-* 2>/dev/null | head -1)"
+
+die(){ printf 'pd-attachments: %s\n' "$*" >&2; exit 1; }
+
+api(){ curl -sS -m 60 "$@"; }
+
+# Every page, not the first one. A single limit=100 call looked fine and was wrong:
+# deal 161285 carries 158 emails, so a fifth of its attachments were invisible and
+# nothing in the output said so. Silently truncating a document list is the exact
+# failure this script exists to prevent.
+cmd_list(){
+  local deal="${1:?usage: pd-attachments list <deal-id>}" tmp start=0 resp more
+  tmp="$(mktemp)"; trap 'rm -f "$tmp"' RETURN
+  while :; do
+    resp="$(api "$API/deals/$deal/mailMessages?limit=100&start=$start")" \
+      || die "could not reach Pipedrive"
+    printf '%s\n' "$resp" >> "$tmp"
+    more="$(printf '%s' "$resp" | python3 -c '
+import json, sys
+try: d = json.load(sys.stdin)
+except Exception: print("0"); raise SystemExit
+p = (d.get("additional_data") or {}).get("pagination") or {}
+print(p.get("next_start") if p.get("more_items_in_collection") else 0)' 2>/dev/null)"
+    case "$more" in ''|0|None) break ;; esac
+    start="$more"
+    [ "$start" -gt 5000 ] && break
+  done
+  python3 -c '
+import json, sys
+deal = sys.argv[1]
+msgs = []
+for line in open(sys.argv[2]):
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        msgs += json.loads(line).get("data") or []
+    except json.JSONDecodeError:
+        sys.exit("  the API did not return JSON - check the deal id and your token")
+rows, seen = [], set()
+for m in msgs:
+    mm = m.get("data") or m
+    for a in (mm.get("attachments") or []):
+        if a.get("id") in seen:
+            continue
+        seen.add(a.get("id"))
+        rows.append((a.get("id"), a.get("name"), a.get("file_type"), a.get("file_size") or 0))
+if not msgs:
+    print("  deal %s: no email messages on this deal at all." % deal); raise SystemExit
+if not rows:
+    print("  deal %s: %d email(s), none of them carry attachments." % (deal, len(msgs))); raise SystemExit
+print("  deal %s: %d attachment(s) across %d email(s)" % (deal, len(rows), len(msgs)))
+print("  %8s  %9s  %-28s %s" % ("ID", "SIZE", "TYPE", "NAME"))
+for i, n, t, sz in rows:
+    print("  %8s  %7.1fKB  %-28s %s" % (i, sz/1024, (t or "")[:28], n))
+' "$deal" "$tmp"
+}
+
+# fetch <attachment-id> <path> -> writes the file, fails loudly on the 302 stub
+fetch(){
+  local aid="$1" out="$2" code size
+  code=$(curl -sS -L -m 300 -o "$out" -w '%{http_code}' \
+         "$API/mailbox/mailAttachments/$aid/download" 2>/dev/null || echo 000)
+  size=$(stat -c %s "$out" 2>/dev/null || echo 0)
+  if [ "$code" != 200 ]; then rm -f "$out"; die "download returned HTTP $code for attachment $aid"; fi
+  # the redirect stub is under a kilobyte; a real attachment never is
+  if [ "$size" -lt 1024 ]; then
+    rm -f "$out"
+    die "got $size bytes for attachment $aid — that is the redirect stub, not the file.
+  This happens when redirects are not followed. Report it rather than passing the file on."
+  fi
+  printf '%s' "$size"
+}
+
+name_of(){ # <attachment-id> -> filename, best effort
+  local aid="$1"
+  api "$API/mailbox/mailAttachments/$aid" 2>/dev/null | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin).get('data') or {}
+    print(d.get('name') or '')
+except Exception: print('')" 2>/dev/null
+}
+
+cmd_get(){
+  local aid="${1:?usage: pd-attachments get <attachment-id> [directory]}"
+  local dir="${2:-$DEST_DEFAULT}" nm out size
+  mkdir -p "$dir"
+  nm="$(name_of "$aid")"; [ -n "$nm" ] || nm="attachment-$aid"
+  out="$dir/$nm"
+  size="$(fetch "$aid" "$out")"
+  printf '  saved %s (%s bytes)\n' "$out" "$size"
+  printf '%s\n' "$out"
+}
+
+cmd_send(){
+  local aid="${1:?usage: pd-attachments send <attachment-id> [chat-id]}"
+  local chat="${2:-}" out size
+  [ -f "$STATE/.env" ] || die "no telegram config at $STATE/.env"
+  # shellcheck disable=SC1090
+  set -a; . "$STATE/.env"; set +a
+  [ -n "${TELEGRAM_BOT_TOKEN:-}" ] || die "TELEGRAM_BOT_TOKEN not set"
+  if [ -z "$chat" ]; then
+    chat="$(python3 -c "
+import json
+try: print(json.load(open('$STATE/last_chat.json'))['chat_id'])
+except Exception:
+    print(json.load(open('$STATE/access.json'))['allowFrom'][0])" 2>/dev/null)"
+  fi
+  [ -n "$chat" ] || die "could not work out which chat to send to — pass the chat id"
+
+  out="$(mktemp -d)/$(name_of "$aid" | tr -d '/')"
+  [ -n "$(basename "$out")" ] || out="$(dirname "$out")/attachment-$aid"
+  size="$(fetch "$aid" "$out")"
+  code=$(curl -sS -m 300 -o /tmp/.pdsend.$$ -w '%{http_code}' \
+    -F "chat_id=$chat" -F "document=@$out" \
+    "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" 2>/dev/null || echo 000)
+  if [ "$code" = 200 ]; then
+    printf '  sent %s (%s bytes) to chat %s\n' "$(basename "$out")" "$size" "$chat"
+  else
+    printf '  upload failed HTTP %s: %s\n' "$code" "$(head -c 200 /tmp/.pdsend.$$ 2>/dev/null)" >&2
+    printf '  the file is still on disk at %s\n' "$out" >&2
+  fi
+  rm -f /tmp/.pdsend.$$
+  [ "$code" = 200 ]
+}
+
+case "${1:-}" in
+  list) shift; cmd_list "$@" ;;
+  get)  shift; cmd_get  "$@" ;;
+  send) shift; cmd_send "$@" ;;
+  *) sed -n '2,30p' "$0"; exit 1 ;;
+esac

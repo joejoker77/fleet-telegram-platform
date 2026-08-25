@@ -25,6 +25,7 @@ table inet cl_egress {
     type filter hook input priority -10; policy accept;
     ip saddr __SUBNET__ ct state established,related counter accept
     ip saddr __SUBNET__ tcp dport 10255 counter accept
+    ip saddr __SUBNET__ tcp dport 10256 counter accept
     ip saddr __SUBNET__ counter drop
   }
 }

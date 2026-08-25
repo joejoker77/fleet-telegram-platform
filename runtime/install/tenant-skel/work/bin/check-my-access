@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""What your Claude bot can and cannot reach right now.
+
+    check-my-access
+
+Runs one cheap read against every system, and lists your connected apps.
+Nothing is written or changed. Takes about fifteen seconds.
+
+Three answers, and they mean different things:
+
+  connected      working, nothing to do
+  not connected  the key for that system is missing. Fixable, see the note
+  not yours      your role does not include it. Not a fault, and not fixable
+                 by you. Ask Tom if you think you need it
+"""
+import json
+import os
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+
+OK, MISSING, NOTYOURS, ODD = "connected", "not connected", "not yours", "unexpected"
+
+
+def probe(url, want_json=True):
+    """Returns (verdict, detail). The proxy injects the key, so we send none."""
+    try:
+        with urllib.request.urlopen(url, timeout=25) as r:
+            body = r.read()
+            if want_json:
+                try:
+                    return OK, json.loads(body)
+                except ValueError:
+                    return OK, {}
+            return OK, {}
+    except urllib.error.HTTPError as e:
+        raw = e.read(600).decode(errors="replace")
+        try:
+            err = json.loads(raw).get("error", "")
+        except ValueError:
+            err = ""
+        if err == "access_restricted":
+            return NOTYOURS, "your role does not include this system"
+        if err == "credential_not_found":
+            return MISSING, "no key is registered for this system"
+        if e.code in (401, 403):
+            return MISSING, f"HTTP {e.code}, the key is missing or expired"
+        return ODD, f"HTTP {e.code}: {raw[:120]}"
+    except Exception as e:                                   # noqa: BLE001
+        return ODD, str(e)[:120]
+
+
+def chat_id():
+    d = os.environ.get("TELEGRAM_STATE_DIR")
+    if not d:
+        base = os.path.expanduser("~/.claude/channels")
+        if os.path.isdir(base):
+            for sub in os.listdir(base):
+                p = os.path.join(base, sub, "last_chat.json")
+                if os.path.exists(p):
+                    d = os.path.join(base, sub)
+                    break
+    if not d:
+        return None
+    try:
+        with open(os.path.join(d, "last_chat.json")) as f:
+            return json.load(f).get("chat_id")
+    except Exception:                                        # noqa: BLE001
+        return None
+
+
+def line(name, verdict, detail, fix=""):
+    mark = {OK: "  ok  ", MISSING: " MISS ", NOTYOURS: "  --  ", ODD: "  ??  "}[verdict]
+    print(f"[{mark}] {name:<22} {detail}")
+    if verdict in (MISSING, ODD) and fix:
+        print(f"           -> {fix}")
+
+
+def main():
+    print("Checking what your bot can reach. Reads only, nothing is changed.\n")
+
+    # --- Pipedrive. Every matter tool depends on this one.
+    v, d = probe("https://monacosolicitors2.pipedrive.com/api/v1/users/me")
+    if v == OK:
+        u = (d or {}).get("data") or {}
+        who = u.get("name", "?")
+        line("Pipedrive", v, f"signed in as {who}")
+        if who in ("Automations", "Case Workers"):
+            print("           -> that is a robot account, not you. Matter tools will find "
+                  "nothing until your own token is loaded.")
+    else:
+        line("Pipedrive", v, d,
+             "Pipedrive → Settings → Personal preferences → API, copy your personal "
+             "API token, and paste it to your bot. It stores it for you.")
+
+    # --- Payload, the chatbot's CMS.
+    v, d = probe("https://chatbot.monacosolicitors.co.uk/api/access")
+    line("Chatbot sessions", v, "readable" if v == OK else d,
+         "Tell Tom, this one is set centrally.")
+
+    # --- Dialpad, the phone system.
+    v, d = probe("https://dialpad.com/api/v2/users?limit=1")
+    line("Phone system", v, "readable" if v == OK else d,
+         "Tell Tom, this one is set centrally.")
+
+    # --- The firm's database, two possible routes depending on your role.
+    v, d = probe("https://jdjxlczkggckdnpeluuw.supabase.co/rest/v1/?limit=1")
+    if v == OK:
+        line("Firm database", v, "direct read")
+    elif os.path.exists(os.path.expanduser("~/.claude/dbread.token")):
+        line("Firm database", OK, "read-only, through the query gateway")
+    else:
+        line("Firm database", v, d, "Tell Tom, this one is set centrally.")
+
+    # --- Your own apps, connected by you.
+    cid = chat_id()
+    if not cid:
+        print(f"[{'  ??  '}] {'Your own apps':<22} could not work out your Telegram id from "
+              "this pod. Ask your bot in Telegram instead.")
+    else:
+        v, d = probe("https://backend.composio.dev/api/v3/connected_accounts"
+                     f"?user_ids={cid}&limit=50")
+        items = (d or {}).get("items") or (d or {}).get("data") or [] if v == OK else []
+        if v != OK:
+            line("Your own apps", v, d, "Tell Tom.")
+        elif not items:
+            line("Your own apps", MISSING, "nothing connected yet",
+                 'Ask your bot: "connect my Outlook" or "connect my Slack". '
+                 "It sends a link, you sign in once, it never sees your password.")
+        else:
+            live = [i for i in items if i.get("status") == "ACTIVE"]
+            dead = [i for i in items if i.get("status") != "ACTIVE"]
+            names = sorted({(i.get("toolkit") or {}).get("slug", "?") for i in live})
+            line("Your own apps", OK, f"{len(live)} connected: {', '.join(names) or 'none'}")
+            for i in dead:
+                slug = (i.get("toolkit") or {}).get("slug", "?")
+                print(f"           -> {slug} has expired. Ask your bot to reconnect it.")
+
+    # --- Sending files back to you.
+    tg = os.path.expanduser("~/work/bin/tg-file")
+    if os.path.exists(tg):
+        print(f"[  ok  ] {'Sending you files':<22} tg-file is installed")
+    else:
+        print(f"[ MISS ] {'Sending you files':<22} tg-file is not installed on this pod")
+        print("           -> ask Tom to add it, otherwise reports come back as text only.")
+
+    # --- The matter tools themselves.
+    print()
+    have = [t for t in ("my-deadlines", "my-matters", "deal-brief")
+            if os.path.exists(os.path.expanduser(f"~/work/bin/{t}"))]
+    if len(have) == 3:
+        print("Matter tools installed: my-deadlines, my-matters, deal-brief.")
+        print('Try:  my-deadlines --days 30      then     my-matters --quiet-days 21')
+    else:
+        print(f"Matter tools installed: {', '.join(have) or 'none'}. Ask Tom for the rest.")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,271 @@
+#!/usr/bin/env python3
+"""Runs the scheduled reports and sends them to Telegram. No model, ever.
+
+    report-daemon --ensure       start it if it is not already running
+    report-daemon --status
+    report-daemon --stop
+    report-daemon --run-once <name>
+    report-daemon --foreground   run the loop in this terminal (for debugging)
+
+The loop wakes once a minute, runs any job whose time has come, and posts the
+output. It calls no AI service of any kind: a job is a fixed shell command
+registered by the user, and the daemon only pipes its stdout into a message.
+That is the firm's rule about timers, and it is why this is allowed to exist.
+
+Jobs live in ~/work/.claude/schedules.json (see report-schedule).
+"""
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import shlex
+import signal
+import subprocess
+import sys
+import time
+
+HOME = os.path.expanduser("~")
+STORE = f"{HOME}/work/.claude/schedules.json"
+PIDFILE = f"{HOME}/work/.claude/report-daemon.pid"
+LOG = f"{HOME}/work/.claude/report-daemon.log"
+DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+MAX_INLINE = 3200          # longer than this and it goes as a file attachment
+JOB_TIMEOUT = 600
+
+
+def state_dir():
+    d = os.environ.get("TELEGRAM_STATE_DIR")
+    if d and os.path.isdir(d):
+        return d
+    import getpass
+    guess = f"{HOME}/.claude/channels/telegram-{getpass.getuser()}"
+    if os.path.isdir(guess):
+        return guess
+    base = f"{HOME}/.claude/channels"
+    if os.path.isdir(base):
+        for sub in sorted(os.listdir(base)):
+            if os.path.exists(f"{base}/{sub}/last_chat.json"):
+                return f"{base}/{sub}"
+    return None
+
+
+def log(msg):
+    os.makedirs(os.path.dirname(LOG), exist_ok=True)
+    with open(LOG, "a") as f:
+        f.write(f"{dt.datetime.now().isoformat(timespec='seconds')}  {msg}\n")
+
+
+def load():
+    try:
+        with open(STORE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {"jobs": []}
+
+
+def save(db):
+    os.makedirs(os.path.dirname(STORE), exist_ok=True)
+    tmp = STORE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(db, f, indent=1)
+    os.replace(tmp, STORE)
+
+
+def london_now():
+    """The pod runs on UTC. Everything the user says is London time."""
+    try:
+        from zoneinfo import ZoneInfo
+        return dt.datetime.now(ZoneInfo("Europe/London"))
+    except Exception:                                          # noqa: BLE001
+        return dt.datetime.now()
+
+
+def slug(s):
+    """A filename curl will accept. A comma in a -F argument splits the form,
+    which fails as an unreadable file rather than as anything informative."""
+    out = "".join(c if c.isalnum() or c in "-_" else "-" for c in s)
+    return re.sub(r"-{2,}", "-", out).strip("-")[:48] or "report"
+
+
+def send(title, body, sd, name="report"):
+    """Short output goes inline; a long report goes as a text file."""
+    env = dict(os.environ, TELEGRAM_STATE_DIR=sd)
+    body = body.rstrip() or "(the report produced no output)"
+    if len(body) <= MAX_INLINE:
+        text = f"<b>{esc(title)}</b>\n<pre>{esc(body)}</pre>"
+        r = subprocess.run(["/usr/local/bin/tg-send", "--format", "html", text],
+                           env=env, capture_output=True, text=True)
+    else:
+        path = f"/tmp/{slug(name)}-{london_now():%Y%m%d}.txt"
+        with open(path, "w") as f:
+            f.write(body + "\n")
+        r = subprocess.run([f"{HOME}/work/bin/tg-file", path, title],
+                           env=env, capture_output=True, text=True)
+    if r.returncode != 0:
+        log(f"send failed: {(r.stderr or r.stdout).strip()[:300]}")
+    return r.returncode == 0
+
+
+def esc(s):
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def run_job(job, sd):
+    cmd = [os.path.expanduser(c) for c in job["command"]]
+    log(f"running {job['name']}: {' '.join(shlex.quote(c) for c in cmd)}")
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=JOB_TIMEOUT,
+                           cwd=f"{HOME}/work")
+        out = p.stdout
+        if p.returncode != 0:
+            out = (out + "\n" + p.stderr).strip() or f"exit code {p.returncode}"
+    except subprocess.TimeoutExpired:
+        out = f"The report did not finish inside {JOB_TIMEOUT // 60} minutes."
+    except FileNotFoundError as e:
+        out = f"Cannot run that command: {e}"
+    ok = send(job.get("title") or job["name"], out, sd, job["name"])
+    log(f"{job['name']} sent={ok} bytes={len(out)}")
+    return ok
+
+
+def due(job, now):
+    if DAYS[now.weekday()] not in job["days"]:
+        return False
+    h, m = (int(x) for x in job["at"].split(":"))
+    scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
+    if now < scheduled:
+        return False
+    # The bot restarts, so a slot can be missed. Send it late when it wakes,
+    # up to six hours: a Monday deadline list is still worth having at 11am.
+    # Later than that and it is yesterday's news, so skip to the next slot.
+    if (now - scheduled).total_seconds() > 6 * 3600:
+        return False
+    # Compare bare minutes on both sides. isoformat() carries the +01:00 offset
+    # and the stored value is sliced, so comparing them whole makes every job
+    # look permanently due and it re-sends every time the loop wakes.
+    # last_run is also present-but-null on a job that has never fired.
+    return (job.get("last_run") or "")[:16] != slot_key(scheduled)
+
+
+def slot_key(when):
+    return when.isoformat(timespec="minutes")[:16]
+
+
+def loop():
+    sd = state_dir()
+    if not sd:
+        log("no Telegram state dir, nothing can be sent; exiting")
+        return
+    log(f"daemon up, pid {os.getpid()}, state {sd}")
+    while True:
+        try:
+            db = load()
+            now = london_now()
+            changed = False
+            for job in db["jobs"]:
+                if due(job, now):
+                    h, m = (int(x) for x in job["at"].split(":"))
+                    slot = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                    job["last_run"] = slot_key(slot)
+                    changed = True
+                    save(db)          # mark before running, so a crash cannot loop
+                    run_job(job, sd)
+            if changed:
+                save(db)
+        except Exception as e:                                 # noqa: BLE001
+            log(f"loop error: {e!r}")
+        time.sleep(45)
+
+
+def pid_alive():
+    try:
+        with open(PIDFILE) as f:
+            pid = int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return None
+    # A pid outlives the process it named. Pods are long-lived and pids get
+    # recycled, so confirm this one is actually us before reporting healthy.
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            if b"report-daemon" not in f.read():
+                return None
+    except OSError:
+        return None
+    return pid
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--ensure", action="store_true")
+    ap.add_argument("--status", action="store_true")
+    ap.add_argument("--stop", action="store_true")
+    ap.add_argument("--foreground", action="store_true")
+    ap.add_argument("--run-once", metavar="NAME")
+    a = ap.parse_args()
+
+    if a.status:
+        pid = pid_alive()
+        n = len(load()["jobs"])
+        print(f"Report daemon running (pid {pid}), {n} job(s) scheduled." if pid
+              else f"Report daemon not running. {n} job(s) scheduled, none will fire.")
+        return
+
+    if a.stop:
+        pid = pid_alive()
+        if pid:
+            os.kill(pid, signal.SIGTERM)
+            print(f"Stopped (pid {pid}).")
+        else:
+            print("Not running.")
+        return
+
+    if a.run_once:
+        job = next((j for j in load()["jobs"] if j["name"] == a.run_once), None)
+        if not job:
+            sys.exit(f"No job called '{a.run_once}'.")
+        sd = state_dir()
+        if not sd:
+            sys.exit("Cannot find the Telegram state dir, so nothing can be sent.")
+        print(f"Running '{job['name']}' now.")
+        sys.exit(0 if run_job(job, sd) else 1)
+
+    if a.ensure:
+        # Proof the session hook is wired up, checkable without any jobs set.
+        try:
+            os.makedirs(os.path.dirname(PIDFILE), exist_ok=True)
+            with open(f"{HOME}/work/.claude/report-daemon.ensure", "w") as f:
+                f.write(dt.datetime.now().isoformat(timespec="seconds") + "\n")
+        except OSError:
+            pass
+        if pid_alive():
+            return
+        if not load()["jobs"]:
+            return                       # nothing scheduled, nothing to run
+        # Detach so it outlives this shell, and keep the Telegram state dir,
+        # which is the one thing the child cannot work out on its own reliably.
+        os.makedirs(os.path.dirname(PIDFILE), exist_ok=True)
+        with open(LOG, "a") as f:
+            p = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--foreground"],
+                                 stdout=f, stderr=f, stdin=subprocess.DEVNULL,
+                                 start_new_session=True)
+        with open(PIDFILE, "w") as f:
+            f.write(str(p.pid))
+        return
+
+    if a.foreground:
+        with open(PIDFILE, "w") as f:
+            f.write(str(os.getpid()))
+        loop()
+        return
+
+    ap.print_help()
+
+
+if __name__ == "__main__":
+    main()

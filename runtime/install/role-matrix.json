@@ -18,20 +18,184 @@
     "roles.<role>: rw = full; read = read-only (must be backed by a real read-scoped key/RLS,",
     "  else the read restriction is not enforced -- see supabase/basic)."
   ],
-  "role_order": ["admin", "manager", "finance", "basic"],
-  "service_order": ["supabase", "payload", "rota", "strapi", "pipedrive", "n8n", "openrouter", "exa", "composio", "elevenlabs", "msgraph", "xero"],
+  "role_order": [
+    "admin",
+    "manager",
+    "finance",
+    "basic"
+  ],
+  "service_order": [
+    "supabase",
+    "payload",
+    "rota",
+    "strapi",
+    "pipedrive",
+    "n8n",
+    "openrouter",
+    "exa",
+    "composio",
+    "elevenlabs",
+    "msgraph",
+    "xero",
+    "dialpad"
+  ],
   "services": {
-    "supabase":   { "label": "Supabase",         "key_type": "ms_shared", "hosts": ["jdjxlczkggckdnpeluuw.supabase.co", "gdkgitoicaryhiiwohuz.supabase.co"], "roles": { "admin": "rw", "manager": "rw", "basic": "read" } },
-    "payload":    { "label": "Payload CMS",       "key_type": "ms_shared", "hosts": ["chatbot.monacosolicitors.co.uk"], "roles": { "admin": "rw" } },
-    "rota":       { "label": "Rota (WordPress)",  "key_type": "ms_shared", "hosts": ["cms.monacosolicitors.co.uk"], "roles": { "admin": "rw", "manager": "rw" } },
-    "strapi":     { "label": "Strapi",            "key_type": "ms_shared", "hosts": ["api.monacosolicitors.grapple.uk"], "roles": { "admin": "rw" } },
-    "pipedrive":  { "label": "Pipedrive",         "key_type": "per_user",  "hosts": ["monacosolicitors2.pipedrive.com"], "roles": { "admin": "rw", "manager": "rw", "basic": "rw" } },
-    "n8n":        { "label": "n8n (cloud + self-hosted)", "key_type": "ms_shared", "hosts": ["monacosolicitors.app.n8n.cloud", "n8n.monacosolicitors.co.uk"], "roles": { "admin": "rw", "manager": "rw" } },
-    "openrouter": { "label": "OpenRouter",        "key_type": "per_user",  "hosts": ["openrouter.ai"], "roles": { "admin": "rw", "manager": "rw" } },
-    "exa":        { "label": "Exa",               "key_type": "ms_shared", "hosts": ["mcp.exa.ai"], "roles": { "admin": "rw", "manager": "rw", "finance": "rw", "basic": "rw" } },
-    "composio":   { "label": "Composio",          "key_type": "ms_shared", "hosts": ["mcp.composio.dev", "backend.composio.dev"], "roles": { "admin": "rw", "manager": "rw", "finance": "rw", "basic": "rw" } },
-    "elevenlabs": { "label": "ElevenLabs",        "key_type": "ms_shared", "hosts": ["api.elevenlabs.io"], "roles": { "admin": "rw", "manager": "rw", "finance": "rw", "basic": "rw" } },
-    "msgraph":    { "label": "Microsoft Graph",  "key_type": "ms_shared", "hosts": ["graph.microsoft.com", "login.microsoftonline.com"], "roles": { "admin": "rw" } },
-    "xero":       { "label": "Xero",              "key_type": "ms_shared", "hosts": ["api.xero.com", "identity.xero.com"], "roles": { "admin": "rw", "finance": "rw" } }
+    "supabase": {
+      "label": "Supabase",
+      "key_type": "ms_shared",
+      "hosts": [
+        "jdjxlczkggckdnpeluuw.supabase.co",
+        "onfqcdtgmamjrihytnzi.supabase.co"
+      ],
+      "roles": {
+        "admin": "rw",
+        "manager": "rw",
+        "basic": "read"
+      }
+    },
+    "payload": {
+      "label": "Payload CMS",
+      "key_type": "ms_shared",
+      "hosts": [
+        "chatbot.monacosolicitors.co.uk"
+      ],
+      "roles": {
+        "admin": "rw",
+        "manager": "read",
+        "basic": "read"
+      }
+    },
+    "rota": {
+      "label": "Rota (WordPress)",
+      "key_type": "ms_shared",
+      "hosts": [
+        "cms.monacosolicitors.co.uk"
+      ],
+      "roles": {
+        "admin": "rw",
+        "manager": "rw"
+      }
+    },
+    "strapi": {
+      "label": "Strapi",
+      "key_type": "ms_shared",
+      "hosts": [
+        "api.monacosolicitors.grapple.uk"
+      ],
+      "roles": {
+        "admin": "rw"
+      }
+    },
+    "pipedrive": {
+      "label": "Pipedrive",
+      "key_type": "per_user",
+      "hosts": [
+        "monacosolicitors2.pipedrive.com"
+      ],
+      "roles": {
+        "admin": "rw",
+        "manager": "rw",
+        "basic": "rw"
+      }
+    },
+    "n8n": {
+      "label": "n8n (cloud + self-hosted)",
+      "key_type": "ms_shared",
+      "hosts": [
+        "monacosolicitors.app.n8n.cloud",
+        "n8n.monacosolicitors.co.uk"
+      ],
+      "roles": {
+        "admin": "rw",
+        "manager": "rw"
+      }
+    },
+    "openrouter": {
+      "label": "OpenRouter",
+      "key_type": "per_user",
+      "hosts": [
+        "openrouter.ai"
+      ],
+      "roles": {
+        "admin": "rw",
+        "manager": "rw"
+      }
+    },
+    "exa": {
+      "label": "Exa",
+      "key_type": "ms_shared",
+      "hosts": [
+        "mcp.exa.ai"
+      ],
+      "roles": {
+        "admin": "rw",
+        "manager": "rw",
+        "finance": "rw",
+        "basic": "rw"
+      }
+    },
+    "composio": {
+      "label": "Composio",
+      "key_type": "ms_shared",
+      "hosts": [
+        "mcp.composio.dev",
+        "backend.composio.dev"
+      ],
+      "roles": {
+        "admin": "rw",
+        "manager": "rw",
+        "finance": "rw",
+        "basic": "rw"
+      }
+    },
+    "elevenlabs": {
+      "label": "ElevenLabs",
+      "key_type": "ms_shared",
+      "hosts": [
+        "api.elevenlabs.io"
+      ],
+      "roles": {
+        "admin": "rw",
+        "manager": "rw",
+        "finance": "rw",
+        "basic": "rw"
+      }
+    },
+    "msgraph": {
+      "label": "Microsoft Graph",
+      "key_type": "ms_shared",
+      "hosts": [
+        "graph.microsoft.com",
+        "login.microsoftonline.com"
+      ],
+      "roles": {
+        "admin": "rw"
+      }
+    },
+    "xero": {
+      "label": "Xero",
+      "key_type": "ms_shared",
+      "hosts": [
+        "api.xero.com",
+        "identity.xero.com"
+      ],
+      "roles": {
+        "admin": "rw",
+        "finance": "rw"
+      }
+    },
+    "dialpad": {
+      "label": "Dialpad",
+      "key_type": "ms_shared",
+      "hosts": [
+        "dialpad.com"
+      ],
+      "roles": {
+        "admin": "rw",
+        "manager": "rw",
+        "finance": "rw",
+        "basic": "rw"
+      }
+    }
   }
 }

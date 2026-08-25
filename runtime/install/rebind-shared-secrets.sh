@@ -45,14 +45,17 @@ done
 # where rw roles get the service_role key and read roles go through the DB gateway instead).
 svc_of(){ case "$1" in
   ms-supabase|ms-supabase-auth)        echo "supabase rw";;
-  ms-payload)                          echo "payload";;
+  ms-supabase-stage|ms-supabase-stage-auth) echo "supabase rw";;
+  ms-payload)                          echo "payload rw";;
+  ms-payload-read)                     echo "payload read";;
   ms-wordpress)                        echo "rota";;
   ms-strapi)                           echo "strapi";;
   ms-n8n-cloud|ms-n8n-selfhosted)      echo "n8n";;
   ms-exa-api)                          echo "exa";;
   ms-composio-api|ms-composio-mcp)     echo "composio";;
   ms-elevenlabs-api)                   echo "elevenlabs";;
-  ms-xero-client)                      echo "xero";;
+  ms-xero-client|ms-xero-api)          echo "xero";;
+  ms-dialpad-api)                      echo "dialpad";;
   *)                                   echo "";; esac; }
 
 roles_for(){ # $1 service  $2 scope(optional) -> space-separated roles

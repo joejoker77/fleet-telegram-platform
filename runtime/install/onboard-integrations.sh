@@ -15,11 +15,22 @@
 # role-matrix.json: ms_shared services are asked for below; per_user ones (each
 # tenant supplies their own) are skipped here and prompted by add-user.sh instead.
 #
-#   sudo ./onboard-integrations.sh
+#   sudo ./onboard-integrations.sh              # every service, in order
+#   sudo ./onboard-integrations.sh --only xero  # just that one
 #
 set -uo pipefail
 ONECLI=/usr/local/bin/onecli
 export HOME=/root
+
+# --only <service>: ask ONLY that service's questions. Every other prompt is answered "no"
+# automatically. This exists because sending someone in to fix one integration otherwise
+# means walking them past a dozen unrelated prompts, where a single stray "y" reconfigures
+# a service that was working. Without the flag, behaviour is exactly as before.
+ONLY=""
+case "${1:-}" in
+  --only)   ONLY="${2:-}"; shift 2 ;;
+  --only=*) ONLY="${1#*=}"; shift ;;
+esac
 
 c_ok(){ printf '\033[32m%s\033[0m\n' "$*"; }
 c_no(){ printf '\033[31m%s\033[0m\n' "$*"; }
@@ -63,7 +74,12 @@ tenants_for_role(){ # $1 = space-separated allowed roles -> prints tenant names
 }
 
 # ---- helpers ---------------------------------------------------------------
-confirm(){ local a; read -rp "$1 [y/N]: " a; [ "$a" = y ] || [ "$a" = Y ]; }
+# With --only set, a prompt that does not name the wanted service is answered "no" without
+# being shown. Every service prompt carries its own name ("Configure Xero? ..."), which is
+# what makes the filter reliable.
+confirm(){ local a
+  if [ -n "$ONLY" ] && ! printf '%s' "$1" | grep -qi -- "$ONLY"; then return 1; fi
+  read -rp "$1 [y/N]: " a; [ "$a" = y ] || [ "$a" = Y ]; }
 # Trim surrounding whitespace and CR from pasted values. Copying a key out of a browser, a
 # password manager or an RDP session very often carries a trailing space or \r, which then
 # travels INTO the injected header and makes the service answer 401 — indistinguishable from a
@@ -148,14 +164,19 @@ store_anyway(){
   fi
 }
 
-# vault_and_distribute <service> <secret-name> <host> <header> <fmt> <value> [scope]
+# vault_and_distribute <service> <secret-name> <host> <header> <fmt> <value> [scope] [path]
+# [path]: restrict injection to one URL path on <host>. Needed when TWO different secrets
+# live on the SAME hostname — without it the proxy matches on host alone and can inject the
+# wrong credential. Real case: cms.monacosolicitors.co.uk already carries ms-wordpress
+# (Basic), and the Xero token endpoint on that same host needs a different Bearer.
 # Without [scope]: bind to every role entitled to <service> (ms_shared, uniform scope).
 # With [scope] (rw|read): bind ONLY to roles whose matrix scope == that value — so a
 # read-only key reaches read-scoped roles and the rw key reaches rw roles. This is what makes
 # "basic = read-only Supabase" actually enforced (the injected key is itself read-only), not a
 # doc promise; a read role never gets the rw key bound.
 vault_and_distribute(){
-  local svc="$1" name="$2" host="$3" hdr="$4" fmt="$5" val="$6" scope="${7:-}" sid allowed
+  local svc="$1" name="$2" host="$3" hdr="$4" fmt="$5" val="$6" scope="${7:-}" path="${8:-}" sid allowed
+  local pathargs=(); [ -n "$path" ] && pathargs=(--path-pattern "$path")
   if [ "${KEYTYPE[$svc]:-ms_shared}" = per_user ]; then
     c_no "  [$svc] is a PER-USER service — each user adds their OWN key via self-onboarding; this admin script does NOT create a shared key for it."
     return 0
@@ -166,11 +187,11 @@ vault_and_distribute(){
   fi
   if [ -z "$sid" ]; then
     "$ONECLI" secrets create --name "$name" --type generic --value "$val" \
-      --host-pattern "$host" --header-name "$hdr" --value-format "$fmt" >/dev/null \
+      --host-pattern "$host" "${pathargs[@]}" --header-name "$hdr" --value-format "$fmt" >/dev/null \
       || { c_no "  vault create failed"; return 1; }
     sid="$(secret_id "$name")"; [ -n "$sid" ] || { c_no "  secret not found after create"; return 1; }
   fi
-  c_ok "  ✓ vaulted $name ($host / $hdr)"
+  c_ok "  ✓ vaulted $name ($host${path} / $hdr)"
   if [ -n "$scope" ]; then allowed="$(roles_with_scope "$svc" "$scope")"; else allowed="${ROLES[$svc]}"; fi
   local bound=0 t aid
   echo "  binding to tenants with role in: [${allowed:-none}]${scope:+  scope=$scope}"
@@ -435,26 +456,152 @@ if confirm "Configure ElevenLabs (voice transcription, all roles)?"; then
   fi
 fi
 
-# --- Xero : OAuth2 Custom Connection (identity.xero.com / api.xero.com) -----
-# Custom Connection = 2-legged client_credentials. We vault the client creds as
-# Basic on identity.xero.com; at runtime Claude POSTs the token endpoint (proxy
-# injects Basic), gets a ~30-min access_token, then calls api.xero.com with
-# Bearer + the fixed Xero-tenant-id (baked into CLAUDE.md, not a secret).
-XERO_TENANT_ID=7bb6bd0a-fccc-4421-b949-ddcdd28ece62
-if confirm "Configure Xero? (OAuth2 Custom Connection)"; then
-  CID="$(ask "Xero client_id")"; CSEC="$(ask_secret "Xero client_secret")"; BASIC="$(printf '%s:%s' "$CID" "$CSEC" | base64 -w0)"
-  # Custom Connection: request NO scope. Xero issues a token scoped to whatever the
-  # connection was granted; passing explicit scopes is filtered to empty -> invalid_scope.
-  R="$(curl -sS -m 20 -X POST https://identity.xero.com/connect/token -H "Authorization: Basic $BASIC" \
-        -H "Content-Type: application/x-www-form-urlencoded" --data-urlencode "grant_type=client_credentials" 2>/dev/null)"
-  TOK="$(printf '%s' "$R" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null || true)"
-  if [ -n "$TOK" ]; then conn="$(http_code GET https://api.xero.com/connections "Authorization: Bearer $TOK")"
-    c_ok "  OAuth token OK; /connections HTTP $conn"
-    vault_and_distribute xero "ms-xero-client" identity.xero.com Authorization 'Basic {value}' "$BASIC"
-    echo "  runtime: Claude POSTs identity.xero.com/connect/token (grant_type=client_credentials, NO scope;"
-    echo "           proxy injects Basic) -> access_token, then calls api.xero.com with"
-    echo "           'Authorization: Bearer <token>' + 'Xero-tenant-id: $XERO_TENANT_ID'."
-  else c_no "  INVALID — no token. Response: $(printf '%s' "$R" | tr -d '\n' | head -c 200)"; fi
+# --- Xero : the firm's own token services (NOT a Custom Connection) ----------
+# We do not run the Xero OAuth flow and we never hold Xero client credentials or refresh
+# tokens. The firm already operates two token services that do that job, and both are in
+# production use by their n8n invoice bot:
+#
+#   monaco   -> WordPress CMS endpoint
+#   grapple  -> n8n webhook service; it caches the access token, rotates the refresh token
+#               itself, and returns the tenant id alongside the token
+#
+# Each is protected by its own static bearer. That bearer is all this script asks for.
+#
+# The previous flow here vaulted Xero client credentials and used grant_type=client_credentials
+# against identity.xero.com. It is gone deliberately: that Custom Connection issues perfectly
+# valid tokens carrying all 46 scopes, yet Xero refuses every data call with HTTP 403 and an
+# EMPTY body because the paid Custom Connection entitlement is not active. Confirmed by
+# decoding the JWT. Keeping that path would only invite someone to re-enter credentials that
+# cannot work. The old ms-xero-client secret is left in the vault untouched — deleting it is a
+# separate decision, and it is what identifies who is entitled to Xero.
+#
+# Both services answer {..., data:{access_token, tenant_id, ...}}; xero-call reads either that
+# or a flat shape, so this validation mirrors the runtime exactly.
+XERO_MONACO_HOST=cms.monacosolicitors.co.uk
+XERO_MONACO_PATH=/wp-json/rota/v1/xero-get-tokens
+XERO_MONACO_TENANT=7bb6bd0a-fccc-4421-b949-ddcdd28ece62
+XERO_GRAPPLE_HOST=n8n.monacosolicitors.co.uk
+XERO_GRAPPLE_PATH=/webhook/grapple-xero-get-tokens
+
+# xero_token_service <label> <secret-name> <host> <path> <tenant-or-empty>
+# Asks for one bearer, proves it end to end, and only then vaults + distributes it.
+# "Proves" means BOTH: the token service answers 200 with an access_token, AND that token
+# reads a real organisation out of Xero. A token on its own is not success — that assumption
+# is exactly why this integration looked healthy for three weeks while every call failed.
+xero_token_service(){
+  local label="$1" name="$2" host="$3" path="$4" tenant="$5" url B R TOK TEN
+  url="https://$host$path"
+  confirm "  Configure Xero for $label?" || { echo "    skipped"; return 0; }
+  echo "    endpoint: $url"
+  B="$(ask_secret "bearer secret for $label")"
+  [ -n "$B" ] || { c_no "    nothing entered — skipped"; return 1; }
+
+  R="$(curl -sS -m 20 -H "Authorization: Bearer $B" -H "Accept: application/json" "$url" 2>/dev/null)"
+  TOK="$(printf '%s' "$R" | python3 -c 'import json,sys
+try:
+  d=json.load(sys.stdin); i=d.get("data") if isinstance(d.get("data"),dict) else d
+  print(i.get("access_token") or "")
+except Exception: print("")' 2>/dev/null || true)"
+  if [ -z "$TOK" ]; then
+    c_no "    the token service did not return an access_token."
+    echo "    it said: $(printf '%s' "$R" | tr -d '\n' | head -c 200)"
+    echo "    a 401/403 here means the bearer is wrong; a 200 with no token means the firm's"
+    echo "    Xero authorisation behind that service has lapsed and they must re-connect it."
+    c_no "    nothing vaulted."
+    return 1
+  fi
+  TEN="$(printf '%s' "$R" | python3 -c 'import json,sys
+try:
+  d=json.load(sys.stdin); i=d.get("data") if isinstance(d.get("data"),dict) else d
+  print(i.get("tenant_id") or "")
+except Exception: print("")' 2>/dev/null || true)"
+  [ -n "$tenant" ] || tenant="$TEN"
+  if [ -z "$tenant" ]; then
+    c_no "    no tenant id: the service returned none and none is configured. nothing vaulted."
+    return 1
+  fi
+
+  http_probe GET "https://api.xero.com/api.xro/2.0/Organisation" \
+    "Authorization: Bearer $TOK" "Xero-tenant-id: $tenant" "Accept: application/json"
+  if [ "$PROBE_CODE" != 200 ]; then
+    c_no "    token obtained, but reading Xero FAILED — HTTP $PROBE_CODE"
+    echo "    tenant id used: $tenant"
+    echo "    Xero said: ${PROBE_BODY:-<empty body>}"
+    c_no "    nothing vaulted."
+    return 1
+  fi
+  c_ok "    verified: real HTTP 200 from Xero for organisation $tenant"
+  # path pattern is required, not optional: another secret already claims each of these hosts.
+  vault_and_distribute xero "$name" "$host" Authorization 'Bearer {value}' "$B" "" "$path"
+}
+
+if confirm "Configure Xero? (token services — Monaco CMS and Grapple n8n)"; then
+  xero_token_service "Monaco Solicitors" ms-xero-token-monaco \
+    "$XERO_MONACO_HOST" "$XERO_MONACO_PATH" "$XERO_MONACO_TENANT"
+  xero_token_service "Grapple Ltd" ms-xero-token-grapple \
+    "$XERO_GRAPPLE_HOST" "$XERO_GRAPPLE_PATH" ""
+  echo "  runtime: xero-call --profile monaco|grapple fetches a token from the service above"
+  echo "           (proxy injects the bearer) and calls api.xero.com with it."
+  echo "  verify from inside a tenant pod — this is the only check that proves anything:"
+  echo "           xero-call --profile monaco  --health"
+  echo "           xero-call --profile grapple --health"
+fi
+
+# --- Dialpad : dialpad.com ---------------------------------------------------
+# ONE company key. Dialpad has no per-user API key: only a company admin can mint
+# one (Admin Settings > My Company > Authentication > API keys, Pro/Enterprise
+# plans), and it acts across every user in the company. There is also no
+# read-only mode — scopes only ADD access — so every role that gets it gets the
+# same reach. That is why the matrix gives it to all roles rather than pretending
+# a "read" column means something here.
+#
+# Validation uses /api/v2/users. NOT /api/v2/users/me: that route does not exist
+# on Dialpad and answers 404 for a perfectly good key.
+if confirm "Configure Dialpad (calls, SMS, contacts — all roles)?"; then
+  H=dialpad.com
+  K="$(ask_secret "Dialpad API key (company admin key)")"
+  http_probe GET "https://$H/api/v2/users?limit=1" "Authorization: Bearer $K"
+  if [ "$PROBE_CODE" = 200 ]; then
+    c_ok "  valid"
+    vault_and_distribute dialpad "ms-dialpad-api" "$H" Authorization 'Bearer {value}' "$K"
+    # Call history, recordings and SMS bodies each need a scope ticked when the key
+    # is minted. Report what this key can actually reach so nobody discovers it
+    # from a 403 three weeks later.
+    CL="$(http_code GET "https://$H/api/v2/call?limit=1" "Authorization: Bearer $K")"
+    case "$CL" in
+      200) c_ok  "  call history readable (calls:list scope present)" ;;
+      403) c_no  "  call history NOT readable — the key was minted without calls:list."
+           echo  "         Re-mint it with that scope if people need call history." ;;
+      *)   echo  "  call history: could not tell (HTTP $CL) — check by hand if it matters" ;;
+    esac
+  else
+    c_no "  INVALID — /api/v2/users says $PROBE_CODE. $PROBE_BODY"
+    echo "         The key must be created by a Dialpad COMPANY ADMIN."
+    echo "         Nothing was stored."
+  fi
+fi
+
+# --- Supabase (staging project) : onfqcdtgmamjrihytnzi.supabase.co -----------------
+# The second Supabase project. It has been declared in role-matrix.json all along
+# while having no shared key, so the gateway answered `access_restricted` and at
+# least one agent read that as "I have lost Supabase" and told its user so.
+#
+# Same shape as production: PostgREST wants BOTH `apikey` and
+# `Authorization: Bearer`, so one key is vaulted under two names. Scope rw, so it
+# reaches the roles the matrix marks rw for supabase (admin, manager) — the read
+# tier goes through the read-only database gateway, never through a service key.
+if confirm "Configure the SECOND Supabase project (onfqcdtgmamjrihytnzi.supabase.co)?"; then
+  H=onfqcdtgmamjrihytnzi.supabase.co
+  K="$(ask_secret "Supabase key for that project (service_role)")"
+  code="$(http_code GET "https://$H/rest/v1/" "apikey: $K" "Authorization: Bearer $K")"
+  if [ "$code" = 200 ] || [ "$code" = 404 ]; then
+    c_ok "  key valid (HTTP $code)"
+    vault_and_distribute supabase "ms-supabase-stage"      "$H" apikey        '{value}'       "$K" rw
+    vault_and_distribute supabase "ms-supabase-stage-auth" "$H" Authorization 'Bearer {value}' "$K" rw
+  else
+    c_no "  key INVALID (HTTP $code) — nothing vaulted"
+    echo  "         Take it from Supabase > Project Settings > API > service_role."
+  fi
 fi
 
 c_hd "Done"

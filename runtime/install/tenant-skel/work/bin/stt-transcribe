@@ -1,0 +1,52 @@
+#!/bin/bash
+# stt-transcribe <audio-file> [language]
+#
+# Transcribes an audio file with ElevenLabs Scribe. The API key is NOT here and is
+# never seen by this process: the egress proxy injects `xi-api-key` on
+# api.elevenlabs.io. This helper exists so the agent never has to type a
+# `curl -F file=@...` command — that pattern is (correctly) treated as a possible
+# exfiltration channel by the shell guard and auto-denied. The guard stays intact;
+# this is the one audited path for the one legitimate use.
+set -uo pipefail
+
+F="${1:?usage: stt-transcribe <audio-file> [language-code]}"
+LANG_CODE="${2:-}"
+
+[ -r "$F" ] || { echo "stt-transcribe: cannot read $F" >&2; exit 2; }
+
+SIZE=$(stat -c %s "$F" 2>/dev/null || echo 0)
+[ "$SIZE" -gt 0 ] || { echo "stt-transcribe: $F is empty" >&2; exit 2; }
+if [ "$SIZE" -gt 100000000 ]; then
+  echo "stt-transcribe: $F is larger than 100 MB; split it first" >&2; exit 2
+fi
+
+ARGS=(-sS --max-time 300
+      -X POST https://api.elevenlabs.io/v1/speech-to-text
+      -F "model_id=scribe_v1"
+      -F "file=@${F}")
+[ -n "$LANG_CODE" ] && ARGS+=(-F "language_code=${LANG_CODE}")
+
+BODY=$(curl "${ARGS[@]}" -w '\n%{http_code}' 2>&1)
+CODE=$(printf '%s' "$BODY" | tail -1)
+JSON=$(printf '%s' "$BODY" | sed '$d')
+
+case "$CODE" in
+  200)
+    printf '%s\n' "$JSON" | jq -r '.text // .' 2>/dev/null || printf '%s\n' "$JSON"
+    ;;
+  401|403)
+    echo "stt-transcribe: HTTP $CODE — the ElevenLabs credential is not bound to this tenant." >&2
+    echo "Tell the user which service needs its key; an administrator adds it once." >&2
+    exit 1
+    ;;
+  000)
+    echo "stt-transcribe: no response (HTTP 000). ElevenLabs geo-blocks some regions;" >&2
+    echo "this is not a bad key. Report it rather than retrying." >&2
+    exit 1
+    ;;
+  *)
+    echo "stt-transcribe: HTTP $CODE" >&2
+    printf '%s\n' "$JSON" | head -c 600 >&2
+    exit 1
+    ;;
+esac

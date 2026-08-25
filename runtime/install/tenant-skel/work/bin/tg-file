@@ -1,0 +1,78 @@
+#!/bin/bash
+# tg-file <path> [caption] [--chat-id ID] [--thread ID] [--as document|photo|video]
+#
+# Sends a real file to the user in Telegram. Uses curl multipart, which is verified to work
+# through the egress proxy (the plugin's own `reply(files:[...])` path is what fails, not the
+# transport). Token is read from the channel state dir and never printed.
+set -uo pipefail
+
+STATE_DIR="${TELEGRAM_STATE_DIR:-$HOME/.claude/channels/telegram-$(id -un)}"
+FILE=""; CAPTION=""; CHAT=""; THREAD=""; AS=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --chat-id) CHAT="$2"; shift 2;;
+    --thread)  THREAD="$2"; shift 2;;
+    --as)      AS="$2"; shift 2;;
+    -h|--help) sed -n '2,6p' "$0"; exit 0;;
+    *) if [ -z "$FILE" ]; then FILE="$1"; else CAPTION="${CAPTION:+$CAPTION }$1"; fi; shift;;
+  esac
+done
+
+[ -n "$FILE" ] || { echo "tg-file: usage: tg-file <path> [caption]" >&2; exit 2; }
+[ -r "$FILE" ] || { echo "tg-file: cannot read $FILE" >&2; exit 2; }
+
+SIZE=$(stat -c %s "$FILE" 2>/dev/null || echo 0)
+if [ "$SIZE" -gt 50000000 ]; then
+  echo "tg-file: $FILE is $((SIZE/1000000)) MB; Telegram's bot limit is 50 MB." >&2
+  echo "Upload it to the user's Google Drive and send the link instead." >&2
+  exit 2
+fi
+
+# shellcheck disable=SC1090
+set +u; . "$STATE_DIR/.env" 2>/dev/null; set -u
+TOK="${TELEGRAM_BOT_TOKEN:-${BOT_TOKEN:-}}"
+[ -n "$TOK" ] || { echo "tg-file: no bot token in $STATE_DIR/.env" >&2; exit 1; }
+
+if [ -z "$CHAT" ]; then
+  CHAT=$(jq -r '.chat_id // empty' "$STATE_DIR/last_chat.json" 2>/dev/null)
+  [ -z "$THREAD" ] && THREAD=$(jq -r '.message_thread_id // empty' "$STATE_DIR/last_chat.json" 2>/dev/null)
+fi
+[ -n "$CHAT" ] || { echo "tg-file: no chat id (pass --chat-id; none recorded yet)" >&2; exit 2; }
+
+if [ -z "$AS" ]; then
+  case "${FILE,,}" in
+    *.jpg|*.jpeg|*.png|*.webp) AS=photo;;
+    *.mp4|*.mov)               AS=video;;
+    *)                         AS=document;;
+  esac
+fi
+case "$AS" in
+  photo)    METHOD=sendPhoto;    FIELD=photo;;
+  video)    METHOD=sendVideo;    FIELD=video;;
+  document) METHOD=sendDocument; FIELD=document;;
+  *) echo "tg-file: --as must be document, photo or video" >&2; exit 2;;
+esac
+
+ARGS=(-sS -m 300 -X POST "https://api.telegram.org/bot$TOK/$METHOD"
+      -F "chat_id=$CHAT" -F "$FIELD=@$FILE")
+[ -n "$CAPTION" ] && ARGS+=(-F "caption=$CAPTION")
+[ -n "$THREAD" ] && ARGS+=(-F "message_thread_id=$THREAD")
+
+BODY=$(curl "${ARGS[@]}" -w '\n%{http_code}' 2>&1)
+CODE=$(printf '%s' "$BODY" | tail -1)
+JSON=$(printf '%s' "$BODY" | sed '$d')
+
+if [ "$CODE" = 200 ]; then
+  echo "sent ($AS, $((SIZE/1024)) KB) message_id=$(printf '%s' "$JSON" | jq -r '.result.message_id // "?"' 2>/dev/null)"
+  exit 0
+fi
+
+echo "tg-file: HTTP $CODE" >&2
+printf '%s\n' "$JSON" | head -c 400 >&2
+echo >&2
+case "$CODE" in
+  413) echo "The file is too large for Telegram — send a Google Drive link instead." >&2;;
+  400) echo "Check the chat id; for a topic pass --thread." >&2;;
+esac
+exit 1
