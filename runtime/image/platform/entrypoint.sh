@@ -610,6 +610,55 @@ channel_alive() {
   [ -n "$p" ] && kill -0 "$p" 2>/dev/null
 }
 
+# ---- remote control ---------------------------------------------------------------------
+# The `--remote-control <name>` flag on the assistant above NAMES the machine and nothing
+# else: it does not register anything with the account. Verified 2026-08-24 across the firm's
+# pods — every one carried the flag, every one showed an empty Remote Control menu in its
+# occupant's app. Registration only happens while a `claude rc` listener is actually running.
+#
+# Until now that listener was started by hand with podman exec, which means it vanishes the
+# moment a container is recreated and never exists at all for a newly onboarded person.
+# Supervising it here fixes both.
+#
+# Three things this must not do, each learned the hard way:
+#   - never run bare `claude`: it loads the Telegram plugin and steals the single-consumer
+#     poll lock, and that tenant's bot goes silent. `claude rc` does not.
+#   - never start before /login: RC requires a signed-in account with a subscription, and a
+#     logged-out pod would just churn.
+#   - never inherit the auto-generated machine name. `--name` exists; pass the same
+#     $REMOTE_CONTROL_NAME the assistant already uses, or an org with thirty pods gets
+#     thirty names like "b238a1d992c6-cheerful-codd".
+RC_SESSION="rc"
+RC_RETRY_AFTER=0            # epoch seconds; throttles restarts of a listener that keeps dying
+rc_alive() { tmux has-session -t "$RC_SESSION" 2>/dev/null; }
+
+rc_start() {
+  rc_alive && return 0
+  logged_in || return 0
+  [ "${DISABLE_REMOTE_CONTROL:-0}" = "1" ] && return 0
+  # Called from a 5s supervise tick. If the listener exits immediately — expired
+  # subscription, an rc-side outage — retrying every tick would spawn a tmux session
+  # twenty times a minute forever. One attempt per minute is enough to self-heal.
+  local now; now="$(date +%s)"
+  [ "$now" -lt "$RC_RETRY_AFTER" ] && return 0
+  RC_RETRY_AFTER=$((now + 60))
+  echo "[rc] starting remote-control listener as $REMOTE_CONTROL_NAME"
+  tmux -f "$TMUX_CFG" new-session -d -s "$RC_SESSION" -x 200 -y 60 -c "$HOME/work" \
+    "exec /usr/bin/claude rc --name $REMOTE_CONTROL_NAME" 2>/dev/null || {
+      echo "[rc] could not start the listener"; return 1; }
+  # It asks "Enable Remote Control? (y/n)" and waits on a keypress — there is no flag for
+  # this, which is why it needs a tty and why a plain podman exec dies here.
+  local i pane
+  for i in $(seq 1 20); do
+    pane="$(tmux capture-pane -p -t "$RC_SESSION" 2>/dev/null)"
+    case "$pane" in
+      *"Enable Remote Control"*) tmux send-keys -t "$RC_SESSION" y Enter 2>/dev/null; break ;;
+      *Connected*) break ;;
+    esac
+    sleep 1
+  done
+}
+
 # Phase 1 — wait for the channel to come up the first time (skip if disabled).
 if [ "${DISABLE_TELEGRAM_CHANNEL:-0}" != "1" ]; then
   # A tenant who has never logged in cannot have a channel: claude decides about channels at
@@ -689,6 +738,10 @@ while tmux has-session -t "$SESSION" 2>/dev/null; do
   if [ -f "$REGISTRY_REQ" ]; then
     process_registry_request
   fi
+  # Keep the RC listener up: starts it after the first /login, and brings it back if it dies.
+  # Deliberately not a reason to exit the pod — remote control going away is an inconvenience,
+  # the assistant and the chat bot are the things worth restarting for.
+  rc_start
   # Same reasoning as Phase 1: a logged-out tenant has no channel by design, and restarting the
   # pod over it only takes away the terminal somebody needs in order to log in.
   if [ "${DISABLE_TELEGRAM_CHANNEL:-0}" != "1" ] && logged_in && ! channel_alive; then

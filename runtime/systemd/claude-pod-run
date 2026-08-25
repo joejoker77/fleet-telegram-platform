@@ -96,6 +96,24 @@ if [ -f "$MODEL_FILE" ]; then
   [ -n "${CLAUDE_FALLBACK_MODEL:-}" ] && MODEL_ARGS=(-e CLAUDE_FALLBACK_MODEL="$CLAUDE_FALLBACK_MODEL")
 fi
 
+# Per-tenant runtime overrides. The entrypoint already defaults REMOTE_CONTROL_NAME to
+# "<user>-main" and keeps both the Telegram channel and the remote-control listener on, so an
+# absent file is the normal case and changes nothing. This exists for the exceptions: a tenant
+# who uses the Claude App only (DISABLE_TELEGRAM_CHANNEL=1), one who should not be reachable
+# over remote control at all (DISABLE_REMOTE_CONTROL=1), or a machine that must appear in the
+# app under a different name. Host-side file, no image rebuild to flip any of it.
+# Only these three names are forwarded — the file is sourced, so anything else it happens to
+# set stays in this wrapper and never reaches the container.
+TENANT_ARGS=()
+TENANT_ENV_FILE="/etc/claudeapp/tenant-$U.env"
+if [ -f "$TENANT_ENV_FILE" ]; then
+  # shellcheck disable=SC1090
+  . "$TENANT_ENV_FILE"
+  [ -n "${REMOTE_CONTROL_NAME:-}" ]     && TENANT_ARGS+=(-e REMOTE_CONTROL_NAME="$REMOTE_CONTROL_NAME")
+  [ -n "${DISABLE_TELEGRAM_CHANNEL:-}" ] && TENANT_ARGS+=(-e DISABLE_TELEGRAM_CHANNEL="$DISABLE_TELEGRAM_CHANNEL")
+  [ -n "${DISABLE_REMOTE_CONTROL:-}" ]   && TENANT_ARGS+=(-e DISABLE_REMOTE_CONTROL="$DISABLE_REMOTE_CONTROL")
+fi
+
 # ~/.ssh: mount the tenant's own SSH keys so the agent can reach remote servers
 # (owner decision 2026-06-15; egress is full-outbound). Mounted rw so ssh can
 # append to ~/.ssh/known_hosts on first connect. Only when present — users with
@@ -189,7 +207,7 @@ exec /usr/bin/podman run --rm --name "claude-$U" \
   --cap-drop=ALL \
   --read-only --tmpfs /tmp --tmpfs /run \
   --memory=4g --memory-reservation=3g --cpus=2 --pids-limit=2048 \
-  -e HOME="$HOME_DIR" -e XDG_RUNTIME_DIR=/tmp -e HOST_ADMIN_USER="$U" "${PROXY_ARGS[@]}" "${CLAUDE_AUTH_ARGS[@]}" "${COMPOSIO_ARGS[@]}" "${MODEL_ARGS[@]}" "${SECRETD_ARGS[@]}" \
+  -e HOME="$HOME_DIR" -e XDG_RUNTIME_DIR=/tmp -e HOST_ADMIN_USER="$U" "${PROXY_ARGS[@]}" "${CLAUDE_AUTH_ARGS[@]}" "${COMPOSIO_ARGS[@]}" "${MODEL_ARGS[@]}" "${TENANT_ARGS[@]}" "${SECRETD_ARGS[@]}" \
   -v "$HOME_DIR/.claude:$HOME_DIR/.claude" \
   -v "$HOME_DIR/work:$HOME_DIR/work" \
   -v "$HOME_DIR/.config:$HOME_DIR/.config" \
