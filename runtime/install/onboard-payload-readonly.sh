@@ -13,8 +13,17 @@
 # of the chatbot database. So the script asks the CMS what the key is allowed to do
 # and stops if it can write anywhere. It is not a formality — it is the whole point.
 #
+# WHEN PAYLOAD CANNOT EXPRESS READ-ONLY (added 2026-08-24, at Tom's request after the
+# CMS developer reported he cannot make certain internal collections read-only).
+# --tolerate-writes takes an explicit, named list of collections whose write permissions
+# are accepted knowingly. Everything outside that list is still refused, and writes on the
+# client-data collections are refused even if named — those are not Tom's to trade away in
+# a shell prompt. There is deliberately no flag that accepts "whatever this key can do":
+# the value of this script is that somebody has to read the list and say yes to it.
+#
 #   sudo ./onboard-payload-readonly.sh              # store and distribute
 #   sudo ./onboard-payload-readonly.sh --check-only # just test a key, store nothing
+#   sudo ./onboard-payload-readonly.sh --tolerate-writes internal-a,internal-b
 #
 set -uo pipefail
 ONECLI=/usr/local/bin/onecli
@@ -24,7 +33,21 @@ NAME=ms-payload-read
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 MATRIX="${ROLE_MATRIX_JSON:-$HERE/role-matrix.json}"
 CHECK_ONLY=0
-[ "${1:-}" = "--check-only" ] && CHECK_ONLY=1
+TOLERATE=""
+# Collections holding client personal data. Used twice: a warning if the key can READ them,
+# and a hard refusal — not overridable — if it can WRITE them.
+CLIENT_DATA="sessions session-messages session-messages-ocr-archive users users-media claims emails subscriptions users-subscriptions atj-deals"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --check-only) CHECK_ONLY=1 ;;
+    --tolerate-writes) shift; TOLERATE="${1:-}"; [ -n "$TOLERATE" ] || { echo "--tolerate-writes needs a comma-separated list" >&2; exit 2; } ;;
+    --tolerate-writes=*) TOLERATE="${1#*=}" ;;
+    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    *) echo "unknown option: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+TOLERATE="$(printf '%s' "$TOLERATE" | tr ',' ' ' | tr -s ' ')"
 
 c_ok(){ printf '\033[32m%s\033[0m\n' "$*"; }
 c_no(){ printf '\033[31m%s\033[0m\n' "$*"; }
@@ -74,17 +97,51 @@ READS="$(sed -n 's/^READS=//p' /tmp/.plsum.$$)"
 rm -f /tmp/.pl.$$ /tmp/.plsum.$$
 
 if [ -n "$WRITES" ]; then
-  c_no "  REFUSED — this key can WRITE. Nothing was stored."
-  echo "  It can create/update/delete in:"
-  printf '%s' "$WRITES" | tr ';' '\n' | sed 's/^/    /'
+  # Sort what the key can write into three buckets: client data (never allowed), named on
+  # --tolerate-writes (allowed after a typed confirmation), and everything else (refused).
+  PROTECTED=""; TOLERATED=""; UNEXPECTED=""
+  for e in $(printf '%s' "$WRITES" | tr ';' '\n'); do
+    n="${e%%:*}"
+    case " $CLIENT_DATA " in *" $n "*) PROTECTED="$PROTECTED $e"; continue ;; esac
+    case " $TOLERATE " in *" $n "*) TOLERATED="$TOLERATED $e" ;; *) UNEXPECTED="$UNEXPECTED $e" ;; esac
+  done
+
+  if [ -n "$PROTECTED" ]; then
+    c_no "  REFUSED — this key can WRITE to collections holding client personal data."
+    printf '    %s\n' $PROTECTED
+    echo
+    echo "  This is refused outright and --tolerate-writes does not override it. A key that"
+    echo "  can modify client chat sessions or claims would be handed to every non-admin bot,"
+    echo "  and from there to whoever is driving that bot. If the CMS genuinely cannot make"
+    echo "  these read-only, that is a decision for the firm and its DPO, not for this prompt."
+    exit 1
+  fi
+
+  if [ -n "$UNEXPECTED" ]; then
+    c_no "  REFUSED — this key can WRITE where it was not expected to. Nothing was stored."
+    echo "  It can create/update/delete in:"
+    printf '    %s\n' $UNEXPECTED
+    echo
+    echo "  This looks like the administrators' key, or a role that is not read-only."
+    echo "  Storing it here would give every non-admin bot control of those collections."
+    echo "  Either narrow the role in Payload, or — if these specific collections genuinely"
+    echo "  cannot be made read-only — re-run naming them explicitly:"
+    echo
+    echo "    sudo $0 --tolerate-writes $(printf '%s' "$UNEXPECTED" | tr ' ' '\n' | sed 's/:.*//' | grep . | paste -sd, -)"
+    exit 1
+  fi
+
+  c_no "  this key is NOT read-only. It can write to the collections you named:"
+  printf '    %s\n' $TOLERATED
   echo
-  echo "  This looks like the administrators' key, or a role that is not read-only."
-  echo "  Storing it here would give every non-admin bot full control of the chatbot"
-  echo "  database, client chat sessions included. Make a read-only role in Payload"
-  echo "  and try again with that user's key."
-  exit 1
+  echo "  Every non-admin bot will be able to create/update/delete there, and so will the"
+  echo "  person driving it. Nothing outside this list is writable, and no client-data"
+  echo "  collection is. Storing it is a deliberate exception, not a read-only key."
+  read -rp "  Type ACCEPT-WRITES to store it anyway, anything else to abort: " aw
+  [ "$aw" = ACCEPT-WRITES ] || { echo "  aborted, nothing stored"; exit 1; }
+else
+  c_ok "  read-only confirmed: no create/update/delete anywhere"
 fi
-c_ok "  read-only confirmed: no create/update/delete anywhere"
 
 READ_N="$(printf '%s' "$READS" | tr ';' '\n' | grep -c . || true)"
 echo "  it can read $READ_N collection(s):"
@@ -92,7 +149,7 @@ printf '%s' "$READS" | tr ';' '\n' | sed 's/^/    /'
 
 c_hd "3. does it reach client personal data?"
 SENSITIVE=""
-for c in sessions session-messages session-messages-ocr-archive users users-media claims emails subscriptions users-subscriptions atj-deals; do
+for c in $CLIENT_DATA; do
   case ";$READS;" in *";$c;"*) SENSITIVE="$SENSITIVE $c";; esac
 done
 if [ -n "$SENSITIVE" ]; then
