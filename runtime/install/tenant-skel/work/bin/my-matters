@@ -1,0 +1,245 @@
+#!/usr/bin/env python3
+"""What is on your desk, and which of it has gone quiet.
+
+    my-matters --lawyer "Fourie"          your caseload, quiet matters first
+    my-matters --lawyer "Fourie" --quiet-days 21
+    my-matters --lawyer "Fourie" --stage "o/s"   only stages matching that text
+    my-matters --all                      every fee earner, one summary line each
+    my-matters --lawyer "Fourie" --json
+
+Reads only. A matter counts as QUIET when nothing has left or arrived in the
+mailbox for the window, the stage has not moved, and no activity is scheduled.
+That last condition matters: a matter with a diarised next step is being handled,
+however long ago the last email was.
+
+Mail timestamps come from Pipedrive's own sync, so a matter progressed entirely
+by phone will look quiet. Check the deal before chasing anyone.
+"""
+import argparse
+import datetime as dt
+import json
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+BASE = "https://monacosolicitors2.pipedrive.com/api"
+LIVE_PIPELINES = (7, 28)
+DEAD_STAGES = {436, 372, 373, 382, 46, 280, 143}
+PRE_INSTRUCTION_STAGES = {40, 209, 270, 42, 445, 208, 275, 456, 446, 447, 353, 381}
+BOT_USERS = {11648522: "Automations", 21407541: "Case Workers"}
+
+NOW = dt.datetime.now(dt.timezone.utc)
+TODAY = NOW.date()
+
+
+def get(path):
+    try:
+        with urllib.request.urlopen(BASE + path, timeout=60) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        sys.exit(f"Pipedrive said {e.code} on {path}\n{e.read()[:400].decode(errors='replace')}")
+
+
+def ts(v):
+    """Pipedrive v1 hands back 'YYYY-MM-DD HH:MM:SS' in UTC, or a bare date."""
+    if not v or not isinstance(v, str):
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return dt.datetime.strptime(v[:19], fmt).replace(tzinfo=dt.timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def age(v):
+    t = ts(v)
+    return None if t is None else (NOW - t).days
+
+
+def users(active_only=True):
+    return {u["id"]: u for u in get("/v1/users")["data"]
+            if u.get("active_flag") or not active_only}
+
+
+def stages():
+    return {s["id"]: s["name"] for s in get("/v1/stages?limit=500")["data"]}
+
+
+def resolve_owner(arg, by_id):
+    if arg:
+        want = arg.strip().lower()
+        hits = [u for u in by_id.values() if want in u["name"].lower()]
+        if not hits:
+            sys.exit(f"No active Pipedrive user matching {arg!r}. Try a surname, or --all.")
+        if len(hits) > 1:
+            sys.exit("That matches more than one person: "
+                     + ", ".join(sorted(u["name"] for u in hits)))
+        return hits[0]["id"]
+    me = get("/v1/users/me")["data"]
+    if me["id"] in BOT_USERS:
+        sys.exit(f"This Pipedrive token belongs to the {BOT_USERS[me['id']]} account, which owns "
+                 f'no matters. Name the fee earner instead: my-matters --lawyer "Surname"')
+    return me["id"]
+
+
+def deals_for(owner_id, include_pi=False):
+    """Open instructed deals, from v1 because only v1 carries the mail timestamps."""
+    out, start = [], 0
+    while True:
+        q = {"user_id": owner_id, "status": "open", "limit": 100, "start": start}
+        page = get("/v1/deals?" + urllib.parse.urlencode(q))
+        for d in page.get("data") or []:
+            if d.get("pipeline_id") not in LIVE_PIPELINES:
+                continue
+            s = d.get("stage_id")
+            if s in DEAD_STAGES:
+                continue
+            if s in PRE_INSTRUCTION_STAGES and not include_pi:
+                continue
+            out.append(d)
+        more = ((page.get("additional_data") or {}).get("pagination") or {})
+        if not more.get("more_items_in_collection"):
+            break
+        start = more.get("next_start", start + 100)
+    return out
+
+
+def assess(d, quiet_days, stale_days):
+    out_age = age(d.get("last_outgoing_mail_time"))
+    in_age = age(d.get("last_incoming_mail_time"))
+    stage_age = age(d.get("stage_change_time")) or age(d.get("add_time"))
+    nxt = d.get("next_activity_date")
+    next_age = None
+    if nxt:
+        nd = ts(nxt)
+        next_age = (nd.date() - TODAY).days if nd else None
+
+    contact = [a for a in (out_age, in_age) if a is not None]
+    silence = min(contact) if contact else stage_age
+    scheduled = next_age is not None and next_age >= 0
+
+    if not contact:
+        # No email either way ever synced onto the deal. Worth its own bucket:
+        # the silence figure below is only the age of the last stage move.
+        kind = "NO CONTACT"
+    elif silence >= stale_days:
+        # Years, not weeks. This is housekeeping, not a matter that has drifted.
+        kind = "STALE"
+    elif scheduled:
+        kind = "DIARISED"
+    elif silence >= quiet_days:
+        kind = "QUIET"
+    else:
+        kind = "ACTIVE"
+
+    return {
+        "deal_id": d["id"],
+        "title": (d.get("title") or "")[:34],
+        "stage_id": d.get("stage_id"),
+        "kind": kind,
+        "silence": silence,
+        "last_out": out_age,
+        "last_in": in_age,
+        "stage_age": stage_age,
+        "next_in": next_age,
+        "open_tasks": d.get("undone_activities_count") or 0,
+        "value": d.get("value") or 0,
+    }
+
+
+def render(name, rows, stage_by_id, quiet_days, stale_days, cap):
+    L = [f"Caseload: {name}, {TODAY.isoformat()}"]
+    n = len(rows)
+    counts = {k: sum(1 for r in rows if r["kind"] == k)
+              for k in ("QUIET", "STALE", "NO CONTACT", "DIARISED", "ACTIVE")}
+    L.append(f"{n} instructed matter{'' if n == 1 else 's'} open. "
+             f"{counts['QUIET']} quiet for {quiet_days}+ days, "
+             f"{counts['STALE']} untouched for over {stale_days // 30} months, "
+             f"{counts['NO CONTACT']} with no email either way on record, "
+             f"{counts['DIARISED']} with a next step diarised, "
+             f"{counts['ACTIVE']} touched recently.")
+    L.append("")
+
+    def block(kind, heading, note=None):
+        sel = [r for r in rows if r["kind"] == kind]
+        if not sel:
+            return
+        sel.sort(key=lambda r: (r["silence"] is None, -(r["silence"] or 0)))
+        L.append(f"{heading} ({len(sel)})")
+        if note:
+            L.append(f"  {note}")
+        shown = sel[:cap] if cap else sel
+        for r in shown:
+            q = f"{r['silence']}d" if r["silence"] is not None else "  ?"
+            out = f"out {r['last_out']}d" if r["last_out"] is not None else "no outbound"
+            inc = f"in {r['last_in']}d" if r["last_in"] is not None else "no inbound"
+            st = stage_by_id.get(r["stage_id"], "?")[:26]
+            L.append(f"  {r['deal_id']:>7}  quiet {q:>5}  {out:<12} {inc:<12} {st:<26} {r['title']}")
+        if len(shown) < len(sel):
+            L.append(f"  ... and {len(sel) - len(shown)} more, run with --json for the lot")
+        L.append("")
+
+    block("QUIET", f"Gone quiet: {quiet_days}+ days with no email either way and nothing diarised")
+    block("NO CONTACT", "No email on the deal at all",
+          "Either it is genuinely untouched, or the correspondence never synced.")
+    block("STALE", f"Untouched for over {stale_days // 30} months, still marked open",
+          "Almost certainly finished in real life. Worth closing rather than chasing.")
+    return "\n".join(L)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--lawyer")
+    ap.add_argument("--quiet-days", type=int, default=21)
+    ap.add_argument("--stale-days", type=int, default=365,
+                    help="above this, treat it as housekeeping rather than a live matter")
+    ap.add_argument("--stage", help="only stages whose name contains this text")
+    ap.add_argument("--all", action="store_true")
+    ap.add_argument("--include-pi", action="store_true")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--cap", type=int, default=0)
+    a = ap.parse_args()
+
+    by_id = users()
+    stage_by_id = stages()
+
+    if a.all:
+        targets = [(uid, u["name"]) for uid, u in by_id.items() if uid not in BOT_USERS]
+    else:
+        uid = resolve_owner(a.lawyer, by_id)
+        targets = [(uid, by_id.get(uid, {}).get("name", str(uid)))]
+
+    everything, chunks, summary = {}, [], []
+    for uid, name in sorted(targets, key=lambda t: t[1]):
+        deals = deals_for(uid, a.include_pi)
+        rows = [assess(d, a.quiet_days, a.stale_days) for d in deals]
+        if a.stage:
+            want = a.stage.lower()
+            rows = [r for r in rows if want in stage_by_id.get(r["stage_id"], "").lower()]
+        if not rows:
+            continue
+        everything[name] = rows
+        q = sum(1 for r in rows if r["kind"] == "QUIET")
+        st = sum(1 for r in rows if r["kind"] == "STALE")
+        summary.append((q, st, len(rows), name))
+        if not a.all:
+            chunks.append(render(name, rows, stage_by_id, a.quiet_days, a.stale_days, a.cap))
+
+    if a.json:
+        print(json.dumps(everything, indent=1))
+    elif a.all:
+        print(f"Quiet matters by fee earner, {a.quiet_days}+ days, {TODAY.isoformat()}")
+        print(f"{'quiet':>6} {'stale':>6} {'open':>6}  fee earner")
+        for q, st, tot, name in sorted(summary, reverse=True):
+            print(f"{q:>6} {st:>6} {tot:>6}  {name}")
+        print(f"\n{sum(s[0] for s in summary)} quiet across "
+              f"{sum(s[2] for s in summary)} open instructed matters.")
+    else:
+        print("\n".join(chunks) or "Nothing open.")
+
+
+if __name__ == "__main__":
+    main()

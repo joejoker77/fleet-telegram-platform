@@ -1,0 +1,333 @@
+#!/usr/bin/env python3
+"""Limitation-date sweep over one fee earner's open matters.
+
+    my-deadlines                      your own matters (from your Pipedrive token)
+    my-deadlines --lawyer "Sarah O'Brien"
+    my-deadlines --days 60            widen the "coming up" window (default 30)
+    my-deadlines --all                every fee earner, grouped
+    my-deadlines --json               machine-readable
+
+Reads only. Reports four things per matter:
+
+  OVERDUE   an ACAS or ET1 date recorded in the past, and the matter is not at
+            an ET1-lodged stage, with no EC start and no certificate recorded
+  DUE       a recorded date falling inside the window
+  DERIVED   no ACAS date recorded, but a termination / last-act date is, so the
+            primary limitation date can be worked out
+  BLANK     neither a limitation date nor a termination date on the record
+
+The DERIVED figure is three months less one day from the recorded termination
+or last-act date. That is the primary time limit BEFORE any early-conciliation
+extension, so treat it as the earliest the clock could run out, not the answer.
+"""
+import argparse
+import datetime as dt
+import json
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+BASE = "https://monacosolicitors2.pipedrive.com/api"
+
+# Field keys, from GET /v1/dealFields. Verified 2026-08-21.
+F_ACAS_DEADLINE = "90905a1b066a7aa1a55417d4708df0ded34cb5f9"  # ACAS Early Conciliation Deadline
+F_ET1_DEADLINE = "225cc151a065393f80d8bb2ce7039ea850efbc23"   # ET1 Deadline
+F_EC_STARTED = "704b1bbf60d69cf6dbb38ef7bf12f85c910cfaca"     # Date ACAS EC was started
+F_CERT_ISSUED = "6f4be25d7c57fa4941b815c6ac5dd56b677acfeb"    # Date ACAS Certificate issued
+F_TERMINATION = "b599bde67bcc02c9da9ed2004b3a2ba6853fab9c"    # Termination / last act, whichever earliest
+FIELDS = [F_ACAS_DEADLINE, F_ET1_DEADLINE, F_EC_STARTED, F_CERT_ISSUED, F_TERMINATION]
+
+# The pipelines that carry live fee-earner work. Everything else is archive.
+LIVE_PIPELINES = (7, 28)  # 7 = Cases, 28 = ATJ
+
+# Stages where the claim is already issued, so a passed limitation date is expected.
+LODGED_STAGES = {416, 433, 48}  # ET1 lodged (both pipelines), Ongoing Tribunal
+
+# Still open in Pipedrive but finished or binned in real life. Nearly 2,000 deals
+# sit here, and counting them makes every caseload figure wrong.
+DEAD_STAGES = {436, 372, 373, 382, 46, 280, 143}
+
+# Before the client has instructed us. The clock may be running, but they are not
+# our client yet, so these are reported separately and only with --include-pi.
+PRE_INSTRUCTION_STAGES = {40, 209, 270, 42, 445, 208, 275, 456,   # Cases
+                          446, 447, 353, 381}                     # ATJ
+
+# Pipedrive accounts that are robots, not people.
+BOT_USERS = {11648522: "Automations", 21407541: "Case Workers"}
+
+TODAY = dt.date.today()
+
+
+def get(path):
+    req = urllib.request.Request(BASE + path)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        sys.exit(f"Pipedrive said {e.code} on {path}\n{e.read()[:400].decode(errors='replace')}")
+
+
+def parse_date(v):
+    """Pipedrive date fields are 'YYYY-MM-DD'. Junk and pre-2015 dates are dropped."""
+    if not v or not isinstance(v, str):
+        return None
+    try:
+        d = dt.date.fromisoformat(v[:10])
+    except ValueError:
+        return None
+    return d if d.year >= 2015 else None
+
+
+def users(active_only=True):
+    return {u["id"]: u for u in get("/v1/users")["data"]
+            if u.get("active_flag") or not active_only}
+
+
+def stages():
+    return {s["id"]: (s["name"], s["pipeline_id"]) for s in get("/v1/stages?limit=500")["data"]}
+
+
+def resolve_owner(arg, by_id):
+    """Turn --lawyer into a user id, or fall back to whoever owns the API token."""
+    if arg:
+        want = arg.strip().lower()
+        hits = [u for u in by_id.values() if want in u["name"].lower()]
+        if not hits:
+            sys.exit(f"No active Pipedrive user matching {arg!r}. "
+                     f"Try a surname, or run with --all.")
+        if len(hits) > 1:
+            sys.exit("That matches more than one person: "
+                     + ", ".join(sorted(u["name"] for u in hits)))
+        return hits[0]["id"]
+
+    me = get("/v1/users/me")["data"]
+    if me["id"] in BOT_USERS:
+        sys.exit(f"This Pipedrive token belongs to the {BOT_USERS[me['id']]} account, which owns "
+                 f"no matters. Name the fee earner instead: my-deadlines --lawyer \"Surname\"")
+    return me["id"]
+
+
+def deals_for(owner_id, include_pi=False):
+    """Open deals this person owns in the live pipelines, with the date fields.
+
+    Drops the DO_NOT_USE and closed stages, which hold about 2,000 deals that are
+    still 'open' in Pipedrive and are not work. Pre-instruction stages are dropped
+    too unless include_pi is set.
+    """
+    out = []
+    for pipeline in LIVE_PIPELINES:
+        cursor = None
+        while True:
+            q = {"status": "open", "owner_id": owner_id, "pipeline_id": pipeline,
+                 "limit": 500, "custom_fields": ",".join(FIELDS)}
+            if cursor:
+                q["cursor"] = cursor
+            page = get("/v2/deals?" + urllib.parse.urlencode(q))
+            for d in page.get("data") or []:
+                s = d.get("stage_id")
+                if s in DEAD_STAGES:
+                    continue
+                if s in PRE_INSTRUCTION_STAGES and not include_pi:
+                    continue
+                out.append(d)
+            cursor = (page.get("additional_data") or {}).get("next_cursor")
+            if not cursor:
+                break
+    return out
+
+
+def classify(deal, window_days):
+    cf = deal.get("custom_fields") or {}
+    acas = parse_date(cf.get(F_ACAS_DEADLINE))
+    et1 = parse_date(cf.get(F_ET1_DEADLINE))
+    started = parse_date(cf.get(F_EC_STARTED))
+    cert = parse_date(cf.get(F_CERT_ISSUED))
+    term = parse_date(cf.get(F_TERMINATION))
+    lodged = deal.get("stage_id") in LODGED_STAGES
+
+    rows = []
+    for label, when in (("ACAS", acas), ("ET1", et1)):
+        if not when or lodged:
+            # Once the ET1 is in, neither date is a live deadline.
+            continue
+        if label == "ACAS" and (started or cert):
+            # Conciliation is under way or finished, so this date has been met.
+            # The live deadline is now the ET1 one.
+            continue
+        days = (when - TODAY).days
+        if days < 0:
+            rows.append(("OVERDUE", label, when, days))
+        elif days <= window_days:
+            rows.append(("DUE", label, when, days))
+        else:
+            # Recorded, not yet inside the window. Not printed, because it is not
+            # something to act on today, but it has to be counted or the sweep's
+            # total moves every time you change --days and a matter with a date
+            # four months out looks like a matter with no date at all.
+            rows.append(("LATER", label, when, days))
+
+    if rows or lodged or acas or et1:
+        return rows, started, cert, term
+
+    if term:
+        # Three months less one day. Primary limit, before any EC extension.
+        derived = term + dt.timedelta(days=91) - dt.timedelta(days=1)
+        try:
+            m = term.month + 3
+            y = term.year + (m - 1) // 12
+            derived = dt.date(y, (m - 1) % 12 + 1, term.day) - dt.timedelta(days=1)
+        except ValueError:
+            pass  # 31st of a short month; the +91d approximation stands
+        days = (derived - TODAY).days
+        if started or cert:
+            # Conciliation is running or done, so the primary limit is extended and
+            # a bare three-month calculation would be wrong. Nothing to flag.
+            return [], started, cert, term
+        kind = "DERIVED" if days <= window_days else "DERIVED_LATER"
+        return [(kind, "from termination", derived, days)], started, cert, term
+
+    return [("BLANK", "no dates", None, None)], started, cert, term
+
+
+def report(owner_name, deals, stage_by_id, window_days):
+    # _caseload is the number of open instructed matters, which is NOT the number
+    # of rows: one matter can raise both an ACAS and an ET1 row, and consumers
+    # that count rows and call it matters overstate the caseload.
+    buckets = {"_caseload": len(deals),
+               "OVERDUE": [], "DUE": [], "LATER": [],
+               "DERIVED": [], "DERIVED_LATER": [], "BLANK": []}
+    settled = 0
+    for d in deals:
+        rows, started, cert, term = classify(d, window_days)
+        if not rows:
+            # The ET1 is lodged, or conciliation has already met the ACAS date.
+            # Nothing to act on, so no row is raised. It is still a matter, and
+            # a consumer that adds up the buckets would otherwise lose it: the
+            # classes came to 1,299 against a caseload of 1,589, and the 290 in
+            # the gap looked like a bug in the sweep rather than the answer.
+            settled += 1
+        stage = stage_by_id.get(d.get("stage_id"), ("stage ?", 0))[0]
+        for kind, label, when, days in rows:
+            buckets[kind].append({
+                "deal_id": d["id"], "title": d.get("title", ""), "stage": stage,
+                "kind": kind, "which": label,
+                "date": when.isoformat() if when else None, "days": days,
+                "ec_started": started.isoformat() if started else None,
+                "certificate": cert.isoformat() if cert else None,
+                "termination": term.isoformat() if term else None,
+            })
+    buckets["_no_live_deadline"] = settled
+    for k, b in buckets.items():
+        if isinstance(b, list):
+            b.sort(key=lambda r: (r["days"] is None, r["days"]))
+    return buckets
+
+
+def render(owner_name, buckets, window_days, total, cap=0):
+    L = []
+    L.append(f"Limitation sweep: {owner_name}, {TODAY.isoformat()}")
+    L.append(f"{total} instructed matter{'' if total == 1 else 's'} open in Cases and ATJ.")
+    L.append(f"{len(buckets['OVERDUE'])} passed with nothing downstream, "
+             f"{len(buckets['DUE'])} due within {window_days} days, "
+             f"{len(buckets['LATER'])} recorded and further out, "
+             f"{len(buckets['DERIVED']) + len(buckets['DERIVED_LATER'])} with no date recorded but a "
+             f"termination date to work from, {len(buckets['BLANK'])} with neither.")
+    L.append("")
+
+    def block(kind, heading, note=None):
+        rows = buckets[kind]
+        if not rows:
+            return
+        L.append(f"{heading} ({len(rows)})")
+        if note:
+            L.append(f"  {note}")
+        shown = rows[:cap] if cap else rows
+        for r in shown:
+            when = r["date"] or "-"
+            if r["days"] is None:
+                age = ""
+            elif r["days"] < 0:
+                age = f"{-r['days']}d ago"
+            else:
+                age = f"in {r['days']}d"
+            L.append(f"  {r['deal_id']:>7}  {when}  {age:>9}  {r['which']:<17} {r['stage'][:26]:<26} {r['title'][:30]}")
+        if len(shown) < len(rows):
+            L.append(f"  ... and {len(rows) - len(shown)} more, run with --json for the lot")
+        L.append("")
+
+    block("OVERDUE", "PASSED, and nothing downstream recorded",
+          "No conciliation start, no certificate, not at an ET1-lodged stage.")
+    block("DUE", f"Falling due in the next {window_days} days")
+    block("DERIVED", "No limitation date recorded, and three months from termination "
+                     f"has passed or falls inside {window_days} days",
+          "Primary limit before any conciliation extension, so the earliest it could run out.")
+    block("BLANK", "No limitation date and no termination date on the record",
+          "Expected on settlement-agreement advice, which has no tribunal clock. "
+          "On a claim it means nobody recorded when time started.")
+
+    if not any(buckets[k] for k in ("OVERDUE", "DUE", "DERIVED", "BLANK")):
+        L.append("Nothing to flag.")
+    return "\n".join(L)
+
+
+def main():
+    ap = argparse.ArgumentParser(add_help=True, description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--lawyer")
+    ap.add_argument("--days", type=int, default=30)
+    ap.add_argument("--all", action="store_true")
+    ap.add_argument("--orphans", action="store_true",
+                    help="matters owned by a robot account or by someone who has left")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--include-pi", action="store_true",
+                    help="also sweep pre-instruction matters (not yet our clients)")
+    ap.add_argument("--cap", type=int, default=0,
+                    help="show at most N rows per section (0 = all)")
+    a = ap.parse_args()
+
+    by_id = users(active_only=not a.orphans)
+    stage_by_id = stages()
+
+    targets = []
+    if a.orphans:
+        # Nobody is watching these: the owner is a robot, or has left the firm.
+        for uid, u in by_id.items():
+            if uid in BOT_USERS or not u.get("active_flag"):
+                label = BOT_USERS.get(uid) or f"{u['name']} (left the firm)"
+                targets.append((uid, label))
+    elif a.all:
+        for uid, u in by_id.items():
+            if uid in BOT_USERS:
+                continue
+            targets.append((uid, u["name"]))
+    else:
+        uid = resolve_owner(a.lawyer, by_id)
+        targets.append((uid, by_id.get(uid, {}).get("name", str(uid))))
+
+    everything = {}
+    chunks = []
+    for uid, name in sorted(targets, key=lambda t: t[1]):
+        many = a.all or a.orphans
+        deals = deals_for(uid, a.include_pi)
+        if many and not deals:
+            continue
+        buckets = report(name, deals, stage_by_id, a.days)
+        # Count everyone holding a matter; print only those with something to
+        # act on. These used to be the same decision, which made the firm-wide
+        # BLANK figure move when you changed --days: a wider window pulled in
+        # more lawyers and dragged their blank matters along with them. 768 at
+        # 30 days, 844 at 90, for a bucket the window has no bearing on.
+        everything[name] = buckets
+        if many and not any(buckets[k] for k in ("OVERDUE", "DUE", "DERIVED")):
+            continue
+        chunks.append(render(name, buckets, a.days, len(deals), a.cap))
+
+    if a.json:
+        print(json.dumps(everything, indent=1))
+    else:
+        print(("\n" + "-" * 78 + "\n\n").join(chunks) or "Nothing to flag.")
+
+
+if __name__ == "__main__":
+    main()

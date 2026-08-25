@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""Reports that arrive in Telegram on their own, without anyone asking.
+
+    report-schedule add monday-deadlines --at 08:00 --days mon \
+        -- ~/work/bin/my-deadlines --days 30
+    report-schedule list
+    report-schedule test monday-deadlines      # run it now, send it now
+    report-schedule remove monday-deadlines
+
+A job is a plain shell command and a time. The daemon runs the command and
+sends you whatever it printed. No model is involved at any point: nothing here
+calls Claude, OpenAI or anything like it, which is why it is allowed to run on
+a timer at all and why it cannot invent a figure.
+
+Times are London local, on the 24-hour clock. --days takes any of
+mon tue wed thu fri sat sun, comma separated, or 'daily', or 'weekdays'.
+"""
+import argparse
+import json
+import os
+import shlex
+import subprocess
+import sys
+
+STORE = os.path.expanduser("~/work/.claude/schedules.json")
+DAEMON = os.path.expanduser("~/work/bin/report-daemon")
+DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+
+def load():
+    try:
+        with open(STORE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {"jobs": []}
+
+
+def save(db):
+    os.makedirs(os.path.dirname(STORE), exist_ok=True)
+    tmp = STORE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(db, f, indent=1)
+    os.replace(tmp, STORE)
+
+
+def parse_days(s):
+    s = (s or "weekdays").strip().lower()
+    if s == "daily":
+        return list(DAYS)
+    if s == "weekdays":
+        return DAYS[:5]
+    out = []
+    for part in s.split(","):
+        part = part.strip()[:3]
+        if part not in DAYS:
+            sys.exit(f"Not a day: {part}. Use {' '.join(DAYS)}, daily or weekdays.")
+        out.append(part)
+    return out
+
+
+def parse_at(s):
+    try:
+        h, m = s.split(":")
+        h, m = int(h), int(m)
+        assert 0 <= h < 24 and 0 <= m < 60
+    except Exception:                                          # noqa: BLE001
+        sys.exit(f"Not a time: {s}. Use HH:MM on the 24-hour clock, London time.")
+    return f"{h:02d}:{m:02d}"
+
+
+def ensure_daemon():
+    if os.path.exists(DAEMON):
+        subprocess.run([DAEMON, "--ensure"], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def cmd_add(a):
+    if not a.command:
+        sys.exit("Give the command after --, e.g.  -- ~/work/bin/my-deadlines --days 30")
+    db = load()
+    db["jobs"] = [j for j in db["jobs"] if j["name"] != a.name]
+    db["jobs"].append({
+        "name": a.name,
+        "at": parse_at(a.at),
+        "days": parse_days(a.days),
+        "command": a.command,
+        "title": a.title or a.name.replace("-", " "),
+        "last_run": None,
+    })
+    save(db)
+    ensure_daemon()
+    print(f"Scheduled '{a.name}' at {parse_at(a.at)} on "
+          f"{', '.join(parse_days(a.days))}.")
+    print(f"Runs: {' '.join(shlex.quote(c) for c in a.command)}")
+    print("Check it now with:  report-schedule test " + a.name)
+
+
+def cmd_list(a):
+    db = load()
+    if not db["jobs"]:
+        print("No scheduled reports.")
+        return
+    for j in db["jobs"]:
+        print(f"{j['name']:<24} {j['at']}  {','.join(j['days']):<27} "
+              f"{' '.join(j['command'])[:60]}")
+        if j.get("last_run"):
+            print(f"{'':<24} last sent {j['last_run']}")
+    running = subprocess.run([DAEMON, "--status"], capture_output=True, text=True)
+    print("\n" + (running.stdout.strip() or "daemon status unknown"))
+
+
+def cmd_remove(a):
+    db = load()
+    before = len(db["jobs"])
+    db["jobs"] = [j for j in db["jobs"] if j["name"] != a.name]
+    if len(db["jobs"]) == before:
+        sys.exit(f"No job called '{a.name}'.")
+    save(db)
+    print(f"Removed '{a.name}'.")
+
+
+def cmd_test(a):
+    db = load()
+    job = next((j for j in db["jobs"] if j["name"] == a.name), None)
+    if not job:
+        sys.exit(f"No job called '{a.name}'.")
+    sys.exit(subprocess.run([DAEMON, "--run-once", a.name], check=False).returncode)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("add")
+    p.add_argument("name")
+    p.add_argument("--at", required=True, help="HH:MM, London time")
+    p.add_argument("--days", default="weekdays")
+    p.add_argument("--title", help="heading on the message")
+    p.set_defaults(fn=cmd_add)
+
+    p = sub.add_parser("list"); p.set_defaults(fn=cmd_list)
+    p = sub.add_parser("remove"); p.add_argument("name"); p.set_defaults(fn=cmd_remove)
+    p = sub.add_parser("test"); p.add_argument("name"); p.set_defaults(fn=cmd_test)
+
+    # Split on the first bare '--' ourselves. argparse.REMAINDER swallows the
+    # flags that come before it, so the scheduling options never get parsed.
+    argv = sys.argv[1:]
+    command = []
+    if "--" in argv:
+        i = argv.index("--")
+        argv, command = argv[:i], argv[i + 1:]
+
+    a = ap.parse_args(argv)
+    a.command = command
+    a.fn(a)
+
+
+if __name__ == "__main__":
+    main()

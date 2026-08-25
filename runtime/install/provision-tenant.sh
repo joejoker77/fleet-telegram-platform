@@ -97,6 +97,38 @@ install -d -o "$USER_NAME" -g "$USER_NAME" -m 0755 "$CLAUDE_DIR/hooks" "$CLAUDE_
 sed "s#__TENANT_HOME__#/home/$USER_NAME#g" "$SKEL/settings.json.tmpl" > "$CLAUDE_DIR/settings.json"
 install -m 0755 "$SKEL/hooks/telegram-track-chat.sh"    "$CLAUDE_DIR/hooks/telegram-track-chat.sh"
 install -m 0755 "$SKEL/hooks/telegram-block-askuser.sh" "$CLAUDE_DIR/hooks/telegram-block-askuser.sh"
+
+# writing-lint.py — lints the bot's outgoing Telegram messages. Was rolled out by
+# hand to the first wave (deploy-writing-rules.py) and therefore missing from every
+# tenant provisioned afterwards; its settings.json entry now ships in
+# settings.json.tmpl, so the guard's golden copy matches from the first run.
+if [ -f "$SKEL/hooks/writing-lint.py" ]; then
+  install -m 0755 "$SKEL/hooks/writing-lint.py" "$CLAUDE_DIR/hooks/writing-lint.py"
+fi
+
+# The firm's matter tools + their guide. Nothing installed these before, so a new
+# hire arrived with an empty ~/work and a bot that could not answer "my matters"
+# or "my deadlines". Copied only when absent: ~/work is the tenant's own space and
+# anything they wrote there must survive re-provisioning.
+if [ -d "$SKEL/work" ]; then
+  for _p in bin CLAUDE.md .claude; do
+    if [ -e "$SKEL/work/$_p" ] && [ ! -e "/home/$USER_NAME/work/$_p" ]; then
+      cp -a "$SKEL/work/$_p" "/home/$USER_NAME/work/$_p"
+      chown -R "$USER_NAME:$USER_NAME" "/home/$USER_NAME/work/$_p"
+    fi
+  done
+  unset _p
+fi
+
+# agentshield settings guard: watches ~/.claude/settings.json against a root-owned
+# golden copy and reverts unsanctioned edits. Found active on only 18 of 28 tenants
+# (2026-08-25) because nothing enabled it at provisioning time.
+if systemctl list-unit-files 'agentshield-settings-guard@*' >/dev/null 2>&1; then
+  systemctl enable --now "agentshield-settings-guard@$USER_NAME.path" >/dev/null 2>&1 \
+    && echo "  agentshield settings guard enabled" \
+    || echo "  WARN: could not enable agentshield settings guard"
+fi
+
 # Managed firm CLAUDE.md = static base (English; Telegram + infra/security behavior,
 # tenant name substituted) + the per-ROLE access block (which firm systems this role may
 # use and exactly how to call each — from render-access-block.sh, role/scope driven by

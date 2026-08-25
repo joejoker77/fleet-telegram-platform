@@ -70,6 +70,16 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "mcp__plugin_telegram_telegram__reply",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__TENANT_HOME__/.claude/hooks/writing-lint.py",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "Stop": [

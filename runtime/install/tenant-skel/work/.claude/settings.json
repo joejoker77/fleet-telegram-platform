@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -x \"$HOME/work/bin/report-daemon\" ] && \"$HOME/work/bin/report-daemon\" --ensure; exit 0",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -x \"$HOME/work/bin/report-daemon\" ] && \"$HOME/work/bin/report-daemon\" --ensure; exit 0",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,261 @@
+#!/usr/bin/env python3
+"""Everything on one matter, on one screen.
+
+    deal-brief 168015
+    deal-brief 168015 --mail 10 --notes 5
+    deal-brief 168015 --json
+
+Reads only. Pulls the deal record, the client's contact details, the limitation
+dates, the last emails both ways, the recent notes, the attachments and the
+chatbot transcript, and prints it as a brief.
+
+Use it before a client call, when a matter lands on your desk from someone else,
+or when you need to know what was last said without opening six tabs.
+"""
+import argparse
+import datetime as dt
+import html
+import json
+import re
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+PD = "https://monacosolicitors2.pipedrive.com/api"
+PAYLOAD = "https://chatbot.monacosolicitors.co.uk/api"
+
+F = {
+    "Deal Ref": "dd26e544bc8e158a9ee49f68cc0ed3c193e14844",
+    "Employer": "99fcb87c9f57a411d0454d2a1428715a84d53944",
+    "Annual salary": "b9459840450d3c07fc548b8edcea78d5cd9d79f0",
+    "Employment issues": "b3ebebbd8437a2bec1f89437d5bcd5c6ca4ac680",
+    "Discrimination issues": "88370fd65c8b3d9b3a5fdb33edef0608236c3438",
+    "Merits score (human)": "98e459a856efa564fb5a71ce121e7fbb8ceb5e7d",
+    "Merits score (auto)": "ba166a6d5468fc98bb71ba195e8d108a6360a27c",
+}
+DATES = {
+    "Termination / last act": "b599bde67bcc02c9da9ed2004b3a2ba6853fab9c",
+    "ACAS EC deadline": "90905a1b066a7aa1a55417d4708df0ded34cb5f9",
+    "ACAS EC started": "704b1bbf60d69cf6dbb38ef7bf12f85c910cfaca",
+    "ACAS certificate": "6f4be25d7c57fa4941b815c6ac5dd56b677acfeb",
+    "ET1 deadline": "225cc151a065393f80d8bb2ce7039ea850efbc23",
+}
+TODAY = dt.date.today()
+
+
+def get(url):
+    try:
+        with urllib.request.urlopen(url, timeout=60) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        return {"_error": f"HTTP {e.code}", "_body": e.read()[:200].decode(errors="replace")}
+    except Exception as e:                                    # noqa: BLE001
+        return {"_error": str(e)}
+
+
+def pd(path):
+    return get(PD + path)
+
+
+def pd_all(path, page=100, cap=2000):
+    """Every page of a v1 list endpoint, not just the first.
+
+    A bare limit= on a v1 endpoint truncates in silence: you get 200 OK, a
+    plausible-looking list, and no hint that there is more. That already cost
+    us nine invisible attachments on deal 161285. Page everything.
+    """
+    rows, start = [], 0
+    while len(rows) < cap:
+        sep = "&" if "?" in path else "?"
+        r = pd(f"{path}{sep}limit={page}&start={start}")
+        batch = r.get("data") or []
+        rows.extend(batch)
+        p = (r.get("additional_data") or {}).get("pagination") or {}
+        if not batch or not p.get("more_items_in_collection"):
+            break
+        start = p.get("next_start") or start + page
+    return rows
+
+
+def detag(s):
+    if not s:
+        return ""
+    s = re.sub(r"<br\s*/?>|</p>|</div>", "\n", s, flags=re.I)
+    s = re.sub(r"<[^>]+>", "", s)
+    return re.sub(r"\n{3,}", "\n\n", html.unescape(s)).strip()
+
+
+def when(v):
+    """'2026-08-21 09:00:00' -> '2026-08-21 (3d ago)'."""
+    if not v or not isinstance(v, str):
+        return "-"
+    try:
+        d = dt.date.fromisoformat(v[:10])
+    except ValueError:
+        return v
+    n = (d - TODAY).days
+    if n == 0:
+        return f"{d} (today)"
+    return f"{d} ({-n}d ago)" if n < 0 else f"{d} (in {n}d)"
+
+
+def party(lst):
+    if not lst:
+        return "?"
+    p = lst[0]
+    return p.get("name") or p.get("email_address") or "?"
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("deal_id", type=int)
+    ap.add_argument("--mail", type=int, default=6, help="how many recent emails (default 6)")
+    ap.add_argument("--notes", type=int, default=3)
+    ap.add_argument("--json", action="store_true")
+    a = ap.parse_args()
+
+    d = pd(f"/v1/deals/{a.deal_id}").get("data")
+    if not d:
+        sys.exit(f"No deal {a.deal_id}, or the token cannot see it.")
+
+    stage_by_id = {s["id"]: (s["name"], s["pipeline_id"])
+                   for s in pd("/v1/stages?limit=500")["data"]}
+    pipe_by_id = {p["id"]: p["name"] for p in pd("/v1/pipelines")["data"]}
+    stage, pipe_id = stage_by_id.get(d.get("stage_id"), ("?", None))
+
+    person = d.get("person_id") or {}
+    emails = [e["value"] for e in (person.get("email") or []) if e.get("value")]
+    phones = [p["value"] for p in (person.get("phone") or []) if p.get("value")]
+
+    mail, start = [], 0
+    while True:
+        page = pd(f"/v1/deals/{a.deal_id}/mailMessages?limit=100&start={start}")
+        batch = page.get("data") or []
+        mail.extend(batch)
+        more = ((page.get("additional_data") or {}).get("pagination") or {})
+        if not more.get("more_items_in_collection") or not batch:
+            break
+        start = more.get("next_start", start + 100)
+    msgs = []
+    for m in mail:
+        m = m.get("data", m)
+        msgs.append({
+            "id": m.get("id"), "date": (m.get("add_time") or "")[:16],
+            "subject": (m.get("subject") or "").strip()[:74],
+            "frm": party(m.get("from")), "to": party(m.get("to")),
+            "snippet": (m.get("snippet") or "").strip()[:160],
+            "attachments": [{"id": x.get("id"), "name": x.get("name"),
+                             "size": x.get("file_size")} for x in (m.get("attachments") or [])],
+        })
+    msgs.sort(key=lambda x: x["date"] or "", reverse=True)
+
+    notes = [{"date": (n.get("add_time") or "")[:16],
+              "who": (n.get("user") or {}).get("name", "?"),
+              "text": detag(n.get("content"))}
+             for n in pd_all(f"/v1/notes?deal_id={a.deal_id}")]
+
+    acts = pd_all(f"/v1/deals/{a.deal_id}/activities")
+    open_acts = [x for x in acts if not x.get("done")]
+
+    ref = (d.get(F["Deal Ref"]) or "").strip()
+    chat = []
+    if ref:
+        q = urllib.parse.quote(ref)
+        sess = get(f"{PAYLOAD}/sessions?where[refNumber][equals]={q}&limit=10").get("docs") or []
+        for s in sess:
+            chat.append({"id": s.get("id"), "type": s.get("systemType") or s.get("type"),
+                         "created": (s.get("createdAt") or "")[:10]})
+
+    blob = {"deal": d, "messages": msgs, "notes": notes, "activities": acts, "chat": chat}
+    if a.json:
+        print(json.dumps(blob, indent=1, default=str))
+        return
+
+    L = []
+    L.append(f"{d.get('title')}   deal {d['id']}   {d.get('status','').upper()}")
+    L.append(f"https://monacosolicitors2.pipedrive.com/deal/{d['id']}")
+    L.append("")
+    L.append(f"  Client     {person.get('name','?')}"
+             + (f"   {', '.join(emails)}" if emails else "")
+             + (f"   {', '.join(phones)}" if phones else ""))
+    L.append(f"  Fee earner {(d.get('user_id') or {}).get('name','?')}")
+    L.append(f"  Where      {pipe_by_id.get(pipe_id,'?')} / {stage}"
+             f"   (moved {when(d.get('stage_change_time'))})")
+    L.append(f"  Opened     {when(d.get('add_time'))}")
+    if d.get("value"):
+        L.append(f"  Value      {d.get('currency','')} {d['value']:,.0f}")
+    if ref:
+        L.append(f"  Deal ref   {ref}")
+
+    facts = [(k, d.get(key)) for k, key in F.items() if k != "Deal Ref" and d.get(key)]
+    if facts:
+        L.append("")
+        L.append("The matter")
+        for k, v in facts:
+            L.append(f"  {k:<22} {str(v)[:96]}")
+
+    L.append("")
+    L.append("Dates that matter")
+    any_date = False
+    for k, key in DATES.items():
+        v = d.get(key)
+        if v:
+            any_date = True
+            L.append(f"  {k:<22} {when(v)}")
+    if not any_date:
+        L.append("  Nothing recorded. On a tribunal claim that is a gap, not a fact.")
+
+    L.append("")
+    # email_messages_count counts thread events, not messages, and reads about
+    # six times too high. Count what the listing actually returned.
+    L.append(f"Contact  {len(msgs)} emails, "
+             f"{len(notes)} notes, {len(open_acts)} open task(s). "
+             f"Last out {when(d.get('last_outgoing_mail_time'))}, "
+             f"last in {when(d.get('last_incoming_mail_time'))}.")
+    if open_acts:
+        for x in open_acts[:5]:
+            L.append(f"  TODO  {x.get('due_date','?')}  {(x.get('subject') or '')[:70]}")
+
+    if msgs:
+        L.append("")
+        L.append(f"Last {min(a.mail, len(msgs))} of {len(msgs)} emails")
+        for m in msgs[:a.mail]:
+            att = f"  [{len(m['attachments'])} attached]" if m["attachments"] else ""
+            L.append(f"  {m['date']}  {m['frm'][:24]:<24} -> {m['to'][:24]:<24}{att}")
+            L.append(f"      {m['subject']}")
+            if m["snippet"]:
+                L.append(f"      {m['snippet']}")
+
+    # imageNNNNNN.png is an email-signature logo, never a client document.
+    junk = re.compile(r"^image\d+\.(png|jpe?g|gif)$", re.I)
+    docs = [x for m in msgs for x in m["attachments"]
+            if (x["size"] or 0) > 20000 and not junk.match(x["name"] or "")]
+    if docs:
+        L.append("")
+        L.append(f"Documents on the emails ({len(docs)})")
+        for x in docs[:12]:
+            L.append(f"  {x['id']:>9}  {(x['size'] or 0)/1024:8.0f} KB  {x['name']}")
+        L.append("  Fetch one with:  pd-attachments get <id>")
+
+    if notes:
+        L.append("")
+        L.append(f"Last {min(a.notes, len(notes))} of {len(notes)} notes")
+        for n in notes[:a.notes]:
+            L.append(f"  {n['date']}  {n['who']}")
+            for line in n["text"].splitlines()[:6]:
+                if line.strip():
+                    L.append(f"      {line[:100]}")
+
+    if chat:
+        L.append("")
+        L.append(f"Chatbot sessions ({len(chat)})")
+        for c in chat:
+            L.append(f"  {c['created']}  {c['type'] or 'session'}  {c['id']}")
+
+    print("\n".join(L))
+
+
+if __name__ == "__main__":
+    main()
