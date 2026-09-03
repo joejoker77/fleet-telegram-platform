@@ -21,9 +21,21 @@
 # a shell prompt. There is deliberately no flag that accepts "whatever this key can do":
 # the value of this script is that somebody has to read the list and say yes to it.
 #
+# CLIENT-DATA CREATES (added 2026-09-01). The firm's read-only key can create — and only
+# create — in claims/sessions/users, because the public chatbot flow needs that and Payload
+# expresses it at the collection level. Dmitrii L. confirmed in writing on 2026-08-25 that
+# this is acceptable for the firm. That is now expressible, but deliberately narrowly:
+#   * only the collections named on --accept-client-data-creates, and
+#   * only when the permission really is create ALONE — an update or a delete on any
+#     client-data collection is still refused outright, with no flag that lifts it, and
+#   * only with --authorized-by, whose value is written to the audit log next to the list.
+# The point is unchanged: a person has to read the list and put their name against it.
+#
 #   sudo ./onboard-payload-readonly.sh              # store and distribute
 #   sudo ./onboard-payload-readonly.sh --check-only # just test a key, store nothing
 #   sudo ./onboard-payload-readonly.sh --tolerate-writes internal-a,internal-b
+#   sudo ./onboard-payload-readonly.sh --accept-client-data-creates sessions,users,claims \
+#        --authorized-by "Dmitrii L. (firm CMS dev), 2026-08-25"
 #
 set -uo pipefail
 ONECLI=/usr/local/bin/onecli
@@ -34,6 +46,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 MATRIX="${ROLE_MATRIX_JSON:-$HERE/role-matrix.json}"
 CHECK_ONLY=0
 TOLERATE=""
+CD_CREATES=""
+AUTHORIZED_BY=""
+AUDIT_LOG=/var/log/payload-readonly-onboard.log
 # Collections holding client personal data. Used twice: a warning if the key can READ them,
 # and a hard refusal — not overridable — if it can WRITE them.
 CLIENT_DATA="sessions session-messages session-messages-ocr-archive users users-media claims emails subscriptions users-subscriptions atj-deals"
@@ -42,12 +57,17 @@ while [ $# -gt 0 ]; do
     --check-only) CHECK_ONLY=1 ;;
     --tolerate-writes) shift; TOLERATE="${1:-}"; [ -n "$TOLERATE" ] || { echo "--tolerate-writes needs a comma-separated list" >&2; exit 2; } ;;
     --tolerate-writes=*) TOLERATE="${1#*=}" ;;
+    --accept-client-data-creates) shift; CD_CREATES="${1:-}"; [ -n "$CD_CREATES" ] || { echo "--accept-client-data-creates needs a comma-separated list" >&2; exit 2; } ;;
+    --accept-client-data-creates=*) CD_CREATES="${1#*=}" ;;
+    --authorized-by) shift; AUTHORIZED_BY="${1:-}" ;;
+    --authorized-by=*) AUTHORIZED_BY="${1#*=}" ;;
     -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
 done
 TOLERATE="$(printf '%s' "$TOLERATE" | tr ',' ' ' | tr -s ' ')"
+CD_CREATES="$(printf '%s' "$CD_CREATES" | tr ',' ' ' | tr -s ' ')"
 
 c_ok(){ printf '\033[32m%s\033[0m\n' "$*"; }
 c_no(){ printf '\033[31m%s\033[0m\n' "$*"; }
@@ -74,7 +94,26 @@ c_hd "1. does the key work at all?"
 CODE="$(curl -sS -o /tmp/.pl.$$ -w '%{http_code}' -m 25 \
         -H "Authorization: users API-Key $K" "https://$HOST/api/access" 2>/dev/null || echo 000)"
 [ "$CODE" = 200 ] || { c_no "  /api/access returned $CODE — not a working Payload API key"; rm -f /tmp/.pl.$$; exit 1; }
-c_ok "  /api/access -> 200"
+# A 200 here proves NOTHING about the key: Payload answers an unauthenticated caller with the
+# ANONYMOUS permission map, and that map happens to look like a plausible read-only key
+# (create on sessions/users/claims, read on a few content collections). Verified 2026-09-01
+# with a deliberate garbage key and with no Authorization header at all — byte-identical.
+# /api/users/me is the only thing that distinguishes accepted from ignored.
+WHO="$(curl -sS -m 25 -H "Authorization: users API-Key $K" "https://$HOST/api/users/me" 2>/dev/null \
+       | python3 -c "
+import json,sys
+try: u=(json.load(sys.stdin) or {}).get('user') or {}
+except Exception: u={}
+print('%s\t%s' % (u.get('id') or '', u.get('email') or ''))" 2>/dev/null)"
+KEY_UID="${WHO%%	*}"; KEY_EMAIL="${WHO##*	}"
+if [ -z "$KEY_UID" ]; then
+  c_no "  REFUSED — Payload does not accept this key: it resolves to no user at all."
+  echo "  (/api/access still returned 200 — it answers unauthenticated callers with the"
+  echo "  anonymous permission map, so it cannot be used to tell a good key from a bad one."
+  echo "  Storing this would leave every bound tenant talking to the CMS as nobody.)"
+  rm -f /tmp/.pl.$$; exit 1
+fi
+c_ok "  accepted — authenticates as $KEY_EMAIL"
 
 c_hd "2. is it really read-only?"
 python3 - /tmp/.pl.$$ <<'PY' > /tmp/.plsum.$$ || { c_no "  could not read the permission map"; exit 1; }
@@ -99,10 +138,17 @@ rm -f /tmp/.pl.$$ /tmp/.plsum.$$
 if [ -n "$WRITES" ]; then
   # Sort what the key can write into three buckets: client data (never allowed), named on
   # --tolerate-writes (allowed after a typed confirmation), and everything else (refused).
-  PROTECTED=""; TOLERATED=""; UNEXPECTED=""
+  PROTECTED=""; TOLERATED=""; UNEXPECTED=""; ACCEPTED_CD=""
   for e in $(printf '%s' "$WRITES" | tr ';' '\n'); do
-    n="${e%%:*}"
-    case " $CLIENT_DATA " in *" $n "*) PROTECTED="$PROTECTED $e"; continue ;; esac
+    n="${e%%:*}"; ops="${e#*:}"
+    case " $CLIENT_DATA " in *" $n "*)
+      # A client-data collection may be accepted ONLY when it was named explicitly AND the
+      # permission is create and nothing else. "create,update" is not a create.
+      if [ "$ops" = create ]; then
+        case " $CD_CREATES " in *" $n "*) ACCEPTED_CD="$ACCEPTED_CD $e"; continue ;; esac
+      fi
+      PROTECTED="$PROTECTED $e"; continue ;;
+    esac
     case " $TOLERATE " in *" $n "*) TOLERATED="$TOLERATED $e" ;; *) UNEXPECTED="$UNEXPECTED $e" ;; esac
   done
 
@@ -114,7 +160,34 @@ if [ -n "$WRITES" ]; then
     echo "  can modify client chat sessions or claims would be handed to every non-admin bot,"
     echo "  and from there to whoever is driving that bot. If the CMS genuinely cannot make"
     echo "  these read-only, that is a decision for the firm and its DPO, not for this prompt."
+    echo
+    echo "  --accept-client-data-creates exists, but it covers CREATE ONLY. At least one entry"
+    echo "  above carries update or delete, which no flag lifts."
     exit 1
+  fi
+
+  if [ -n "$ACCEPTED_CD" ]; then
+    # Named client-data collections whose permission is create alone. Allowed, but never
+    # silently: the authorisation goes in the log next to the list it authorised.
+    c_no "  accepting CREATE on client-data collections, by explicit authorisation:"
+    printf '    %s\n' $ACCEPTED_CD
+    if [ -z "$AUTHORIZED_BY" ]; then
+      echo
+      c_no "  REFUSED — --accept-client-data-creates requires --authorized-by \"who and when\"."
+      echo "  Creating rows in sessions/users/claims lets every non-admin bot inject records"
+      echo "  into the firm's CMS. That can be a legitimate firm decision, but it has to be"
+      echo "  attributable to a person, not to whoever happened to run this script."
+      exit 1
+    fi
+    echo "    authorised by: $AUTHORIZED_BY"
+    if [ "$CHECK_ONLY" != 1 ]; then
+      printf '%s  accept-client-data-creates: %s | authorised-by: %s | operator: %s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        "$(printf '%s' "$ACCEPTED_CD" | tr -s ' ' | sed 's/^ //')" \
+        "$AUTHORIZED_BY" "${SUDO_USER:-$(id -un)}" >> "$AUDIT_LOG" 2>/dev/null \
+        && c_ok "    recorded in $AUDIT_LOG" \
+        || c_no "    WARNING: could not write $AUDIT_LOG — the authorisation is NOT on record"
+    fi
   fi
 
   if [ -n "$UNEXPECTED" ]; then
@@ -207,8 +280,18 @@ import json,sys
 for a in json.load(sys.stdin):
     if a.get('identifier')=='${u}-bot': print(a['id'])")"
   [ -n "$aid" ] || { echo "   - $u: no agent, skipped"; continue; }
-  if "$ONECLI" agents grant-secret --id "$aid" --secret-id "$SID" >/dev/null 2>&1 \
-     || "$ONECLI" agents grant --id "$aid" --secret-id "$SID" >/dev/null 2>&1; then
+  # The onecli here is a shim: it has no `grant-secret`/`grant`, only `set-secrets`, which
+  # REPLACES the agent's whole grant list. So read what the agent holds, append this secret,
+  # and write the full list back — passing only $SID would revoke every other binding it has.
+  # (Verified 2026-09-01: the old grant-secret path failed for every tenant.)
+  CUR="$("$ONECLI" agents secrets --id "$aid" 2>/dev/null | python3 -c "
+import json,sys
+try: print(' '.join(json.load(sys.stdin)))
+except Exception: pass")"
+  case " $CUR " in *" $SID "*) echo "   - $u ($role) already had it"; bound=$((bound+1)); continue ;; esac
+  WANT="$(printf '%s %s' "$CUR" "$SID" | tr -s ' ' | sed -e 's/^ //' -e 's/ /,/g')"
+  if "$ONECLI" agents set-secrets --id "$aid" --secret-ids "$WANT" >/dev/null 2>&1 \
+     && "$ONECLI" agents secrets --id "$aid" 2>/dev/null | grep -q -- "$SID"; then
     echo "   - $u ($role) ok"; bound=$((bound+1))
   else
     c_no "   - $u ($role) bind FAILED"
