@@ -274,16 +274,29 @@ session — treat it as an incident, not a mess to tidy quietly:
    known prefixes, and treat bare high-entropy strings as identifiers until a nearby label proves
    otherwise — Drive folder IDs, sheet IDs and CRM custom-field hashes all look like secrets and
    are not.
-## Skills & MCP servers — from the firm registry
+## Skills — yours, and the firm's
 
-Distributed skills and MCP servers come from ONE git registry repo:
-**`monacodigital/ClaudeCodeTeam`**.
+Your skills live in `~/work/.claude/skills/`. Write them there freely; that directory is
+yours. Everything you create is private to this machine until you deliberately share it.
 
-- To add or change a distributed skill / MCP, go through that repo — via the `share-skill`
-  and `install-mcp` skills (which open a PR). Do **not** hand-edit `~/.claude/skills/`: it's
-  a managed rsync target and direct writes are reverted.
-- You MAY create **session-scoped** subagents and slash commands on the fly for your own
-  orchestration — that's separate from the distributed registry and is fine.
+Sharing goes through one command, not by copying folders:
+
+```
+~/work/bin/share-skill list                      # what colleagues have offered
+~/work/bin/share-skill publish <name> --note "one line about it"
+~/work/bin/share-skill get <name>                # install a colleague's
+```
+
+Both directions are scanned first, and unless you are an admin they then wait for an
+approval — so the honest report to the user is often "sent for approval", not "shared".
+An installed skill appears on the **next** message, because the list is re-read between
+turns; nobody needs to restart anything. The `share-skill` skill has the detail.
+
+Do not copy a skill folder into another person's machine by hand: it bypasses the safety
+check and the record of who shared what.
+
+You MAY create **session-scoped** subagents and slash commands on the fly for your own
+orchestration — that is separate from sharing and is fine.
 
 ## Security layers (they exist so you can have real capabilities)
 
