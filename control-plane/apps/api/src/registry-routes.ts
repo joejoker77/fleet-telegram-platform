@@ -388,7 +388,16 @@ function installFiles(deps: RegistryDeps, os: string, type: ArtType, name: strin
   for (const f of files) {
     // skill: files are relative inside skills/<name>/; others: single file under baseDir
     const dest = type === "skill" ? path.join(baseDir, f.relPath) : path.join(baseDir, f.relPath);
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    const dir = path.dirname(dest);
+    fs.mkdirSync(dir, { recursive: true });
+    // cp-api runs as root, so a freshly created directory is root-owned. The files were
+    // already chowned but the DIRECTORY was not, which left the tenant unable to remove
+    // or replace an imported skill in their own sandbox (observed on the first real
+    // import: SKILL.md helen-alty:helen-alty inside a root:root skills/<name>/).
+    // Walk back up to the tenant's .claude and chown everything we created.
+    for (let d = dir; d.startsWith(tenantHome(deps, os)) && d !== tenantHome(deps, os); d = path.dirname(d)) {
+      chownToTenant(deps, os, d);
+    }
     fs.writeFileSync(dest, f.content, { mode: 0o644 });
     chownToTenant(deps, os, dest);
     written.push(dest);
