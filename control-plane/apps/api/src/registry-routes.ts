@@ -54,23 +54,43 @@ export interface RegistryDeps {
 function tenantHome(deps: RegistryDeps, os: string): string {
   return path.join(deps.homeRoot, os);
 }
-function artifactSourcePath(deps: RegistryDeps, os: string, type: ArtType, name: string): string {
-  const c = path.join(tenantHome(deps, os), ".claude");
+// A tenant has TWO .claude trees: the user-scoped ~/.claude and the project-scoped
+// ~/work/.claude, and Claude Code reads artifacts from both. On the firm host every
+// real artifact lives in the PROJECT one — audited 2026-09-04: all 30 tenants have
+// ~/work/.claude/skills populated (6 firm + 24 private skills) and ~/.claude/skills
+// does not exist for a single one of them. Resolving only ~/.claude, as this did,
+// means publish fails "source not found" for every skill anybody actually has.
+// Tuple, not string[], so [0] is a string under noUncheckedIndexedAccess.
+function claudeDirs(deps: RegistryDeps, os: string): [project: string, user: string] {
+  const home = tenantHome(deps, os);
+  return [path.join(home, "work", ".claude"), path.join(home, ".claude")];
+}
+function relForType(type: ArtType, name: string): string {
   switch (type) {
     case "skill":
-      return path.join(c, "skills", name);
+      return path.join("skills", name);
     case "subagent":
-      return path.join(c, "agents", `${name}.md`);
+      return path.join("agents", `${name}.md`);
     case "command":
     case "workflow":
-      return path.join(c, "commands", `${name}.md`);
+      return path.join("commands", `${name}.md`);
   }
 }
-// where an imported artifact is written in the importer's sandbox
+function artifactSourcePath(deps: RegistryDeps, os: string, type: ArtType, name: string): string {
+  const rel = relForType(type, name);
+  const [project, user] = claudeDirs(deps, os);
+  const candidates: [string, string] = [path.join(project, rel), path.join(user, rel)];
+  // Prefer whichever one exists; fall back to the project tree so the error message
+  // names the path a tenant would actually look at.
+  return candidates.find((p) => fs.existsSync(p)) ?? candidates[0];
+}
+// where an imported artifact is written in the importer's sandbox — always the
+// project tree, so an imported skill lands beside the tenant's own ones instead of
+// in a directory none of them has.
 function artifactInstallTargets(deps: RegistryDeps, os: string, type: ArtType, name: string): {
   baseDir: string;
 } {
-  const c = path.join(tenantHome(deps, os), ".claude");
+  const c = claudeDirs(deps, os)[0];
   switch (type) {
     case "skill":
       return { baseDir: path.join(c, "skills", name) };
