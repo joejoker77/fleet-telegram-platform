@@ -48,6 +48,9 @@ export interface RegistryDeps {
   auditSocket: string;
   approvals: ApprovalsDeps;
   repo: string; // marketplace store, e.g. "joejoker77/claude-bot-skills"
+  // Read-only PAT for that repo. Empty string = not configured, which is only
+  // survivable while the repo is public; a private repo 404s without it.
+  githubReadToken?: string;
 }
 
 // ── source/destination layout (mirrors the pod helper) ──────────────────────
@@ -126,7 +129,7 @@ async function scanArtifactSource(deps: RegistryDeps, type: ArtType, src: string
 async function dispatchPublishToPod(
   deps: RegistryDeps,
   args: { os: string; type: ArtType; name: string; version: string; source: string },
-): Promise<{ ok: boolean; gitRef?: string; commitSha?: string; prNumber?: number; prUrl?: string; error?: string }> {
+): Promise<{ ok: boolean; gitRef?: string; commitSha?: string; prNumber?: number; prUrl?: string; merged?: boolean; mergeState?: string; error?: string }> {
   const runDir = path.join(tenantHome(deps, args.os), ".claude", "run");
   const reqFile = path.join(runDir, "registry-task.json");
   const resFile = path.join(runDir, "registry-task.result.json");
@@ -144,6 +147,15 @@ async function dispatchPublishToPod(
     repo: deps.repo,
     ownerUsername: args.os,
     source: args.source,
+    // Land it, do not park it. Everything upstream of here has already decided the
+    // artefact may be shared: the scanners passed (fail-closed) and a non-admin's
+    // publish carried an approval. Leaving a PR for a human to merge would re-ask a
+    // question that was just answered, and until someone clicks, the colleague who
+    // asked for the skill still cannot import it — the version row exists but the ref
+    // is not on the default branch. The helper squash-merges via the API and reports
+    // mergeState; if branch protection refuses, it degrades to merge-deferred rather
+    // than failing the publish, so the PR is still there as a fallback.
+    merge: true,
   };
   fs.writeFileSync(reqFile, JSON.stringify(job) + "\n", { mode: 0o644 });
   // keep the file tenant-owned so the pod supervisor (tenant uid) can rm it
@@ -168,6 +180,11 @@ async function dispatchPublishToPod(
         commitSha: parsed.commitSha as string,
         prNumber: parsed.prNumber as number,
         prUrl: parsed.prUrl as string,
+        // Whether it actually landed on the default branch. A colleague can only
+        // import a merged version, so this is the difference between "shared" and
+        // "waiting on a human" — it has to reach the caller, not just the log.
+        merged: parsed.merged === true,
+        mergeState: (parsed.mergeState as string) || undefined,
       };
     }
     return { ok: false, error: (parsed.error as string) || "publish failed" };
@@ -249,7 +266,7 @@ type PublishPayload = {
   scan: { verdict: string; severity: string | null; decidedBy: string; cacheHit: boolean };
 };
 
-async function runPublish(deps: RegistryDeps, p: PublishPayload): Promise<{ ok: boolean; error?: string; versionId?: string; prUrl?: string; gitRef?: string }> {
+async function runPublish(deps: RegistryDeps, p: PublishPayload): Promise<{ ok: boolean; error?: string; versionId?: string; prUrl?: string; gitRef?: string; merged?: boolean; mergeState?: string }> {
   const disp = await dispatchPublishToPod(deps, {
     os: p.osUsername,
     type: p.type,
@@ -295,16 +312,36 @@ async function runPublish(deps: RegistryDeps, p: PublishPayload): Promise<{ ok: 
     actor: `miniapp:${p.osUsername}`,
     payload: { type: p.type, name: p.name, version: p.version, gitRef: disp.gitRef, prUrl: disp.prUrl, versionId: rec.versionId },
   }).catch(() => {});
-  return { ok: true, versionId: rec.versionId, prUrl: disp.prUrl, gitRef: disp.gitRef };
+  return { ok: true, versionId: rec.versionId, prUrl: disp.prUrl, gitRef: disp.gitRef, merged: disp.merged, mergeState: disp.mergeState };
 }
 
-// ── GitHub public READ (import fetch — no auth, public repo) ──────────────────
+// ── GitHub READ (import fetch) ───────────────────────────────────────────────
+// Originally written for a PUBLIC marketplace repo and sent no credential at all. The
+// firm's repo is private, where GitHub answers 404 — indistinguishable from a missing
+// file — so an unauthenticated import failed with a message that pointed at the wrong
+// thing. A read-only token is attached when configured. It is a SEPARATE token from the
+// pods' write PAT on purpose: cp-api can read the marketplace and still cannot push to
+// it, which keeps the git-write capability where the egress proxy injects it.
 type FetchedFile = { relPath: string; content: string };
-async function ghGetJson(repo: string, apiPath: string): Promise<unknown> {
-  const res = await fetch(`https://api.github.com/repos/${repo}/${apiPath}`, {
-    headers: { Accept: "application/vnd.github+json", "User-Agent": "fleet-registry-import" },
-  });
-  if (!res.ok) throw new Error(`GitHub ${res.status} on ${apiPath}`);
+async function ghGetJson(repo: string, apiPath: string, readToken?: string): Promise<unknown> {
+  const headers: Record<string, string> = {
+    Accept: "application/vnd.github+json",
+    "User-Agent": "fleet-registry-import",
+    "X-GitHub-Api-Version": "2022-11-28",
+  };
+  if (readToken) headers.Authorization = `Bearer ${readToken}`;
+  const res = await fetch(`https://api.github.com/repos/${repo}/${apiPath}`, { headers });
+  if (!res.ok) {
+    // 404 on a private repo without a credential is the common case, and saying
+    // "not found" would send someone hunting for a missing file.
+    if ((res.status === 404 || res.status === 403) && !readToken) {
+      throw new Error(
+        `GitHub ${res.status} on ${apiPath} and no read token is configured — ` +
+        `a private marketplace repo cannot be read anonymously (set GITHUB_READ_TOKEN)`,
+      );
+    }
+    throw new Error(`GitHub ${res.status} on ${apiPath}`);
+  }
   return res.json();
 }
 // Recursively fetch the artifact's files at a pinned ref. destBase is the repo
@@ -321,11 +358,11 @@ function repoDestFor(type: ArtType, name: string): { repoPath: string; isDir: bo
       return { repoPath: `workflows/${name}.md`, isDir: false };
   }
 }
-async function fetchArtifactFiles(repo: string, ref: string, type: ArtType, name: string): Promise<FetchedFile[]> {
+async function fetchArtifactFiles(repo: string, ref: string, type: ArtType, name: string, readToken?: string): Promise<FetchedFile[]> {
   const { repoPath, isDir } = repoDestFor(type, name);
   const out: FetchedFile[] = [];
   const walk = async (p: string, rel: string): Promise<void> => {
-    const node = (await ghGetJson(repo, `contents/${p}?ref=${encodeURIComponent(ref)}`)) as
+    const node = (await ghGetJson(repo, `contents/${p}?ref=${encodeURIComponent(ref)}`, readToken)) as
       | { type: string; content?: string; encoding?: string }
       | Array<{ type: string; name: string; path: string }>;
     if (Array.isArray(node)) {
@@ -514,7 +551,7 @@ export function registerRegistryRoutes(app: FastifyInstance, deps: RegistryDeps)
     if (ctx.isAdmin) {
       const res = await runPublish(deps, payload);
       if (!res.ok) return reply.code(502).send({ error: res.error });
-      return reply.send({ published: true, versionId: res.versionId, prUrl: res.prUrl, gitRef: res.gitRef, verdict: scan.verdict });
+      return reply.send({ published: true, versionId: res.versionId, prUrl: res.prUrl, gitRef: res.gitRef, merged: res.merged, mergeState: res.mergeState, verdict: scan.verdict });
     }
     const approval = await createApproval(deps.approvals, {
       userId: ctx.userId,
@@ -561,7 +598,7 @@ export function registerRegistryRoutes(app: FastifyInstance, deps: RegistryDeps)
     // pull the pinned version from the public repo, re-scan under current rules
     let files: FetchedFile[];
     try {
-      files = await fetchArtifactFiles(deps.repo, ver.gitRef, type, ver.name!);
+      files = await fetchArtifactFiles(deps.repo, ver.gitRef, type, ver.name!, deps.githubReadToken);
     } catch (e) {
       return reply.code(502).send({ error: `fetch from marketplace failed: ${(e as Error).message}` });
     }
@@ -640,7 +677,7 @@ export function makeImportApply(deps: RegistryDeps) {
     }
     let files: FetchedFile[];
     try {
-      files = await fetchArtifactFiles(deps.repo, p.gitRef, p.type, p.name);
+      files = await fetchArtifactFiles(deps.repo, p.gitRef, p.type, p.name, deps.githubReadToken);
     } catch (e) {
       return { ok: false, error: `fetch failed: ${(e as Error).message}` };
     }

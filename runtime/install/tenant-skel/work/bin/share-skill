@@ -127,9 +127,19 @@ def cmd_publish(args):
         body["description"] = args.note
     st, d = call("POST", "/registry/publish", body)
     if st == 200 and d.get("published"):
-        print(f"Shared: {args.name} v{args.version}.")
-        if d.get("prUrl"):
-            print(f"  change request: {d['prUrl']}")
+        # "published" only means the version row exists. A colleague can import it once
+        # it is on the default branch, so merged vs not is the difference between done
+        # and half-done, and it gets said out loud rather than assumed.
+        if d.get("merged"):
+            print(f"Shared: {args.name} v{args.version} — colleagues can install it now.")
+        else:
+            print(
+                f"{args.name} v{args.version} is recorded but NOT yet on the shared branch"
+                f" ({d.get('mergeState') or 'merge deferred'}).\n"
+                "  Colleagues cannot install it until it lands."
+            )
+            if d.get("prUrl"):
+                print(f"  waiting here: {d['prUrl']}")
         return
     if st == 200 and d.get("approvalId"):
         # Non-admins get an approval card instead of an immediate publish (design §3).
