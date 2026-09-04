@@ -618,23 +618,33 @@ export function registerRegistryRoutes(app: FastifyInstance, deps: RegistryDeps)
       return reply.code(422).send({ error: "the import did not pass the re-scan (fail-closed)", verdict: scan.verdict, severity: scan.severity });
     }
 
-    // import ALWAYS requires an approval (crosses the trust boundary), incl. admins
-    const approval = await createApproval(deps.approvals, {
+    // Install straight away. The approval card this used to raise was unanswerable on a
+    // deployment with no Mini App — it notified the tenant with a button leading nowhere,
+    // so every import parked forever. And on Vitaliy's call (2026-09-04) it was not
+    // earning its keep either: the scanners above are the gate, they run fail-closed on
+    // the pinned files under current rules, and re-asking the person who just typed
+    // "install this" adds a click, not a decision.
+    // What still stops a bad import: visibility/ownership checks, published-status check,
+    // the fail-closed re-scan, and the audit line below.
+    const written = installFiles(deps, ctx.osUsername, type, ver.name!, files);
+    await db
+      .insert(schema.installs)
+      .values({ userId: ctx.userId, artifactVersionId: ver.vId, pinnedVersion: ver.version! })
+      .onConflictDoNothing();
+    await sendAudit(deps.auditSocket, {
       userId: ctx.userId,
-      kind: REGISTRY_IMPORT_KIND,
-      title: `Import ${type} "${ver.name}" v${ver.version}`,
-      payload: {
-        osUsername: ctx.osUsername,
-        ownerUserId: ctx.userId,
-        artifactVersionId: ver.vId,
-        type,
-        name: ver.name,
-        version: ver.version,
-        gitRef: ver.gitRef,
-      },
-      ttlSeconds: APPROVAL_TTL,
+      kind: "registry.import",
+      actor: `chat:${ctx.osUsername}`,
+      payload: { artifactVersionId: ver.vId, type, name: ver.name, version: ver.version, files: written.length },
+    }).catch(() => {});
+    return reply.send({
+      installed: true,
+      type,
+      name: ver.name,
+      version: ver.version,
+      files: written.length,
+      verdict: scan.verdict,
     });
-    return reply.send({ approvalId: approval.id, ttlSeconds: approval.ttlSeconds, verdict: scan.verdict });
   });
 
   // unpublish (owner only) — removes the registry rows; does not rewrite git history

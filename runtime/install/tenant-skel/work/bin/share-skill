@@ -185,14 +185,19 @@ def cmd_get(args):
         ref = vers[0].get("id")
         label = f"{args.ref} v{vers[0].get('version')}"
     st, d = call("POST", "/registry/import", {"artifactVersionId": ref})
-    # Import ALWAYS goes to approval, by design — there is no immediate-install answer.
+    if st == 200 and d.get("installed"):
+        print(
+            f"Installed {label} ({d.get('files')} file(s)).\n"
+            "  It becomes available on your next message — send anything to pick it up."
+        )
+        return
     if st == 200 and d.get("approvalId"):
+        # Older cp-api build: import parked on an approval card.
         mins = round((d.get("ttlSeconds") or 600) / 60)
         print(
             f"{label} passed the safety check and is waiting for approval.\n"
-            f"  It is not installed until approved — the request expires in about {mins} min.\n"
-            f"  approval: {d['approvalId']}\n"
-            "  Once approved it appears on your next message: send anything to pick it up."
+            f"  It is not installed until approved — expires in about {mins} min.\n"
+            f"  approval: {d['approvalId']}"
         )
         return
     if st == 422:
