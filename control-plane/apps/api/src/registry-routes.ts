@@ -19,11 +19,11 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import type { Redis } from "ioredis";
 import fs from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { and, eq, or, desc } from "drizzle-orm";
 import { getDb, schema } from "@fleet/db";
 import { scanArtifact, httpJudgeClient, type ScanInput, type ScanResult } from "@fleet/scanners";
-import { requireAuth, AuthError } from "./authz.js";
+import { requireAuth, AuthError, type AuthCtx } from "./authz.js";
 import { createApproval, type ApprovalsDeps } from "./approvals.js";
 import { sendAudit } from "./audit.js";
 
@@ -361,10 +361,49 @@ function installFiles(deps: RegistryDeps, os: string, type: ArtType, name: strin
 
 // ── route registration ───────────────────────────────────────────────────────
 export function registerRegistryRoutes(app: FastifyInstance, deps: RegistryDeps): void {
-  const authed = async (req: FastifyRequest, reply: FastifyReply) => {
+  // Two ways in, both resolving to the same AuthCtx:
+  //   * a Mini App session JWT — the browser path;
+  //   * a per-tenant registry token — the CHAT path. The tenants here live in Telegram
+  //     and there is no web front end on the firm host (nginx exposes only the Composio
+  //     callback and the deploy webhook), so without this there is no way for a person
+  //     to reach publish/import at all.
+  // Deliberately the same shape as the dbread gateway (apps/dbread-gateway/src/index.ts):
+  // the map on disk holds only sha256(token) → os username, so it is not itself a
+  // credential; it is re-read per request, so deleting a line revokes immediately; and an
+  // unreadable/missing map authorises nobody (fail-closed).
+  // NOTE this widens auth for /registry/* ONLY, and the token still buys exactly what a
+  // session buys — scan and approval still gate every publish and import.
+  const tokensFile = process.env.REGISTRY_TOKENS_FILE ?? "/etc/claudeapp/registry/tokens.json";
+  const tenantForToken = async (token: string): Promise<AuthCtx | null> => {
+    let osUsername: string | undefined;
+    try {
+      const digest = createHash("sha256").update(token).digest("hex");
+      const map = JSON.parse(fs.readFileSync(tokensFile, "utf8")) as Record<string, string>;
+      osUsername = map[digest];
+    } catch {
+      return null;
+    }
+    if (!osUsername) return null;
+    const rows = await db
+      .select({ id: schema.users.id, status: schema.users.status, isAdmin: schema.users.isAdmin })
+      .from(schema.users)
+      .where(eq(schema.users.osUsername, osUsername))
+      .limit(1);
+    const u = rows[0];
+    if (!u || u.status === "suspended" || u.status === "deleted") return null;
+    return { userId: u.id, osUsername, isAdmin: u.isAdmin };
+  };
+
+  const authed = async (req: FastifyRequest, reply: FastifyReply): Promise<AuthCtx | null> => {
     try {
       return await requireAuth(req, deps.redis, deps.jwtSecret);
     } catch (e) {
+      const auth = req.headers.authorization ?? "";
+      const raw = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+      if (raw) {
+        const ctx = await tenantForToken(raw);
+        if (ctx) return ctx;
+      }
       const err = e as AuthError;
       reply.code(err.code ?? 401).send({ error: err.message });
       return null;
