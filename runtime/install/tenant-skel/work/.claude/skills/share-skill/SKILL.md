@@ -23,13 +23,16 @@ the owner.
 
 ## What to tell the user, and what not to promise
 
-- **Both directions are checked and approved.** Every publish and every install is scanned
-  first, and unless the user is an admin it then waits for an approval. So the honest
-  answer is usually *"sent for approval"*, *not* "shared". Do not report a pending
-  approval as done — the tool prints which one it is.
-- **An installed skill appears on the next message, not instantly.** The skills list is
-  re-read between turns. Tell the user to send anything and it will be there; do not tell
-  them to restart.
+- **Both directions take effect immediately** — no approval, nobody to wait for. Report
+  what the command printed: a successful publish says colleagues can install it now, a
+  successful install says how many files landed. If it says a version is recorded but not
+  on the shared branch, that is NOT done — say so and give the reason it printed.
+- **A safety scan runs first and can refuse**, either direction. Relay the reason. Never
+  retry around it and never copy the folder by hand instead — that skips the scan and the
+  record of who shared what.
+- **A newly installed skill appears on the next message, not instantly.** The skills list
+  is re-read between turns. Tell the user to send anything and it will be there; do not
+  tell them to restart.
 - **Names are per person.** If the user asks for "Daria's WP letter skill", run `list`
   first and use the exact name from it rather than guessing.
 

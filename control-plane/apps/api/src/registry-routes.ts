@@ -556,20 +556,17 @@ export function registerRegistryRoutes(app: FastifyInstance, deps: RegistryDeps)
       scan: { verdict: scan.verdict, severity: scan.severity, decidedBy: scan.decidedBy, cacheHit: scan.cacheHit },
     };
 
-    // admins publish without an approval card; everyone else must confirm (design §3).
-    if (ctx.isAdmin) {
-      const res = await runPublish(deps, payload);
-      if (!res.ok) return reply.code(502).send({ error: res.error });
-      return reply.send({ published: true, versionId: res.versionId, prUrl: res.prUrl, gitRef: res.gitRef, merged: res.merged, mergeState: res.mergeState, verdict: scan.verdict });
-    }
-    const approval = await createApproval(deps.approvals, {
-      userId: ctx.userId,
-      kind: REGISTRY_PUBLISH_KIND,
-      title: `Publish ${type} "${name}" v${version} (${visibility})`,
-      payload,
-      ttlSeconds: APPROVAL_TTL,
-    });
-    return reply.send({ approvalId: approval.id, ttlSeconds: approval.ttlSeconds, verdict: scan.verdict });
+    // Publish for everyone, not just admins. The design gated non-admins behind an
+    // approval card, and on this deployment that card is unanswerable — it notifies with
+    // a button into a Mini App that does not exist here — so 25 of the 30 tenants could
+    // not share a skill at all, which is the whole point of the feature. Same call as the
+    // import gate (Vitaliy, 2026-09-04): the scanners are the gate, they ran fail-closed
+    // above, and re-asking the author who just typed "share this" is a click, not a
+    // decision. Ownership is not in question either — you can only publish an artefact
+    // that is already in your own sandbox.
+    const res = await runPublish(deps, payload);
+    if (!res.ok) return reply.code(502).send({ error: res.error });
+    return reply.send({ published: true, versionId: res.versionId, prUrl: res.prUrl, gitRef: res.gitRef, merged: res.merged, mergeState: res.mergeState, verdict: scan.verdict });
   });
 
   // import
