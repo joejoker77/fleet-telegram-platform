@@ -20,9 +20,15 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 # ships an embedded Bun 1.4.0 "baseline" build whose JSC thread-suspend (TLC)
 # path segfaults in the interactive TUI on our hosts ("panic: Segmentation
 # fault", "embedder failed to suspend thread … for TLC"), restart-looping the
-# pod. 2.1.177 is the version the entire live fleet runs without crashing. Bump
-# this ARG only after validating the new version boots a polling bot.
-ARG CLAUDE_VERSION=2.1.177
+# pod. Bump this ARG only after validating the new version boots a polling bot.
+#
+# 2026-09-04: 2.1.259 met that gate before the fleet-wide retag —
+# tonysoprano1337's pod ran it for 13h with a live poller under the boot TUI and
+# two App sessions, no segfault. It is also the first version that knows
+# claude-fable-5-1: the model shipped 09-01 and the "stable" tag (2.1.236,
+# published 08-19) does not carry it. Previous value 2.1.177; the pre-upgrade
+# image is kept on the host as claude-user:pre-cc-upgrade-20260903.
+ARG CLAUDE_VERSION=2.1.259
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_VERSION}"
 
 # Bun — dependency of the official Telegram plugin. Install to /usr/local so it
