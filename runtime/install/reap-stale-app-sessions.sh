@@ -105,6 +105,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--idle-hours", type=float, default=48.0)
+    ap.add_argument("--grace-hours", type=float, default=2.0,
+                    help="never touch a session younger than this. Not age-based reaping "
+                         "— a grace period only ever SPARES, and it covers 'opened the app "
+                         "but has not typed yet', which otherwise reads as never-used.")
     ap.add_argument("--sample-seconds", type=int, default=90)
     ap.add_argument("--busy-cpu-pct", type=float, default=5.0,
                     help="CPU%% of one core across the sample above which a session counts "
@@ -134,6 +138,14 @@ def main():
 
     verdicts = {}
     for pid, s in first.items():
+        # The first automatic run ended a session 6 minutes old: never used, and seen once
+        # before. Harmless there, but "just opened, about to type" looks identical to
+        # "never used", so anything young is left alone regardless.
+        if s["age_h"] < args.grace_hours:
+            s["why"] = f"only {s['age_h']*60:.0f} min old — SPARED (grace)"
+            s["conv_stale"] = False
+            verdicts[pid] = s
+            continue
         tr = transcript_for(s["user"], s["session"])
         if tr is None:
             s["why"] = "no conversation ever"
