@@ -1,0 +1,15 @@
+[Unit]
+Description=Hourly reclaim of abandoned Claude App sessions
+
+[Timer]
+# Hourly is frequent enough: the leak took three days to reach 15 GB, so an hour of
+# accumulation is a few hundred MB at worst.
+OnCalendar=hourly
+# Spread it off the top of the hour, away from the report daemons and the guide/skill
+# timers, and run a missed one after a reboot rather than skipping it.
+RandomizedDelaySec=300
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,21 @@
+[Unit]
+Description=End abandoned Claude App sessions in tenant pods (memory reclaim)
+Documentation=file:///opt/ftp-src/fleet-telegram-platform/runtime/install/reap-stale-app-sessions.sh
+# Nothing to wait for: it only reads /proc and signals processes.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/reap-stale-app-sessions --max-age-hours 24
+# It signals processes owned by tenants, so it needs to stay root; everything else is
+# tightened. No network, no writes anywhere.
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+PrivateNetwork=true
+NoNewPrivileges=true
+# /proc must stay visible in full — the script reads other users' cmdlines to tell an
+# App session from the Telegram bot, and hidepid/subset would hide exactly that.
+ProcSubset=all
+ProtectProc=default
+# It sleeps up to 35s waiting for TERM to land before escalating.
+TimeoutStartSec=180
