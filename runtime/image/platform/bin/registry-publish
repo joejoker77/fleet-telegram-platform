@@ -86,22 +86,30 @@ if (!NAME || !/^[a-z0-9][a-z0-9._-]*$/i.test(NAME)) die("--name required, [a-z0-
 if (!/^[\w.-]+\/[\w.-]+$/.test(REPO)) die("--repo must be owner/name");
 
 // ── (type,name) → source path in the tenant .claude + destination in the repo ─
-// Source defaults under $HOME/.claude; --source overrides (cp-api passes an
-// absolute path it resolved against the tenant home).
+// --source overrides (cp-api passes an absolute path it resolved against the tenant
+// home). Without it we look in BOTH .claude trees: the project-scoped ~/work/.claude
+// first, then the user-scoped ~/.claude. Claude Code reads artifacts from both, and on
+// the firm host the project one is where everything actually is — audited 2026-09-04:
+// 30/30 tenants have ~/work/.claude/skills populated, 0/30 have ~/.claude/skills.
+// Looking only under ~/.claude made this die "source not found" for every real skill.
 const HOME = process.env.HOME || `/home/${OWNER_USERNAME}`;
-const CLAUDE = path.join(HOME, ".claude");
+const CLAUDE_DIRS = [path.join(HOME, "work", ".claude"), path.join(HOME, ".claude")];
+function pick(rel) {
+  const candidates = CLAUDE_DIRS.map((c) => path.join(c, rel));
+  return candidates.find((p) => fs.existsSync(p)) ?? candidates[0];
+}
 function layout(type, name) {
   switch (type) {
     case "skill":
-      return { src: path.join(CLAUDE, "skills", name), destDir: `skills/${name}`, dir: true };
+      return { src: pick(path.join("skills", name)), destDir: `skills/${name}`, dir: true };
     case "subagent":
-      return { src: path.join(CLAUDE, "agents", `${name}.md`), destDir: `agents/${name}.md`, dir: false };
+      return { src: pick(path.join("agents", `${name}.md`)), destDir: `agents/${name}.md`, dir: false };
     case "command":
-      return { src: path.join(CLAUDE, "commands", `${name}.md`), destDir: `commands/${name}.md`, dir: false };
+      return { src: pick(path.join("commands", `${name}.md`)), destDir: `commands/${name}.md`, dir: false };
     case "workflow":
       // A compiled workflow is a command file (+ optional agents/), authored by
       // the WorkflowBuilder (M5.9). MVP publishes the command file under workflows/.
-      return { src: path.join(CLAUDE, "commands", `${name}.md`), destDir: `workflows/${name}.md`, dir: false };
+      return { src: pick(path.join("commands", `${name}.md`)), destDir: `workflows/${name}.md`, dir: false };
     default:
       die("unreachable type");
   }

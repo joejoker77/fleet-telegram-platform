@@ -1,0 +1,232 @@
+#!/usr/bin/env python3
+"""share-skill — share one of your skills with colleagues, or take theirs.
+
+    share-skill list                     what is on offer (yours + shared with the firm)
+    share-skill publish <name> [opts]    offer one of your own skills
+    share-skill get <name|version-id>    install a colleague's skill for yourself
+
+Options for publish:
+    --version X.Y.Z   default 1.0.0; use a new number to publish a change
+    --public          offer it to everyone (default: only you can see it listed)
+    --note "..."      one line so colleagues know what it does
+
+Nothing here is instant-and-silent. Every publish and every install is scanned first,
+and unless you are an admin it also waits for an approval — so the answer may be
+"pending", which is not a failure.
+
+The bot reads and relays this output; it is meant to be read by a person.
+"""
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+# The control plane is not reachable from a pod on the host's loopback, so it is
+# exposed on the container bridge gateway with only /registry/ proxied
+# (control-plane/install/m8.2-chat-registry.sh). Overridable for a testbed.
+BASE = os.environ.get("REGISTRY_URL", "http://10.89.2.1:10257")
+TOKEN_FILE = os.path.expanduser("~/.claude/registry.token")
+SKILL_DIRS = [
+    os.path.expanduser("~/work/.claude/skills"),  # where every skill on this host lives
+    os.path.expanduser("~/.claude/skills"),
+]
+
+
+def token() -> str:
+    try:
+        with open(TOKEN_FILE) as f:
+            return f.read().strip()
+    except OSError:
+        sys.exit(
+            "No sharing key found for this account.\n"
+            f"  expected: {TOKEN_FILE}\n"
+            "  Tell an administrator: the m8.2 installer mints it."
+        )
+
+
+def call(method: str, path: str, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(
+        BASE + path,
+        data=data,
+        method=method,
+        headers={
+            "Authorization": "Bearer " + token(),
+            **({"Content-Type": "application/json"} if data else {}),
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=180) as r:
+            return r.status, json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        raw = e.read(4000).decode(errors="replace")
+        try:
+            return e.code, json.loads(raw)
+        except ValueError:
+            return e.code, {"error": raw[:500]}
+    except Exception as e:  # network/DNS/timeout
+        return 0, {"error": str(e)}
+
+
+def local_skills() -> dict:
+    found = {}
+    for d in SKILL_DIRS:
+        if not os.path.isdir(d):
+            continue
+        for n in sorted(os.listdir(d)):
+            p = os.path.join(d, n)
+            if os.path.isdir(p):
+                found.setdefault(n, p)
+    return found
+
+
+def catalogue():
+    st, d = call("GET", "/registry/items?type=skill")
+    if st != 200:
+        sys.exit(f"could not read the catalogue ({st}): {d.get('error')}")
+    # rows: id, type, name, description, visibility, ownerUsername, mine — no versions
+    return d.get("items") or []
+
+
+def cmd_list(_args):
+    items = catalogue()
+    if not items:
+        print("Nothing has been shared yet — the catalogue is empty.")
+    else:
+        print(f"{len(items)} shared skill(s):\n")
+        for a in items:
+            who = "you" if a.get("mine") else (a.get("ownerUsername") or "?")
+            print(f"  {a.get('name'):<28} by {who}")
+            if a.get("description"):
+                print(f"      {a['description'][:120]}")
+            if not a.get("mine"):
+                print(f"      install with:  share-skill get {a.get('name')}")
+    mine = local_skills()
+    if mine:
+        print(f"\nYour own skills on this machine ({len(mine)}):")
+        print("  " + ", ".join(sorted(mine)))
+        print("  offer one with:  share-skill publish <name>")
+
+
+def cmd_publish(args):
+    mine = local_skills()
+    if args.name not in mine:
+        print(f"You have no skill called '{args.name}'.")
+        if mine:
+            print("You have: " + ", ".join(sorted(mine)))
+        sys.exit(1)
+    body = {
+        "type": "skill",
+        "name": args.name,
+        "version": args.version,
+        "visibility": "public" if args.public else "private",
+    }
+    if args.note:
+        body["description"] = args.note
+    st, d = call("POST", "/registry/publish", body)
+    if st == 200 and d.get("published"):
+        # "published" only means the version row exists. A colleague can import it once
+        # it is on the default branch, so merged vs not is the difference between done
+        # and half-done, and it gets said out loud rather than assumed.
+        if d.get("merged"):
+            print(f"Shared: {args.name} v{args.version} — colleagues can install it now.")
+        else:
+            print(
+                f"{args.name} v{args.version} is recorded but NOT yet on the shared branch"
+                f" ({d.get('mergeState') or 'merge deferred'}).\n"
+                "  Colleagues cannot install it until it lands."
+            )
+            if d.get("prUrl"):
+                print(f"  waiting here: {d['prUrl']}")
+        return
+    if st == 200 and d.get("approvalId"):
+        # Non-admins get an approval card instead of an immediate publish (design §3).
+        mins = round((d.get("ttlSeconds") or 600) / 60)
+        print(
+            f"{args.name} v{args.version} passed the safety check and is waiting for approval.\n"
+            f"  Nothing is shared until it is approved — the request expires in about {mins} min.\n"
+            f"  approval: {d['approvalId']}"
+        )
+        return
+    if st == 422:
+        print(f"Refused by the safety check: {d.get('error')}")
+        if d.get("severity"):
+            print(f"  severity: {d['severity']} (decided by {d.get('decidedBy')})")
+        for f in (d.get("findings") or [])[:5]:
+            print(f"  - {json.dumps(f)[:160]}")
+        sys.exit(2)
+    if st == 404:
+        print(f"The server could not find the skill files: {d.get('error')}")
+        print(f"  yours are at: {mine[args.name]}")
+        sys.exit(3)
+    print(f"Publish failed ({st}): {d.get('error')}")
+    if st in (409, 400):
+        print("  If this version already exists, publish a new number: --version 1.0.1")
+    sys.exit(4)
+
+
+def cmd_get(args):
+    ref, label = args.ref, args.ref
+    # The catalogue carries no version ids, so a name has to be resolved in two hops:
+    # name → artifact id → newest version id.
+    if not ref.startswith("av_"):
+        hits = [a for a in catalogue() if a.get("name") == ref]
+        if not hits:
+            sys.exit(f"'{ref}' is not in the catalogue. Run: share-skill list")
+        art_id = hits[0].get("id")
+        st, d = call("GET", f"/registry/items/{art_id}")
+        if st != 200:
+            sys.exit(f"could not read '{ref}' ({st}): {d.get('error')}")
+        vers = d.get("versions") or []  # newest first (ordered by publishedAt desc)
+        if not vers:
+            sys.exit(f"'{ref}' has no published version yet.")
+        ref = vers[0].get("id")
+        label = f"{args.ref} v{vers[0].get('version')}"
+    st, d = call("POST", "/registry/import", {"artifactVersionId": ref})
+    if st == 200 and d.get("installed"):
+        print(
+            f"Installed {label} ({d.get('files')} file(s)).\n"
+            "  It becomes available on your next message — send anything to pick it up."
+        )
+        return
+    if st == 200 and d.get("approvalId"):
+        # Older cp-api build: import parked on an approval card.
+        mins = round((d.get("ttlSeconds") or 600) / 60)
+        print(
+            f"{label} passed the safety check and is waiting for approval.\n"
+            f"  It is not installed until approved — expires in about {mins} min.\n"
+            f"  approval: {d['approvalId']}"
+        )
+        return
+    if st == 422:
+        print(f"Refused by the safety check: {d.get('error')}")
+        sys.exit(2)
+    print(f"Install failed ({st}): {d.get('error')}")
+    sys.exit(4)
+
+
+def main():
+    p = argparse.ArgumentParser(add_help=True, description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("list", help="what is on offer").set_defaults(fn=cmd_list)
+
+    pub = sub.add_parser("publish", help="offer one of your own skills")
+    pub.add_argument("name")
+    pub.add_argument("--version", default="1.0.0")
+    pub.add_argument("--public", action="store_true")
+    pub.add_argument("--note", default=None)
+    pub.set_defaults(fn=cmd_publish)
+
+    get = sub.add_parser("get", help="install a colleague's skill")
+    get.add_argument("ref", help="skill name, or the version id from `list`")
+    get.set_defaults(fn=cmd_get)
+
+    args = p.parse_args()
+    args.fn(args)
+
+
+if __name__ == "__main__":
+    main()

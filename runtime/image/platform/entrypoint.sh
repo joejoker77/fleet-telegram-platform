@@ -643,8 +643,29 @@ rc_start() {
   [ "$now" -lt "$RC_RETRY_AFTER" ] && return 0
   RC_RETRY_AFTER=$((now + 60))
   echo "[rc] starting remote-control listener as $REMOTE_CONTROL_NAME"
+  # The listener is started WITHOUT the Telegram env, and that is the whole fix for the
+  # App-session hijack (bot silent for hours while its poller looked alive).
+  #
+  # The Telegram poller IS the plugin's MCP server, and the plugin is enabled globally in
+  # settings.json — so its server starts in EVERY session, including the ones the Claude
+  # App spawns underneath this listener. server.ts then SIGTERMs whoever holds bot.pid and
+  # takes the single getUpdates slot; but an App session has no --channels, so inbound
+  # messages are handed to nobody. Verified against plugin 0.0.7:
+  #   * STATE_DIR falls back to $CLAUDE_CONFIG_DIR/channels/telegram — note NO -$USER
+  #     suffix, a path that exists for no tenant — so unsetting TELEGRAM_STATE_DIR makes
+  #     the .env load fail and TOKEN stay undefined;
+  #   * the `if (!TOKEN) process.exit(1)` then fires BEFORE bot.pid is read or anyone is
+  #     killed, and before mkdirSync would create that fallback dir.
+  # BOTH vars must go: a real env var wins over the .env file, so leaving the token set
+  # would let an App session poll the same token from a bogus state dir — 409s and stolen
+  # updates, which is worse than the hijack because bot.pid still looks correct.
+  # Cost, by design: App sessions get no Telegram reply tools. That is the App/Telegram
+  # split we want. Do NOT "fix" that by handing the env back.
+  # Prevention, not repair: a watchdog that reclaims the slot afterwards still leaves the
+  # bot mute in between, and its owner-classifier cannot tell a nested claude inside the
+  # bot's own shell from the boot session.
   tmux -f "$TMUX_CFG" new-session -d -s "$RC_SESSION" -x 200 -y 60 -c "$HOME/work" \
-    "exec /usr/bin/claude rc --name $REMOTE_CONTROL_NAME" 2>/dev/null || {
+    "exec env -u TELEGRAM_BOT_TOKEN -u TELEGRAM_STATE_DIR /usr/bin/claude rc --name $REMOTE_CONTROL_NAME" 2>/dev/null || {
       echo "[rc] could not start the listener"; return 1; }
   # It asks "Enable Remote Control? (y/n)" and waits on a keypress — there is no flag for
   # this, which is why it needs a tty and why a plain podman exec dies here.

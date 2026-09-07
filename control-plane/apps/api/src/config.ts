@@ -60,6 +60,11 @@ export interface Config {
   // jwtSecret/botToken, NOT an OneCLI outbound-injection secret). Empty = the
   // /deploy/webhook/github route is dormant (503) until the operator wires it.
   githubWebhookSecret: string;
+  // READ-ONLY PAT for the marketplace repo. Import fetches file contents from
+  // GitHub and the design assumed a PUBLIC repo (no auth); the firm's is private, so
+  // without this every import 404s. Deliberately a SECOND, read-only token: the
+  // write-capable PAT stays in the pods, so cp-api still cannot push to the repo.
+  githubReadToken: string;
 }
 
 export function loadConfig(): Config {
@@ -80,5 +85,6 @@ export function loadConfig(): Config {
     ideUrl: (process.env.IDE_URL ?? "https://ide.ai-assistant.gg").replace(/\/$/, ""),
     registryRepo: process.env.REGISTRY_REPO ?? "monacodigital/ClaudeCodeTeam",
     githubWebhookSecret: fileOrEnvOptional("GITHUB_WEBHOOK_SECRET"),
+    githubReadToken: fileOrEnvOptional("GITHUB_READ_TOKEN"),
   };
 }

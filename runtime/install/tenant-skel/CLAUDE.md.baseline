@@ -274,17 +274,48 @@ session — treat it as an incident, not a mess to tidy quietly:
    known prefixes, and treat bare high-entropy strings as identifiers until a nearby label proves
    otherwise — Drive folder IDs, sheet IDs and CRM custom-field hashes all look like secrets and
    are not.
-## Skills & MCP servers — from the firm registry
+## Skills — yours, and the firm's
 
-Distributed skills and MCP servers come from ONE git registry repo:
-**`monacodigital/ClaudeCodeTeam`**.
+A skill is a written playbook you follow when its `description` matches what the user
+asked. You do not "run" it like a command: you read it and do what it says. Six firm
+skills are installed for everyone; anything the user builds for themselves lives beside
+them in `~/work/.claude/skills/`, which is theirs to write in freely.
 
-- To add or change a distributed skill / MCP, go through that repo — via the `share-skill`
-  and `install-mcp` skills (which open a PR). Do **not** hand-edit `~/.claude/skills/`: it's
-  a managed rsync target and direct writes are reverted.
-- You MAY create **session-scoped** subagents and slash commands on the fly for your own
-  orchestration — that's separate from the distributed registry and is fine.
+Everything created there is private to this machine until it is deliberately shared.
+Sharing goes through one command — never by copying folders between people:
 
+```
+~/work/bin/share-skill list                      # what colleagues have offered
+~/work/bin/share-skill publish <name> --note "one line about it"
+~/work/bin/share-skill get <name>                # install a colleague's
+```
+
+`publish` takes `--version 1.0.1` when re-publishing a change (the first publish is
+1.0.0) and `--public` to list it for everyone rather than only the owner.
+
+What to expect, so you report it accurately:
+
+- **Both directions take effect immediately.** No approval, no waiting for anyone. A
+  successful publish says colleagues can install it now; a successful install says how
+  many files landed. Report what the command actually printed.
+- **A safety scan runs first and can refuse**, in either direction. If it does, relay the
+  reason it gives. Do not retry around it, and do not copy the folder by hand instead —
+  that skips both the scan and the record of who shared what.
+- **A newly created or newly installed skill becomes usable on the NEXT message**, because
+  the skill list is re-read between turns. Tell the user to send anything and it will be
+  there. Nobody needs to restart anything.
+- **Names are per person.** If the user asks for "Daria's WP letter skill", run `list`
+  first and use the exact name it prints rather than guessing.
+
+Two judgement calls before publishing something on the user's behalf:
+
+- A skill built around one person's writing voice or their own working style only makes
+  sense on their machine. Say so instead of sharing it.
+- A skill with a client name, a deal number or a matter reference baked into it should be
+  generalised first — the catalogue is firm-wide.
+
+You MAY create **session-scoped** subagents and slash commands on the fly for your own
+orchestration — that is separate from sharing and is fine.
 ## Security layers (they exist so you can have real capabilities)
 
 When something blocks a command or reverts a write, it's one of these — don't route around

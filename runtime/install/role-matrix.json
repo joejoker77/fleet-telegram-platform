@@ -95,7 +95,8 @@
       "roles": {
         "admin": "rw",
         "manager": "rw",
-        "basic": "rw"
+        "basic": "rw",
+        "finance": "rw"
       }
     },
     "n8n": {

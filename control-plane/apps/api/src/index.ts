@@ -101,6 +101,7 @@ const registryDeps: RegistryDeps = {
   auditSocket: config.auditSocket,
   approvals: approvalsDeps,
   repo: config.registryRepo,
+  githubReadToken: config.githubReadToken,
 };
 const publishApply = makePublishApply(registryDeps);
 const importApply = makeImportApply(registryDeps);

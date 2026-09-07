@@ -19,6 +19,21 @@ GID_N="$(id -g "$U")"
 HOME_DIR="/home/$U"
 IMAGE="localhost/claude-user:latest"
 
+# Per-tenant runtime image pin (host-side file, no image rebuild). A tag in
+# /etc/claudeapp/image-pin/<user> — e.g. "cc2.1.259" — lets ONE tenant canary a new
+# Claude Code build while everyone else stays on :latest. Missing file, empty value or
+# a tag whose image is gone all fall back to :latest, so deleting the file is the rollback.
+PIN_FILE="/etc/claudeapp/image-pin/$U"
+if [ -f "$PIN_FILE" ]; then
+  PIN_TAG="$(tr -d '[:space:]' < "$PIN_FILE" || true)"
+  if [ -n "$PIN_TAG" ] && podman image exists "localhost/claude-user:$PIN_TAG"; then
+    IMAGE="localhost/claude-user:$PIN_TAG"
+    echo "image pin: $U -> $IMAGE"
+  else
+    echo "image pin '$PIN_TAG' for $U unusable; using :latest" >&2
+  fi
+fi
+
 podman image exists "$IMAGE" || { echo "image $IMAGE missing (run m2.1-build-image.sh)"; exit 1; }
 [ -d "$HOME_DIR/.claude" ] || { echo "$HOME_DIR/.claude missing"; exit 1; }
 [ -d "$HOME_DIR/work" ] || { echo "$HOME_DIR/work missing"; exit 1; }

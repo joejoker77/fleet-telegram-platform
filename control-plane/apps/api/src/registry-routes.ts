@@ -19,11 +19,11 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import type { Redis } from "ioredis";
 import fs from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { and, eq, or, desc } from "drizzle-orm";
 import { getDb, schema } from "@fleet/db";
 import { scanArtifact, httpJudgeClient, type ScanInput, type ScanResult } from "@fleet/scanners";
-import { requireAuth, AuthError } from "./authz.js";
+import { requireAuth, AuthError, type AuthCtx } from "./authz.js";
 import { createApproval, type ApprovalsDeps } from "./approvals.js";
 import { sendAudit } from "./audit.js";
 
@@ -48,29 +48,52 @@ export interface RegistryDeps {
   auditSocket: string;
   approvals: ApprovalsDeps;
   repo: string; // marketplace store, e.g. "joejoker77/claude-bot-skills"
+  // Read-only PAT for that repo. Empty string = not configured, which is only
+  // survivable while the repo is public; a private repo 404s without it.
+  githubReadToken?: string;
 }
 
 // ── source/destination layout (mirrors the pod helper) ──────────────────────
 function tenantHome(deps: RegistryDeps, os: string): string {
   return path.join(deps.homeRoot, os);
 }
-function artifactSourcePath(deps: RegistryDeps, os: string, type: ArtType, name: string): string {
-  const c = path.join(tenantHome(deps, os), ".claude");
+// A tenant has TWO .claude trees: the user-scoped ~/.claude and the project-scoped
+// ~/work/.claude, and Claude Code reads artifacts from both. On the firm host every
+// real artifact lives in the PROJECT one — audited 2026-09-04: all 30 tenants have
+// ~/work/.claude/skills populated (6 firm + 24 private skills) and ~/.claude/skills
+// does not exist for a single one of them. Resolving only ~/.claude, as this did,
+// means publish fails "source not found" for every skill anybody actually has.
+// Tuple, not string[], so [0] is a string under noUncheckedIndexedAccess.
+function claudeDirs(deps: RegistryDeps, os: string): [project: string, user: string] {
+  const home = tenantHome(deps, os);
+  return [path.join(home, "work", ".claude"), path.join(home, ".claude")];
+}
+function relForType(type: ArtType, name: string): string {
   switch (type) {
     case "skill":
-      return path.join(c, "skills", name);
+      return path.join("skills", name);
     case "subagent":
-      return path.join(c, "agents", `${name}.md`);
+      return path.join("agents", `${name}.md`);
     case "command":
     case "workflow":
-      return path.join(c, "commands", `${name}.md`);
+      return path.join("commands", `${name}.md`);
   }
 }
-// where an imported artifact is written in the importer's sandbox
+function artifactSourcePath(deps: RegistryDeps, os: string, type: ArtType, name: string): string {
+  const rel = relForType(type, name);
+  const [project, user] = claudeDirs(deps, os);
+  const candidates: [string, string] = [path.join(project, rel), path.join(user, rel)];
+  // Prefer whichever one exists; fall back to the project tree so the error message
+  // names the path a tenant would actually look at.
+  return candidates.find((p) => fs.existsSync(p)) ?? candidates[0];
+}
+// where an imported artifact is written in the importer's sandbox — always the
+// project tree, so an imported skill lands beside the tenant's own ones instead of
+// in a directory none of them has.
 function artifactInstallTargets(deps: RegistryDeps, os: string, type: ArtType, name: string): {
   baseDir: string;
 } {
-  const c = path.join(tenantHome(deps, os), ".claude");
+  const c = claudeDirs(deps, os)[0];
   switch (type) {
     case "skill":
       return { baseDir: path.join(c, "skills", name) };
@@ -106,7 +129,7 @@ async function scanArtifactSource(deps: RegistryDeps, type: ArtType, src: string
 async function dispatchPublishToPod(
   deps: RegistryDeps,
   args: { os: string; type: ArtType; name: string; version: string; source: string },
-): Promise<{ ok: boolean; gitRef?: string; commitSha?: string; prNumber?: number; prUrl?: string; error?: string }> {
+): Promise<{ ok: boolean; gitRef?: string; commitSha?: string; prNumber?: number; prUrl?: string; merged?: boolean; mergeState?: string; error?: string }> {
   const runDir = path.join(tenantHome(deps, args.os), ".claude", "run");
   const reqFile = path.join(runDir, "registry-task.json");
   const resFile = path.join(runDir, "registry-task.result.json");
@@ -124,6 +147,15 @@ async function dispatchPublishToPod(
     repo: deps.repo,
     ownerUsername: args.os,
     source: args.source,
+    // Land it, do not park it. Everything upstream of here has already decided the
+    // artefact may be shared: the scanners passed (fail-closed) and a non-admin's
+    // publish carried an approval. Leaving a PR for a human to merge would re-ask a
+    // question that was just answered, and until someone clicks, the colleague who
+    // asked for the skill still cannot import it — the version row exists but the ref
+    // is not on the default branch. The helper squash-merges via the API and reports
+    // mergeState; if branch protection refuses, it degrades to merge-deferred rather
+    // than failing the publish, so the PR is still there as a fallback.
+    merge: true,
   };
   fs.writeFileSync(reqFile, JSON.stringify(job) + "\n", { mode: 0o644 });
   // keep the file tenant-owned so the pod supervisor (tenant uid) can rm it
@@ -148,6 +180,11 @@ async function dispatchPublishToPod(
         commitSha: parsed.commitSha as string,
         prNumber: parsed.prNumber as number,
         prUrl: parsed.prUrl as string,
+        // Whether it actually landed on the default branch. A colleague can only
+        // import a merged version, so this is the difference between "shared" and
+        // "waiting on a human" — it has to reach the caller, not just the log.
+        merged: parsed.merged === true,
+        mergeState: (parsed.mergeState as string) || undefined,
       };
     }
     return { ok: false, error: (parsed.error as string) || "publish failed" };
@@ -229,7 +266,7 @@ type PublishPayload = {
   scan: { verdict: string; severity: string | null; decidedBy: string; cacheHit: boolean };
 };
 
-async function runPublish(deps: RegistryDeps, p: PublishPayload): Promise<{ ok: boolean; error?: string; versionId?: string; prUrl?: string; gitRef?: string }> {
+async function runPublish(deps: RegistryDeps, p: PublishPayload): Promise<{ ok: boolean; error?: string; versionId?: string; prUrl?: string; gitRef?: string; merged?: boolean; mergeState?: string }> {
   const disp = await dispatchPublishToPod(deps, {
     os: p.osUsername,
     type: p.type,
@@ -275,16 +312,36 @@ async function runPublish(deps: RegistryDeps, p: PublishPayload): Promise<{ ok: 
     actor: `miniapp:${p.osUsername}`,
     payload: { type: p.type, name: p.name, version: p.version, gitRef: disp.gitRef, prUrl: disp.prUrl, versionId: rec.versionId },
   }).catch(() => {});
-  return { ok: true, versionId: rec.versionId, prUrl: disp.prUrl, gitRef: disp.gitRef };
+  return { ok: true, versionId: rec.versionId, prUrl: disp.prUrl, gitRef: disp.gitRef, merged: disp.merged, mergeState: disp.mergeState };
 }
 
-// ── GitHub public READ (import fetch — no auth, public repo) ──────────────────
+// ── GitHub READ (import fetch) ───────────────────────────────────────────────
+// Originally written for a PUBLIC marketplace repo and sent no credential at all. The
+// firm's repo is private, where GitHub answers 404 — indistinguishable from a missing
+// file — so an unauthenticated import failed with a message that pointed at the wrong
+// thing. A read-only token is attached when configured. It is a SEPARATE token from the
+// pods' write PAT on purpose: cp-api can read the marketplace and still cannot push to
+// it, which keeps the git-write capability where the egress proxy injects it.
 type FetchedFile = { relPath: string; content: string };
-async function ghGetJson(repo: string, apiPath: string): Promise<unknown> {
-  const res = await fetch(`https://api.github.com/repos/${repo}/${apiPath}`, {
-    headers: { Accept: "application/vnd.github+json", "User-Agent": "fleet-registry-import" },
-  });
-  if (!res.ok) throw new Error(`GitHub ${res.status} on ${apiPath}`);
+async function ghGetJson(repo: string, apiPath: string, readToken?: string): Promise<unknown> {
+  const headers: Record<string, string> = {
+    Accept: "application/vnd.github+json",
+    "User-Agent": "fleet-registry-import",
+    "X-GitHub-Api-Version": "2022-11-28",
+  };
+  if (readToken) headers.Authorization = `Bearer ${readToken}`;
+  const res = await fetch(`https://api.github.com/repos/${repo}/${apiPath}`, { headers });
+  if (!res.ok) {
+    // 404 on a private repo without a credential is the common case, and saying
+    // "not found" would send someone hunting for a missing file.
+    if ((res.status === 404 || res.status === 403) && !readToken) {
+      throw new Error(
+        `GitHub ${res.status} on ${apiPath} and no read token is configured — ` +
+        `a private marketplace repo cannot be read anonymously (set GITHUB_READ_TOKEN)`,
+      );
+    }
+    throw new Error(`GitHub ${res.status} on ${apiPath}`);
+  }
   return res.json();
 }
 // Recursively fetch the artifact's files at a pinned ref. destBase is the repo
@@ -301,11 +358,11 @@ function repoDestFor(type: ArtType, name: string): { repoPath: string; isDir: bo
       return { repoPath: `workflows/${name}.md`, isDir: false };
   }
 }
-async function fetchArtifactFiles(repo: string, ref: string, type: ArtType, name: string): Promise<FetchedFile[]> {
+async function fetchArtifactFiles(repo: string, ref: string, type: ArtType, name: string, readToken?: string): Promise<FetchedFile[]> {
   const { repoPath, isDir } = repoDestFor(type, name);
   const out: FetchedFile[] = [];
   const walk = async (p: string, rel: string): Promise<void> => {
-    const node = (await ghGetJson(repo, `contents/${p}?ref=${encodeURIComponent(ref)}`)) as
+    const node = (await ghGetJson(repo, `contents/${p}?ref=${encodeURIComponent(ref)}`, readToken)) as
       | { type: string; content?: string; encoding?: string }
       | Array<{ type: string; name: string; path: string }>;
     if (Array.isArray(node)) {
@@ -331,7 +388,16 @@ function installFiles(deps: RegistryDeps, os: string, type: ArtType, name: strin
   for (const f of files) {
     // skill: files are relative inside skills/<name>/; others: single file under baseDir
     const dest = type === "skill" ? path.join(baseDir, f.relPath) : path.join(baseDir, f.relPath);
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    const dir = path.dirname(dest);
+    fs.mkdirSync(dir, { recursive: true });
+    // cp-api runs as root, so a freshly created directory is root-owned. The files were
+    // already chowned but the DIRECTORY was not, which left the tenant unable to remove
+    // or replace an imported skill in their own sandbox (observed on the first real
+    // import: SKILL.md helen-alty:helen-alty inside a root:root skills/<name>/).
+    // Walk back up to the tenant's .claude and chown everything we created.
+    for (let d = dir; d.startsWith(tenantHome(deps, os)) && d !== tenantHome(deps, os); d = path.dirname(d)) {
+      chownToTenant(deps, os, d);
+    }
     fs.writeFileSync(dest, f.content, { mode: 0o644 });
     chownToTenant(deps, os, dest);
     written.push(dest);
@@ -341,10 +407,49 @@ function installFiles(deps: RegistryDeps, os: string, type: ArtType, name: strin
 
 // ── route registration ───────────────────────────────────────────────────────
 export function registerRegistryRoutes(app: FastifyInstance, deps: RegistryDeps): void {
-  const authed = async (req: FastifyRequest, reply: FastifyReply) => {
+  // Two ways in, both resolving to the same AuthCtx:
+  //   * a Mini App session JWT — the browser path;
+  //   * a per-tenant registry token — the CHAT path. The tenants here live in Telegram
+  //     and there is no web front end on the firm host (nginx exposes only the Composio
+  //     callback and the deploy webhook), so without this there is no way for a person
+  //     to reach publish/import at all.
+  // Deliberately the same shape as the dbread gateway (apps/dbread-gateway/src/index.ts):
+  // the map on disk holds only sha256(token) → os username, so it is not itself a
+  // credential; it is re-read per request, so deleting a line revokes immediately; and an
+  // unreadable/missing map authorises nobody (fail-closed).
+  // NOTE this widens auth for /registry/* ONLY, and the token still buys exactly what a
+  // session buys — scan and approval still gate every publish and import.
+  const tokensFile = process.env.REGISTRY_TOKENS_FILE ?? "/etc/claudeapp/registry/tokens.json";
+  const tenantForToken = async (token: string): Promise<AuthCtx | null> => {
+    let osUsername: string | undefined;
+    try {
+      const digest = createHash("sha256").update(token).digest("hex");
+      const map = JSON.parse(fs.readFileSync(tokensFile, "utf8")) as Record<string, string>;
+      osUsername = map[digest];
+    } catch {
+      return null;
+    }
+    if (!osUsername) return null;
+    const rows = await db
+      .select({ id: schema.users.id, status: schema.users.status, isAdmin: schema.users.isAdmin })
+      .from(schema.users)
+      .where(eq(schema.users.osUsername, osUsername))
+      .limit(1);
+    const u = rows[0];
+    if (!u || u.status === "suspended" || u.status === "deleted") return null;
+    return { userId: u.id, osUsername, isAdmin: u.isAdmin };
+  };
+
+  const authed = async (req: FastifyRequest, reply: FastifyReply): Promise<AuthCtx | null> => {
     try {
       return await requireAuth(req, deps.redis, deps.jwtSecret);
     } catch (e) {
+      const auth = req.headers.authorization ?? "";
+      const raw = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+      if (raw) {
+        const ctx = await tenantForToken(raw);
+        if (ctx) return ctx;
+      }
       const err = e as AuthError;
       reply.code(err.code ?? 401).send({ error: err.message });
       return null;
@@ -451,20 +556,17 @@ export function registerRegistryRoutes(app: FastifyInstance, deps: RegistryDeps)
       scan: { verdict: scan.verdict, severity: scan.severity, decidedBy: scan.decidedBy, cacheHit: scan.cacheHit },
     };
 
-    // admins publish without an approval card; everyone else must confirm (design §3).
-    if (ctx.isAdmin) {
-      const res = await runPublish(deps, payload);
-      if (!res.ok) return reply.code(502).send({ error: res.error });
-      return reply.send({ published: true, versionId: res.versionId, prUrl: res.prUrl, gitRef: res.gitRef, verdict: scan.verdict });
-    }
-    const approval = await createApproval(deps.approvals, {
-      userId: ctx.userId,
-      kind: REGISTRY_PUBLISH_KIND,
-      title: `Publish ${type} "${name}" v${version} (${visibility})`,
-      payload,
-      ttlSeconds: APPROVAL_TTL,
-    });
-    return reply.send({ approvalId: approval.id, ttlSeconds: approval.ttlSeconds, verdict: scan.verdict });
+    // Publish for everyone, not just admins. The design gated non-admins behind an
+    // approval card, and on this deployment that card is unanswerable — it notifies with
+    // a button into a Mini App that does not exist here — so 25 of the 30 tenants could
+    // not share a skill at all, which is the whole point of the feature. Same call as the
+    // import gate (Vitaliy, 2026-09-04): the scanners are the gate, they ran fail-closed
+    // above, and re-asking the author who just typed "share this" is a click, not a
+    // decision. Ownership is not in question either — you can only publish an artefact
+    // that is already in your own sandbox.
+    const res = await runPublish(deps, payload);
+    if (!res.ok) return reply.code(502).send({ error: res.error });
+    return reply.send({ published: true, versionId: res.versionId, prUrl: res.prUrl, gitRef: res.gitRef, merged: res.merged, mergeState: res.mergeState, verdict: scan.verdict });
   });
 
   // import
@@ -502,7 +604,7 @@ export function registerRegistryRoutes(app: FastifyInstance, deps: RegistryDeps)
     // pull the pinned version from the public repo, re-scan under current rules
     let files: FetchedFile[];
     try {
-      files = await fetchArtifactFiles(deps.repo, ver.gitRef, type, ver.name!);
+      files = await fetchArtifactFiles(deps.repo, ver.gitRef, type, ver.name!, deps.githubReadToken);
     } catch (e) {
       return reply.code(502).send({ error: `fetch from marketplace failed: ${(e as Error).message}` });
     }
@@ -522,23 +624,33 @@ export function registerRegistryRoutes(app: FastifyInstance, deps: RegistryDeps)
       return reply.code(422).send({ error: "the import did not pass the re-scan (fail-closed)", verdict: scan.verdict, severity: scan.severity });
     }
 
-    // import ALWAYS requires an approval (crosses the trust boundary), incl. admins
-    const approval = await createApproval(deps.approvals, {
+    // Install straight away. The approval card this used to raise was unanswerable on a
+    // deployment with no Mini App — it notified the tenant with a button leading nowhere,
+    // so every import parked forever. And on Vitaliy's call (2026-09-04) it was not
+    // earning its keep either: the scanners above are the gate, they run fail-closed on
+    // the pinned files under current rules, and re-asking the person who just typed
+    // "install this" adds a click, not a decision.
+    // What still stops a bad import: visibility/ownership checks, published-status check,
+    // the fail-closed re-scan, and the audit line below.
+    const written = installFiles(deps, ctx.osUsername, type, ver.name!, files);
+    await db
+      .insert(schema.installs)
+      .values({ userId: ctx.userId, artifactVersionId: ver.vId, pinnedVersion: ver.version! })
+      .onConflictDoNothing();
+    await sendAudit(deps.auditSocket, {
       userId: ctx.userId,
-      kind: REGISTRY_IMPORT_KIND,
-      title: `Import ${type} "${ver.name}" v${ver.version}`,
-      payload: {
-        osUsername: ctx.osUsername,
-        ownerUserId: ctx.userId,
-        artifactVersionId: ver.vId,
-        type,
-        name: ver.name,
-        version: ver.version,
-        gitRef: ver.gitRef,
-      },
-      ttlSeconds: APPROVAL_TTL,
+      kind: "registry.import",
+      actor: `chat:${ctx.osUsername}`,
+      payload: { artifactVersionId: ver.vId, type, name: ver.name, version: ver.version, files: written.length },
+    }).catch(() => {});
+    return reply.send({
+      installed: true,
+      type,
+      name: ver.name,
+      version: ver.version,
+      files: written.length,
+      verdict: scan.verdict,
     });
-    return reply.send({ approvalId: approval.id, ttlSeconds: approval.ttlSeconds, verdict: scan.verdict });
   });
 
   // unpublish (owner only) — removes the registry rows; does not rewrite git history
@@ -581,7 +693,7 @@ export function makeImportApply(deps: RegistryDeps) {
     }
     let files: FetchedFile[];
     try {
-      files = await fetchArtifactFiles(deps.repo, p.gitRef, p.type, p.name);
+      files = await fetchArtifactFiles(deps.repo, p.gitRef, p.type, p.name, deps.githubReadToken);
     } catch (e) {
       return { ok: false, error: `fetch failed: ${(e as Error).message}` };
     }

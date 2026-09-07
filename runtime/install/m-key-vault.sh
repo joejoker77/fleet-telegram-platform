@@ -10,6 +10,14 @@
 #   sudo bash m-key-vault.sh elevenlabs-api api.elevenlabs.io xi-api-key
 #   sudo bash m-key-vault.sh openrouter-api openrouter.ai Authorization 'Bearer {value}'
 #
+# KV_PATH_PATTERN narrows a secret to part of a host, and is REQUIRED whenever two
+# secrets can share a hostname. On api.github.com a token with no path pattern is
+# injected into every request to that host, so a tenant's MCP GitHub token and the
+# marketplace token would overwrite each other unpredictably — and one tenant's token
+# would ride along on another repo's request. Example:
+#   KV_PATH_PATTERN='/repos/owner/repo*' KV_USER=x KV_VALUE=y \
+#     bash m-key-vault.sh registry-github api.github.com Authorization 'Bearer {value}'
+#
 # Secret name = vitaliy-<secret-suffix>. value-format defaults to '{value}'.
 # Rollback: m-key-vault-rollback.sh <secret-suffix>.
 # Run as root on the host. Pilot: vitaliy only (M1+ rule).
@@ -78,8 +86,15 @@ fi
 [ -n "${SVC_KEY:-}" ] || die "empty key"
 # NOTE: --value on argv is briefly visible in /proc/*/cmdline; ~1s on a root-run
 # one-shot. Same accepted trade-off as m6.1-exa-vault.sh.
+PATH_ARGS=()
+if [ -n "${KV_PATH_PATTERN:-}" ]; then
+  echo "$HELP" | grep -q -- "--path-pattern" \
+    || die "KV_PATH_PATTERN set but this onecli has no --path-pattern flag"
+  PATH_ARGS=(--path-pattern "$KV_PATH_PATTERN")
+  echo "scoping to path pattern: $KV_PATH_PATTERN"
+fi
 "$ONECLI" secrets create --name "$SECRET_NAME" --type generic \
-  --value "$SVC_KEY" --host-pattern "$HOST_PATTERN" \
+  --value "$SVC_KEY" --host-pattern "$HOST_PATTERN" "${PATH_ARGS[@]}" \
   --header-name "$HEADER_NAME" --value-format "$VALUE_FORMAT" >/dev/null
 unset SVC_KEY
 SID="$("$ONECLI" secrets list 2>/dev/null | python3 -c "
