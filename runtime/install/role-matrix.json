@@ -16,7 +16,8 @@
     "  CONNECTED ACCOUNTS stay private -- Composio isolates them by user_id (= the tenant's",
     "  Telegram chat_id). Shared key != shared mailbox; never document it as a shared account.",
     "roles.<role>: rw = full; read = read-only (must be backed by a real read-scoped key/RLS,",
-    "  else the read restriction is not enforced -- see supabase/basic)."
+    "  else the read restriction is not enforced -- see supabase/basic).",
+    "xero: READ ONLY for every role (Tom, 2026-08-21). Not backed by a read-scoped Xero connection yet, so it is enforced by xero-call refusing non-GET and by the rendered guide, not by the credential. The Invoice Bot (n8n WojrCjQAy3Un581s) still writes and must keep doing so; it does not go through xero-call."
   ],
   "role_order": [
     "admin",
@@ -181,8 +182,8 @@
         "identity.xero.com"
       ],
       "roles": {
-        "admin": "rw",
-        "finance": "rw"
+        "admin": "read",
+        "finance": "read"
       }
     },
     "dialpad": {

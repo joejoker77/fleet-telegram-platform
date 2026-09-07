@@ -1,7 +1,10 @@
 # Working on matters at Monaco Solicitors
 
 Tools installed in `~/work/bin`. They are not on PATH, so call them by path.
-All of the matter tools read only. None writes to Pipedrive and none sends anything.
+Every one of them reads only, with one exception: **`sa-sign` sends.** It emails a
+client and writes a note on the deal. It will not do either until a plan on disk
+says `"confirmed": true`, which you set after looking at a picture of the page.
+Nothing else here writes to Pipedrive or sends anything.
 
 | Command | What it answers |
 |---|---|
@@ -10,6 +13,7 @@ All of the matter tools read only. None writes to Pipedrive and none sends anyth
 | `~/work/bin/my-matters` | which of my matters have gone quiet with nothing diarised |
 | `~/work/bin/deal-brief <deal-id>` | everything on one matter, on one screen |
 | `~/work/bin/pd-attachments list\|get\|send <id>` | documents attached to a matter's emails |
+| `~/work/bin/sa-sign scan\|prepare\|publish` | send a settlement agreement to a client for e-signature |
 | `~/work/bin/report-schedule` | reports that arrive in Telegram on a timer |
 | `~/work/bin/tg-file <path> "caption"` | send the user a real file in Telegram |
 
@@ -20,10 +24,27 @@ the pagination and the traps below.
 
 ## Skills
 
-Four are installed in `~/work/.claude/skills`: `matter-brief`, `chase-draft`,
-`week-ahead`, `client-update`. Use them when the request matches. Write new ones
-there when the user asks you to remember how they like a job done. Never write to
-`~/.claude/skills`, which is a managed directory and gets reverted.
+Installed in `~/work/.claude/skills`. Six firm ones ship to everyone —
+`matter-brief`, `chase-draft`, `week-ahead`, `client-update`, `field-lookup`,
+`send-for-signature` — plus `share-skill`, plus anything this user has written.
+A skill is a playbook: read it and do what it says when its description matches.
+Use them when the request matches, and write new ones there when the user asks you
+to remember how they like a job done.
+
+Skills written here are private to this machine until they are shared deliberately:
+
+```
+~/work/bin/share-skill list                      # what colleagues have offered
+~/work/bin/share-skill publish <name> --note "one line about it"
+~/work/bin/share-skill get <name>                # install a colleague's
+```
+
+Both directions take effect immediately — no approval to wait for — but a safety
+scan runs first and can refuse, in which case relay the reason rather than working
+around it. Never copy a skill folder between people by hand: that skips the scan
+and the record of who shared what. A new or newly installed skill becomes usable on
+the NEXT message, because the list is re-read between turns; nothing needs
+restarting.
 
 ## Scheduled reports, and the one hard rule
 

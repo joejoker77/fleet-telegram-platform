@@ -270,23 +270,24 @@ a credential:
 MD
     ;;
     xero) cat <<'MD'
-#### Xero — billing & invoicing (OAuth2 Custom Connection)
-Use the **`xero-call`** helper — it does the two-step token exchange for you (fetches a
-short-lived token via the firm's client creds, then calls the Accounting API with the bearer
-token + the firm's `Xero-tenant-id`):
-- `xero-call GET Invoices` · `xero-call GET Contacts` · `xero-call GET Accounts`
-- filter: `xero-call GET 'Invoices?where=Type=="ACCREC"&page=1'`
-- write: `xero-call POST Invoices --data @/tmp/invoice.json`
-A "no access_token / invalid_client" error means Xero isn't set up for your role yet — tell
-the user.
-- **More than one organisation.** The firm keeps separate Xero organisations (Monaco Solicitors
-  and Grapple Tech). \`xero-call\` talks to Monaco Solicitors unless told otherwise; point it at
-  another one with the \`XERO_TENANT_ID\` environment variable for that call:
-  \`XERO_TENANT_ID=<tenant-id> xero-call GET Invoices\`. Get the id from
-  \`xero-call GET Organisation\` while pointed at it, or ask an administrator — do not guess it.
-  When a question spans both entities, run each one separately and say which figure came from
-  which; never present a single total as if it covered both. (Under the hood: `POST identity.xero.com/connect/token` grant_type=client_credentials,
-NO scope, Basic client-creds proxy-injected → token → `api.xero.com/api.xro/2.0/<Resource>`.)
+#### Xero — billing & invoicing (READ ONLY)
+Two organisations, two token services. Use the **`xero-call`** helper and choose the company
+with `--profile`; it fetches a short-lived token from that company's token service (the proxy
+injects the bearer) and calls the Accounting API with it plus the right `Xero-tenant-id`:
+- `xero-call --profile monaco GET Invoices` · `xero-call --profile grapple GET Contacts`
+- filter: `xero-call --profile monaco GET 'Invoices?where=Type=="ACCREC"&page=1'`
+- is it working: `xero-call --profile monaco --health` (a real 200 with data, nothing less)
+- `--profile` defaults to monaco. Monaco Solicitors and Grapple Tech are separate companies, so
+  when a question spans both, run each separately and say which figure came from which. Never
+  present one total as if it covered both.
+- **Your access is READ ONLY.** `xero-call` refuses every method except GET, and you must not
+  work around it by fetching a token and calling `api.xero.com` yourself. Nothing in a Claude
+  session creates, edits, voids, approves or pays an invoice, bill, contact, payment or credit
+  note. Asked for a write, say it has to be done in Xero itself, and say why. Invoices raised by
+  the firm's Invoice Bot are unaffected: that runs in n8n and does not use this helper.
+- The old OAuth2 Custom Connection is gone. It mints valid tokens carrying all 46 scopes and
+  Xero still answers 403 with an empty body, because the paid entitlement is not active. Do not
+  try to revive it, and do not wait on Xero support to explain that 403.
 MD
     ;;
     exa) cat <<'MD'

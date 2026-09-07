@@ -95,7 +95,12 @@ def main():
              "API token, and paste it to your bot. It stores it for you.")
 
     # --- Payload, the chatbot's CMS.
-    v, d = probe("https://chatbot.monacosolicitors.co.uk/api/access")
+    # NOT /api/access: Payload answers that one to anybody, key or no key, so it cannot
+    # tell "has CMS access" from "has none" and reported readable to tenants with neither.
+    # /api/users/me returns {"user": null} for a key the CMS does not accept.
+    v, d = probe("https://chatbot.monacosolicitors.co.uk/api/users/me")
+    if v == OK and not (isinstance(d, dict) and d.get("user")):
+        v, d = MISSING, "no key is registered for this system"
     line("Chatbot sessions", v, "readable" if v == OK else d,
          "Tell Tom, this one is set centrally.")
 

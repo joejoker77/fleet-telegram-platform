@@ -1,0 +1,1299 @@
+#!/usr/bin/env python3
+"""Send a settlement agreement to a client for signature, through PandaDoc.
+
+A settlement agreement arrives from the other side as a flat PDF. There is
+nothing in it a signing platform can attach a signature to, and no two of
+them lay out the execution page the same way. So this runs in steps with a
+fee earner in the middle:
+
+    sa-sign scan <pdf> --deal <id>       find every signature line, number
+                                         them on a picture of the page, pull
+                                         the client off the deal
+    sa-sign prepare --plan <p> --sign p12#0 --date p12#1
+                                         put the fields on the lines you
+                                         picked, fill in the name and date,
+                                         render the result
+    sa-sign publish --plan <p>           hand the tagged PDF to PandaDoc on a
+                                         link that dies in fifteen minutes,
+                                         and print the create request
+    sa-sign revoke --plan <p>            delete that copy again
+    sa-sign note --plan <p> --doc <id>   record the send on the deal
+
+There is no PandaDoc API key in this. The document is created and sent
+through the Claude integration — `mcp__PandaDoc__documents_create`, then
+`_status_get` until Draft, then `_send`. `publish` exists because that
+integration takes a file by URL and has no upload.
+
+`prepare` refuses to guess: the numbers in `--sign p12#0` come straight off
+the preview image, so you are pointing at a line you have looked at.
+`publish` will not run until the plan says "confirmed": true.
+
+Other commands:
+
+    sa-sign check                        is the handoff working for me
+    sa-sign status <document-id>         which call tells you where it got to
+    sa-sign anchors <pdf> [--page N]     the same lines as text, no pictures
+
+This is the one matter tool that WRITES. It emails a client and it puts a
+note on the deal. Everything else in ~/work/bin only reads.
+"""
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import secrets
+import subprocess
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+PD = "https://monacosolicitors2.pipedrive.com/api"
+SUPA = "https://jdjxlczkggckdnpeluuw.supabase.co/storage/v1"
+# Private, PDF only. The handoff copy lives here for the seconds it takes
+# PandaDoc to fetch it, then `revoke` deletes it.
+BUCKET = "esign-handoff"
+
+# The second handoff route, and the only one a fee earner's pod can use.
+# Lawyers have no write credential for the firm's Supabase and are not going to
+# be given one, so the file goes up to their own Google Drive instead — a firm
+# Workspace account, inside the perimeter — is fetched from there once, and is
+# taken down again. See drive_publish for what that costs and how it is bounded.
+DRIVE_FOLDER = "esign-handoff"
+COMPOSIO_PRESIGN = "https://backend.composio.dev/api/v3/files/upload/request"
+# Drive's *share* link (/file/d/<id>/view) serves an HTML page and PandaDoc
+# rejects it, which is what its documentation is warning about. This one serves
+# the raw bytes with the right length, and PandaDoc accepts it. Verified
+# 31 Aug 2026: signature field parsed, recipient came back `signer` not `CC`.
+DRIVE_FETCH = "https://drive.usercontent.google.com/download?id=%s&export=download"
+USER_FILE = os.path.expanduser("~/work/esign/.composio-user")
+HERE = os.path.dirname(os.path.abspath(__file__))
+ESIGN = os.path.join(os.path.dirname(HERE), "esign", "bin")
+PD_TAG = os.path.join(ESIGN, "pd-tag")
+WORKDIR = os.path.expanduser("~/work/esign/work")
+
+# A deed needs a witness in the room when the signature is made. E-signing one
+# does not satisfy that, and one of the five agreements looked at on 31 Aug was
+# a deed. Catch it before anything is sent rather than after.
+DEED_RE = re.compile(r"executed as a deed|signed as a deed|"
+                     r"in the presence of\b", re.I)
+
+# Hints only. Attribution was tried automatically and got one execution page
+# right out of five: on most of them both parties' blocks sit within a couple
+# of centimetres, so the nearest label is the wrong party as often as the
+# right one. The guess is printed next to each line as a prompt and is never
+# acted on. The fee earner picks.
+ROLE_HINTS = [
+    ("witness", re.compile(r"\bwitness(es|'|’)?\b", re.I)),
+    ("adviser", re.compile(r"\badvis[eo]r\b|certificate of employee|"
+                           r"practising certificate|solicitor of the senior",
+                           re.I)),
+    ("employer", re.compile(r"\bemployer\b|on behalf of|\bdirector\b|"
+                            r"head of (hr|people)\b|\bfor and on behalf\b", re.I)),
+    ("client", re.compile(r"\bemployee\b|\bclient\b", re.I)),
+]
+ROLE_REACH = 95.0
+REF_RE = re.compile(r"^p?(\d+)\s*[#:]\s*(\d+)(?:@([a-zA-Z]+))?$")
+
+
+def http(method, url, body=None, headers=None):
+    h = dict(headers or {})
+    data = None
+    if isinstance(body, bytes):        # a PDF going to storage, sent as-is
+        data = body
+    elif body is not None:
+        data = json.dumps(body).encode()
+        h.setdefault("Content-Type", "application/json")
+    req = urllib.request.Request(url, data=data, headers=h, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=180) as r:
+            return r.status, json.loads(r.read().decode() or "{}")
+    except urllib.error.HTTPError as e:
+        txt = e.read().decode(errors="replace")
+        try:
+            return e.code, json.loads(txt)
+        except ValueError:
+            return e.code, {"raw": txt[:1500]}
+    except Exception as e:                                    # noqa: BLE001
+        return 0, {"error": str(e)}
+
+
+def die(msg, code=1):
+    print(msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def run(cmd):
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode:
+        die((r.stderr or r.stdout or "").strip() or "command failed: %s" % cmd[1])
+    return r.stdout
+
+
+def _pdtag():
+    """pd-tag has no .py suffix, so name its loader explicitly."""
+    import importlib.util
+    from importlib.machinery import SourceFileLoader
+    loader = SourceFileLoader("pdtag", PD_TAG)
+    spec = importlib.util.spec_from_loader("pdtag", loader)
+    m = importlib.util.module_from_spec(spec)
+    loader.exec_module(m)
+    return m
+
+
+# --------------------------------------------------------------- Pipedrive
+
+def deal_party(deal_id):
+    """Client name and email off the deal. Both are on essentially every open
+    SA matter, so nobody should be typing a client's address by hand."""
+    code, res = http("GET", "%s/v2/deals/%s" % (PD, deal_id))
+    if code != 200:
+        die("Pipedrive deal %s: HTTP %s %s" % (deal_id, code, res))
+    d = res.get("data") or {}
+    person_id = d.get("person_id")
+    if isinstance(person_id, dict):
+        person_id = person_id.get("value") or person_id.get("id")
+    out = {"deal_id": int(deal_id), "deal_title": d.get("title"),
+           "owner_id": d.get("owner_id"), "name": None, "email": None}
+    if person_id:
+        pc, pr = http("GET", "%s/v2/persons/%s" % (PD, person_id))
+        p = (pr.get("data") or {}) if pc == 200 else {}
+        out["name"] = p.get("name")
+        for e in (p.get("emails") or p.get("email") or []):
+            v = e.get("value") if isinstance(e, dict) else e
+            if v:
+                out["email"] = v
+                break
+    return out
+
+
+def deal_note(deal_id, body):
+    return http("POST", PD + "/v1/notes",
+                {"deal_id": deal_id, "content": body})[0]
+
+
+# ------------------------------------------------------------------ anchors
+
+def anchor_records(pdf, page=None):
+    """Every candidate signature line, numbered per page exactly as pd-tag
+    numbers them and as the preview draws them, with the nearby text so the
+    line can be recognised without opening the PDF."""
+    m = _pdtag()
+    found = m.anchors(pdf, page)
+
+    doc = m.pymupdf.open(pdf)
+    rows_by_page, deed_pages = {}, []
+    for pi in sorted({a["page"] for a in found}):
+        p = doc[pi - 1]
+        rows = []
+        for block in p.get_text("dict")["blocks"]:
+            for line in block.get("lines", []):
+                t = " ".join(s["text"] for s in line["spans"]).strip()
+                if t:
+                    rows.append((line["bbox"][1], line["bbox"][3], t))
+        rows_by_page[pi] = sorted(rows)
+        if DEED_RE.search(" ".join(t for _, _, t in rows)):
+            deed_pages.append(pi)
+    doc.close()
+
+    per_page = {}
+    for a in found:
+        rows = rows_by_page[a["page"]]
+        a["ord"] = len(per_page.setdefault(a["page"], []))
+        per_page[a["page"]].append(a)
+        a["ref"] = "p%d#%d" % (a["page"], a["ord"])
+        a["context"] = context_for(rows, a)
+        a["role_hint"], a["evidence"] = guess_role(rows, a)
+    return found, deed_pages
+
+
+def context_for(rows, a, reach=70.0):
+    near = [t for (y0, y1, t) in rows
+            if a["y"] - reach <= y0 <= a["y1"] + reach and t != a["text"]]
+    return " ".join(" ".join(near).split())[:200]
+
+
+def guess_role(rows, a):
+    """Nearest labelling line. A hint for the reader, not a decision."""
+    best = None
+    for (y0, y1, text) in rows:
+        gap = max(0.0, y0 - a["y1"], a["y"] - y1)
+        if gap > ROLE_REACH:
+            continue
+        for role, rx in ROLE_HINTS:
+            if rx.search(text):
+                rank = 0 if role in ("witness", "adviser") else 1
+                key = (rank, gap)
+                if best is None or key < best[0]:
+                    best = (key, role, text.strip()[:60], round(gap, 1))
+    if best is None:
+        return None, None
+    return best[1], {"line": best[2], "points_away": best[3]}
+
+
+# ---------------------------------------------------------------------- scan
+
+def slug(s):
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())[:20] or "x"
+
+
+def cmd_scan(a):
+    if not os.path.exists(a.pdf):
+        die("no such file: " + a.pdf)
+
+    party = {"deal_id": None, "deal_title": None, "owner_id": None,
+             "name": a.client_name, "email": a.client_email}
+    if a.deal:
+        party = deal_party(a.deal)
+        if a.client_name:
+            party["name"] = a.client_name
+        if a.client_email:
+            party["email"] = a.client_email
+    if not party.get("email"):
+        die("no client email. Pass --deal so it comes off the matter, or "
+            "--client-email if the deal has no person on it.")
+
+    found, deed_pages = anchor_records(a.pdf, a.page)
+    if not found:
+        die("no signature lines found. Check the execution page: if the "
+            "signature block is a scanned image rather than text, this "
+            "cannot place a field on it.")
+
+    os.makedirs(WORKDIR, exist_ok=True)
+    base = slug(party.get("name")) + "-" + str(party.get("deal_id") or "nodeal")
+    m = _pdtag()
+    previews = []
+    for page in sorted({f["page"] for f in found}):
+        png = os.path.join(WORKDIR, "%s-p%d-lines.png" % (base, page))
+        m.preview(a.pdf, page, png, boxes=True)
+        previews.append({"page": page, "png": png})
+
+    name = (party.get("name") or "").strip()
+    first, _, last = name.partition(" ")
+    plan = {
+        "version": 2,
+        "created": dt.date.today().isoformat(),
+        "deal_id": party.get("deal_id"),
+        "deal_title": party.get("deal_title"),
+        "source_pdf": os.path.abspath(a.pdf),
+        "tagged_pdf": None,
+        "document_name": a.name or ("Settlement agreement - %s"
+                                    % (name or "client")),
+        "client": {"name": name or None, "email": party["email"],
+                   "first_name": first or None, "last_name": last or None},
+        "adviser": ({"email": a.adviser_email, "name": a.adviser_name}
+                    if a.adviser_email else None),
+        "candidates": [{"ref": f["ref"], "page": f["page"], "anchor": f["ord"],
+                        "line": f["text"], "hint": f["role_hint"],
+                        "context": f["context"]} for f in found],
+        "previews": previews,
+        "picks": [],
+        "placements": [],
+        "fields": {},
+        "is_deed": bool(deed_pages),
+        "confirmed": False,
+    }
+    plan_path = a.out or os.path.join(WORKDIR, base + "-plan.json")
+    with open(plan_path, "w") as fh:
+        json.dump(plan, fh, indent=1)
+
+    print("Client   %s <%s>%s" % (name or "?", party["email"],
+                                  ("   deal %s" % party["deal_id"])
+                                  if party.get("deal_id") else ""))
+    print("Plan     %s" % plan_path)
+    for p in previews:
+        print("Page %-3s %s" % (p["page"], p["png"]))
+    print("\nLines found (the numbers are drawn on the pictures above):\n")
+    for f in found:
+        print("  %-8s %-34s  looks like: %-9s %s"
+              % (f["ref"], f["text"][:34], f["role_hint"] or "-",
+                 (f["context"][:52] + "...") if f["context"] else ""))
+    if deed_pages:
+        print("\nStop here. This reads as a deed (page %s). A deed needs a "
+              "witness watching the signature, which an e-signature cannot "
+              "give you, so it has to be signed the ordinary way."
+              % ", ".join(str(p) for p in deed_pages))
+        return 0
+    print("\nOpen the pictures, then say which line is which:\n"
+          "  sa-sign prepare --plan %s --sign pN#K [--date pN#K] [--name pN#K]"
+          % plan_path)
+    return 0
+
+
+# ------------------------------------------------------------------- prepare
+
+def parse_ref(ref, plan, default_role="client"):
+    m = REF_RE.match(ref.strip())
+    if not m:
+        die("cannot read %r. Use the reference printed by scan, like p12#0, "
+            "and add @adviser if that line is for the adviser." % ref)
+    page, ordinal, role = int(m.group(1)), int(m.group(2)), m.group(3)
+    for c in plan["candidates"]:
+        if c["page"] == page and c["anchor"] == ordinal:
+            return dict(c, role=(role or default_role).lower())
+    die("there is no %s. Page %s has %d lines, numbered 0 to %d."
+        % (ref, page, sum(1 for c in plan["candidates"] if c["page"] == page),
+           max([c["anchor"] for c in plan["candidates"]
+                if c["page"] == page] or [-1])))
+
+
+def load_plan(path):
+    with open(path) as fh:
+        return json.load(fh)
+
+
+def cmd_prepare(a):
+    plan = load_plan(a.plan)
+    if plan.get("is_deed") and not a.deed_anyway:
+        die("this document reads as a deed. A deed has to be signed with a "
+            "witness present, so it does not go out for e-signature. If you "
+            "have checked and it is not a deed, add --deed-anyway.")
+
+    picks = []
+    for kind, refs in (("signature", a.sign), ("date", a.date),
+                       ("name", a.name), ("initials", a.initials),
+                       ("text", a.text)):
+        for ref in refs or []:
+            picks.append(dict(parse_ref(ref, plan), kind=kind))
+    if not picks:
+        die("pick at least one line to sign, e.g. --sign p12#0")
+    if not any(p["kind"] == "signature" for p in picks):
+        die("no --sign line. A document with a date and no signature is not "
+            "something to send out.")
+
+    roles = {p["role"] for p in picks}
+    if "adviser" in roles and not plan.get("adviser"):
+        die("a line is marked @adviser but the plan has no adviser. Re-run "
+            "scan with --adviser-email, or drop the @adviser.")
+    for r in roles:
+        if r not in ("client", "adviser"):
+            die("role %r is not one this sends to. Use client or adviser. The "
+                "employer signs their own copy; their signature does not go "
+                "in our envelope." % r)
+
+    client_name = (plan["client"].get("name") or "").strip()
+    today = dt.date.today().isoformat()   # PandaDoc date fields want ISO
+    # Curly braces, and the long type names. Both matter. PandaDoc's own
+    # documentation writes the example with square brackets; the sample PDF it
+    # ships alongside uses braces, and only the braces parse. A square-bracket
+    # tag is uploaded as ordinary text and the document arrives with nothing to
+    # sign, which is exactly what happened on the first live probe.
+    tagtype = {"signature": "signature", "date": "date", "name": "text",
+               "initials": "initials", "text": "text"}
+    placements, fields, counter = [], {}, {}
+    for p in picks:
+        n = counter[p["kind"]] = counter.get(p["kind"], 0) + 1
+        opt = "%s%s%d" % (p["role"], p["kind"][:4], n)
+        width = {"signature": 14, "initials": 6}.get(p["kind"], 10)
+        placements.append({
+            "page": p["page"], "anchor": p["anchor"], "role": p["role"],
+            "kind": p["kind"], "line": p["line"], "ref": p["ref"],
+            "tag": "{%s:%s:%s%s}" % (tagtype[p["kind"]], p["role"], opt,
+                                     "_" * width),
+            "opt": opt,
+        })
+        # Every tag carrying an optId has to appear in `fields`, whether or not
+        # there is anything to put in it. Miss one and creation fails outright:
+        # "No field with optId='clientsig' found in 'fields' object". So each
+        # placement gets an entry here, and a signature simply gets an empty
+        # one — it is the client's to make.
+        #
+        # Pre-fill what the matter already knows. A name and a date are facts
+        # we hold, and asking somebody to retype them is where wrong dates
+        # come from. Dates go in ISO; PandaDoc rejects 31/08/2026.
+        value = ""
+        if p["kind"] == "name":
+            value = (client_name if p["role"] == "client"
+                     else (plan.get("adviser") or {}).get("name")) or ""
+        elif p["kind"] == "date" and not a.no_fill_date:
+            value = today
+        fields[opt] = {"value": value, "role": p["role"]}
+
+    out = os.path.join(WORKDIR, os.path.basename(a.plan)
+                       .replace("-plan.json", "-tagged.pdf"))
+    m = _pdtag()
+    m.stamp(plan["source_pdf"], out,
+            [{"page": p["page"], "anchor": p["anchor"], "tag": p["tag"]}
+             for p in placements], not a.no_cover)
+
+    checks = []
+    for page in sorted({p["page"] for p in placements}):
+        png = out.replace(".pdf", "-p%d.png" % page)
+        m.preview(out, page, png)
+        checks.append({"page": page, "png": png})
+
+    plan.update({"picks": [p["ref"] + "@" + p["role"] for p in picks],
+                 "placements": placements, "fields": fields,
+                 "tagged_pdf": out, "checks": checks, "confirmed": False})
+    with open(a.plan, "w") as fh:
+        json.dump(plan, fh, indent=1)
+
+    print("Tagged   %s" % out)
+    for c in checks:
+        print("Check    page %-3s %s" % (c["page"], c["png"]))
+    print("")
+    for p in placements:
+        pre = fields.get(p["opt"], {}).get("value")
+        print("  %-8s %-9s %-8s %s"
+              % (p["ref"], p["kind"], p["role"],
+                 ("pre-filled: " + pre) if pre else "signer fills this"))
+    recips = ["%s <%s>" % (plan["client"].get("name") or "client",
+                           plan["client"]["email"])]
+    if "adviser" in roles:
+        recips.append("adviser <%s>" % plan["adviser"]["email"])
+    print("\nGoes to: %s" % "; ".join(recips))
+    print("\nLook at the check images. If the fields are on the right lines,\n"
+          'set "confirmed": true in the plan and then:\n'
+          "  sa-sign publish --plan %s" % a.plan)
+    return 0
+
+
+# --------------------------------------------------------------------- send
+
+def cmd_check(a):
+    """The handoff half. The PandaDoc half is the Claude integration, which
+    this cannot test from here — the assistant calls those tools, not this
+    script. So check the part that is ours: can the file be published and
+    signed, and does the published copy clean up after itself."""
+    supa = check_supabase()
+    drive = check_drive(a)
+    print()
+    if supa:
+        print("Handoff: the firm's own storage. Signed links that expire, "
+              "nothing public at any point. This is the better of the two and "
+              "it is what publish will use.")
+    elif drive:
+        print("Handoff: your Google Drive. The firm's storage is not open to "
+              "this pod, which is expected for a fee earner. publish will use "
+              "Drive, and revoke is what ends the exposure — run it.")
+    else:
+        print("Handoff: NEITHER route works, so nothing can be sent from this "
+              "pod yet. scan and prepare still work. Send the lines above to "
+              "Tom.")
+    print("\nPandaDoc itself goes through the Claude integration, so there is "
+          "no key to check. If sending fails, it is that connection.")
+    return 0 if (supa or drive) else 2
+
+
+def check_supabase():
+    code, res = storage("GET", "/bucket/" + BUCKET)
+    if code != 200:
+        print("Firm storage: not available.\n  %s"
+              % storage_refusal(code, res))
+        return False
+    if res.get("public"):
+        print("Firm storage: the %s bucket is PUBLIC. It must not be. Fix "
+              "before use." % BUCKET)
+        return False
+    key = "%s/%s/roundtrip.pdf" % (BUCKET, secrets.token_urlsafe(18))
+    code, res = storage("POST", "/object/" + key, b"%PDF-1.4\n%%EOF\n",
+                        "application/pdf")
+    if code != 200:
+        print("Firm storage: the bucket is visible but upload was refused.\n"
+              "  %s" % storage_refusal(code, res))
+        return False
+    code, res = storage("POST", "/object/sign/" + key,
+                        json.dumps({"expiresIn": 60}).encode())
+    storage("DELETE", "/object/" + BUCKET,
+            json.dumps({"prefixes": [key.split("/", 1)[1]]}).encode())
+    if code != 200:
+        print("Firm storage: uploaded, but no signed link.\n  %s"
+              % storage_refusal(code, res))
+        return False
+    print("Firm storage: upload and signed link working.")
+    return True
+
+
+def check_drive(a):
+    """The fallback route, end to end: stage, upload, share, fetch, remove.
+
+    A probe that only asks whether Drive is connected proves nothing. This
+    puts a real file up, fetches it back over the same URL PandaDoc will use,
+    and checks the bytes match before taking it down again."""
+    try:
+        user = composio_user(a.composio_user)
+    except SystemExit:
+        print("Google Drive: no chat id recorded, so I cannot tell which "
+              "Drive to use. Run `sa-sign check --composio-user <chat-id>` "
+              "once.")
+        return False
+    probe = os.path.join(WORKDIR, "handoff-probe.pdf")
+    os.makedirs(WORKDIR, exist_ok=True)
+    body = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n"
+    with open(probe, "wb") as fh:
+        fh.write(body)
+    fid, url, err = drive_publish(probe, user)
+    os.remove(probe)
+    if err:
+        print("Google Drive: not usable.\n  %s" % err)
+        return False
+    try:
+        got = urllib.request.urlopen(url, timeout=60).read()
+        ok = got == body
+        print("Google Drive: upload, link and fetch working."
+              if ok else
+              "Google Drive: the link came back with the wrong bytes (%d of "
+              "%d). Do not use it." % (len(got), len(body)))
+    except Exception as e:                                    # noqa: BLE001
+        ok = False
+        print("Google Drive: uploaded, but the link did not serve the file: "
+              "%s" % e)
+    problems = drive_revoke(fid, user)
+    if problems:
+        print("  and the probe copy could not be removed: %s"
+              % "; ".join(problems))
+        return False
+    return ok
+
+
+def storage_refusal(code, res):
+    """Say who refused, in a sentence a lawyer can forward.
+
+    Three different things answer on this host and they mean different things.
+    The egress proxy answers JSON with an `error` field when the pod is not
+    cleared for that hostname at all; Supabase answers 401/403 when it is
+    cleared and the key is wrong. Reporting "HTTP 403" for both sends people
+    hunting for a key when the real answer is that their pod was never given
+    the storage route.
+    """
+    err = res.get("error") if isinstance(res, dict) else None
+    if err in ("access_restricted", "credential_not_found"):
+        return ("Your pod is not cleared to reach the firm's file storage "
+                "(%s). That is a decision about what this login can touch, "
+                "not a broken key and not something to work around. Everything "
+                "up to this point worked; ask Tom to have storage added for "
+                "you and then run this again." % err)
+    if code in (401, 403):
+        return ("The firm's file storage refused the credential (HTTP %s). "
+                "Send this line to Tom." % code)
+    return "The firm's file storage answered HTTP %s. Send this line to Tom." % code
+
+
+def storage(method, path, body=None, ctype="application/json"):
+    """The firm's own Supabase storage. The proxy injects the key."""
+    return http(method, SUPA + path, body,
+                {"Content-Type": ctype} if body is not None else None)
+
+
+# --- the Drive handoff -----------------------------------------------------
+#
+# Everything below exists because a fee earner's pod cannot write to the firm's
+# Supabase, and PandaDoc will only take a document by URL. The file goes to the
+# lawyer's own Drive under a random name, is made link-readable for as long as
+# it takes PandaDoc to fetch it, and is then unshared and binned.
+#
+# Be honest about the cost: for that window the bytes are readable by anyone
+# holding a 33-character id nobody has been given. Three things keep it small.
+# The name carries nothing — no client, no matter, no date. `revoke` removes
+# the sharing before it deletes, so a failed delete still leaves nothing
+# reachable. And `sweep` finds anything an interrupted session left behind.
+
+def channel_chat_id():
+    """The chat id from the pod's own Telegram channel state, if it kept one.
+
+    About one pod in eight has this file, so it is a shortcut and not a
+    substitute for asking. Never guess between two of them: a pod with more
+    than one channel gets no answer rather than the wrong Drive.
+    """
+    import glob
+    found = set()
+    for p in glob.glob(os.path.expanduser(
+            "~/.claude/channels/telegram-*/last_chat.json")):
+        try:
+            with open(p) as fh:
+                v = json.load(fh).get("chat_id")
+        except (OSError, ValueError):
+            continue
+        if v and str(v).isdigit():
+            found.add(str(v))
+    return found.pop() if len(found) == 1 else None
+
+
+def composio_user(explicit=None):
+    """Composio keys its connections by the user's numeric Telegram chat id.
+
+    Four places, in order of how much they can be trusted: what this run was
+    told, the environment, what a previous run was told, and the pod's own
+    Telegram state. Anything taken from the first two is written down so the
+    lawyer is asked once and not again.
+    """
+    for v in (explicit, os.environ.get("COMPOSIO_USER_ID")):
+        if v:
+            if not str(v).isdigit():
+                die("--composio-user must be the numeric Telegram chat id")
+            try:
+                os.makedirs(os.path.dirname(USER_FILE), exist_ok=True)
+                with open(USER_FILE, "w") as fh:
+                    fh.write(str(v))
+            except OSError:
+                pass
+            return str(v)
+    if os.path.exists(USER_FILE):
+        cached = open(USER_FILE).read().strip()
+        if cached.isdigit():
+            return cached
+    guess = channel_chat_id()
+    if guess:
+        return guess
+    die("I do not know which Google Drive to use. Pass the chat id of the "
+        "Telegram conversation this session is talking to:\n"
+        "  sa-sign publish --plan <plan> --composio-user <chat-id>\n"
+        "It is remembered after the first time.")
+
+
+def composio(tool, args, user, account=None):
+    """One Composio tool call. Returns (data, error-string)."""
+    cmd = ["composio-exec", "--user-id", user, "--tool", tool,
+           "--args", json.dumps(args)]
+    if account:
+        cmd += ["--account", account]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    out = (r.stdout or "").strip()
+    if not out:
+        return None, (r.stderr or "composio-exec produced nothing").strip()
+    try:
+        res = json.loads(out)
+    except ValueError:
+        # The multiple-accounts refusal arrives as plain text on stderr/stdout.
+        return None, out[:400]
+    if res.get("error"):
+        return None, json.dumps(res["error"])[:400]
+    return res.get("data"), None
+
+
+_ACCOUNT_CACHE = {}
+
+# Two lawyers in twenty-two are connected this way and neither could have
+# guessed why. Google asks for sign-in and for file access on two separate
+# screens; stop after the first and Composio still records the connection as
+# ACTIVE, so everything says Drive is connected and every call answers 403
+# "insufficient authentication scopes". Reconnecting is the whole fix.
+NO_DRIVE_SCOPE = (
+    "Your Google account is connected, but only far enough to know who you "
+    "are — it was not given permission to put a file in your Drive, which is "
+    "what happens when the second Google screen is closed early. Connect it "
+    "again and say yes to both screens:\n"
+    "  composio-connect --toolkit googledrive --user-id %s\n"
+    "Nothing else needs doing and the old connection can be left alone.")
+
+
+def drive_account(user):
+    """Which of the lawyer's Google Drive connections to act through.
+
+    Half the lawyers who have connected Drive have connected it twice, and
+    `composio-exec` refuses to guess between two, so without this the tool
+    stops on them with an error naming two aliases that mean nothing to
+    anybody. The second connection is not a duplicate: it is the first attempt,
+    where the browser was closed on the consent screen, and it comes back
+    ACTIVE holding `userinfo.email openid` and nothing else. It cannot read or
+    write a file. So the choice is not ambiguous, and picking the connection
+    that actually carries `.../auth/drive` is not a guess.
+
+    Ambiguity that is real still refuses. Two working connections means two
+    Google accounts, and uploading a client's agreement to the wrong one is
+    exactly the mistake this tool exists to avoid, so that case is handed back
+    with the aliases to choose from. `COMPOSIO_ACCOUNT` overrides everything.
+
+    Returns (alias-or-None, error). A None alias with no error means one
+    connection, which composio-exec resolves by itself.
+    """
+    user = str(user)
+    forced = os.environ.get("COMPOSIO_ACCOUNT")
+    if forced:
+        return forced, None
+    if user in _ACCOUNT_CACHE:
+        return _ACCOUNT_CACHE[user]
+
+    q = urllib.parse.urlencode({"user_ids": str(user), "limit": "50"})
+    code, data = http("GET", "https://backend.composio.dev/api/v3/"
+                              "connected_accounts?" + q)
+    if code != 200:
+        # Not fatal on its own: with one connection composio-exec needs no
+        # alias, so let the call go ahead and fail on its own terms if it must.
+        return None, None
+
+    live = []
+    for i in data.get("items") or []:
+        if (i.get("toolkit") or {}).get("slug") != "googledrive":
+            continue
+        if i.get("status") != "ACTIVE" or i.get("is_disabled"):
+            continue
+        scopes = ((i.get("data") or {}).get("scope") or "").split()
+        live.append((i.get("word_id"), scopes))
+
+    usable = [a for a, s in live
+              if any(x.endswith("/auth/drive") or x.endswith("/auth/drive.file")
+                     for x in s)]
+    if not live:
+        # Nothing connected at all. Say nothing here and let the call itself
+        # come back with Composio's own "no connected account", which
+        # drive_refusal already turns into the sign-in instructions.
+        out = (None, None)
+    elif not usable:
+        out = (None, NO_DRIVE_SCOPE % user)
+    elif len(usable) == 1:
+        out = (usable[0], None)
+    else:
+        out = drive_pick_firm(user, usable)
+    _ACCOUNT_CACHE[user] = out
+    return out
+
+
+def drive_pick_firm(user, aliases):
+    """Two working Google accounts. Take the Monaco one, or ask.
+
+    Someone with a personal Google account signed in on the same browser ends
+    up with both connected, and a client's settlement agreement must not be
+    the thing that discovers which is which. The firm domain settles it
+    without asking, and where it does not, the question is worth asking with
+    email addresses in it rather than the two invented aliases Composio uses,
+    which mean nothing to the person reading them.
+    """
+    firm, seen = {}, []
+    for alias in aliases:
+        data, err = composio("GOOGLEDRIVE_GET_ABOUT", {}, user, alias)
+        email = (((data or {}).get("user") or {}).get("emailAddress") or "")
+        seen.append((alias, email or "could not read: %s" % (err or "no email")))
+        if email.lower().endswith("@monacosolicitors.co.uk"):
+            firm.setdefault(email.lower(), alias)
+    # One Monaco account reached twice is the usual shape, and it is not a
+    # choice: both connections open the same Drive. Only two different
+    # addresses are worth stopping for.
+    if len(firm) == 1:
+        return next(iter(firm.values())), None
+    return None, ("You have %d Google accounts connected and I will not guess "
+                  "which one a client's agreement should go to. Re-run with "
+                  "COMPOSIO_ACCOUNT set to one of:\n%s"
+                  % (len(aliases),
+                     "\n".join("  %s   (%s)" % p for p in seen)))
+
+
+def dcomposio(tool, args, user):
+    """A Composio call against the lawyer's Drive, account already resolved."""
+    account, err = drive_account(user)
+    if err:
+        return None, err
+    return composio(tool, args, user, account)
+
+
+def handoff_name():
+    """The name a handoff copy is uploaded under.
+
+    Two jobs. It carries nothing: PandaDoc is given the real document name in
+    the create request, so a link that leaks
+    "smith-settlement-agreement.pdf" would leak the client, and this leaks a
+    filename that says nothing about anybody. And it is recognisable, which is
+    what lets `sweep` tell its own litter from a lawyer's real files.
+    """
+    return "%s.pdf" % secrets.token_urlsafe(24)
+
+
+def is_handoff_name(name):
+    """Did this tool upload that file? Anything else is somebody's work."""
+    return bool(re.match(r"^[A-Za-z0-9_-]{32}\.pdf$", name or ""))
+
+
+def drive_lookup_folder(user):
+    """Find the handoff folder. Returns (id, error), and never anything else.
+
+    "Not there" and "could not tell" are different answers and the caller acts
+    on them differently, so they do not share a return value. Collapsing them
+    means a lookup that merely failed leads to a second folder being created,
+    and then half the litter is in one and half in the other and sweep only
+    ever sees one of them.
+
+    `GOOGLEDRIVE_FIND_FOLDER` must not be used here. Given
+    {"folder_name": "esign-handoff"} it ignores the name and returns about a
+    hundred arbitrary folders, and the first of them on this Drive was 'Tech
+    Test - Example Settlement Agreements', which holds real client documents.
+    Trusting it meant handoff copies were written into a client folder and a
+    sweep would have offered to delete four genuine files.
+
+    `GOOGLEDRIVE_LIST_FILES` does honour a real Drive `q`, so ask it precisely
+    and then check the name again on the way out.
+    """
+    q = ("name = '%s' and mimeType = 'application/vnd.google-apps.folder' "
+         "and trashed = false" % DRIVE_FOLDER)
+    data, err = dcomposio("GOOGLEDRIVE_LIST_FILES", {"q": q}, user)
+    if err:
+        return None, ("could not look up the %s folder on your Drive: %s"
+                      % (DRIVE_FOLDER, drive_refusal(err)))
+    for f in (data or {}).get("files") or []:
+        if f.get("name") == DRIVE_FOLDER and f.get("id"):
+            return f["id"], None
+    return None, None
+
+
+def drive_folder(user):
+    """One folder, so a stray file is easy to find and sweep. Reuse it.
+
+    Returns (folder_id, error). A caller must not carry on without an id: with
+    no folder the upload lands in the root of the lawyer's Drive, where sweep
+    does not look, and an interrupted session would leave a readable copy
+    nobody ever finds.
+    """
+    found, err = drive_lookup_folder(user)
+    if err:
+        return None, err
+    if found:
+        return found, None
+    _, err = dcomposio("GOOGLEDRIVE_CREATE_FOLDER",
+                       {"folder_name": DRIVE_FOLDER}, user)
+    if err:
+        return None, ("could not create the %s folder on your Drive: %s"
+                      % (DRIVE_FOLDER, drive_refusal(err)))
+    # Read it back by name rather than trusting the create response, so the id
+    # this returns has been matched against the name at least once.
+    found, err = drive_lookup_folder(user)
+    if not found:
+        return None, ("created the %s folder but could not find it again, so I "
+                      "will not upload anything I cannot later sweep%s"
+                      % (DRIVE_FOLDER, ": %s" % err if err else ""))
+    return found, None
+
+
+def drive_publish(pdf, user):
+    """Upload, share by link, and hand back (file_id, fetch_url).
+
+    Composio will not take a path or base64: the bytes are staged in its own
+    R2 bucket first and the tool is then given the resulting s3key.
+    """
+    import hashlib
+    import mimetypes
+    data = open(pdf, "rb").read()
+    name = handoff_name()
+    mime = mimetypes.guess_type(pdf)[0] or "application/pdf"
+
+    code, slot = http("POST", COMPOSIO_PRESIGN,
+                      {"toolkit_slug": "googledrive",
+                       "tool_slug": "GOOGLEDRIVE_UPLOAD_FILE",
+                       "filename": name, "mimetype": mime,
+                       "md5": hashlib.md5(data).hexdigest()})
+    if code != 200 or not slot.get("key"):
+        return None, None, ("could not stage the file for upload (HTTP %s): %s"
+                            % (code, json.dumps(slot)[:300]))
+    if slot.get("new_presigned_url"):
+        put = urllib.request.Request(slot["new_presigned_url"], data=data,
+                                     method="PUT",
+                                     headers={"Content-Type": mime})
+        try:
+            urllib.request.urlopen(put, timeout=180)
+        except Exception as e:                                # noqa: BLE001
+            return None, None, "staging upload failed: %s" % e
+
+    folder, ferr = drive_folder(user)
+    if not folder:
+        return None, None, ferr
+    args = {"file_to_upload": {"name": name, "mimetype": mime,
+                               "s3key": slot["key"]},
+            "folder_to_upload_to": folder}
+    got, err = dcomposio("GOOGLEDRIVE_UPLOAD_FILE", args, user)
+    if err:
+        return None, None, drive_refusal(err)
+    file_id = (got or {}).get("id")
+    if not file_id:
+        return None, None, "Drive accepted the upload but returned no file id"
+
+    _, err = dcomposio("GOOGLEDRIVE_ADD_FILE_SHARING_PREFERENCE",
+                       {"file_id": file_id, "role": "reader",
+                        "type": "anyone"}, user)
+    if err:
+        drive_revoke(file_id, user)
+        return None, None, ("the file uploaded but could not be made readable: "
+                            "%s" % drive_refusal(err))
+    return file_id, DRIVE_FETCH % file_id, None
+
+
+def drive_revoke(file_id, user):
+    """Delete the copy outright, then prove the link is dead.
+
+    Two things were measured here on 31 Aug 2026 and both matter.
+
+    Trashing is not enough. `GOOGLEDRIVE_TRASH_FILE` returns success and the
+    download URL still answers 200, so a file "binned" that way stays readable
+    by anyone holding the link until the trash is emptied, which is thirty
+    days. Only `GOOGLEDRIVE_DELETE_FILE` takes it out; the URL then answers
+    404.
+
+    Removing the sharing permission is not available to us either:
+    `GOOGLEDRIVE_DELETE_PERMISSION` answers 403 on an `anyoneWithLink` grant.
+    So deleting the file is not the tidy option, it is the only one.
+
+    Which is why this does not trust the API's word for it. It fetches the URL
+    afterwards and only reports success on a non-200.
+    """
+    problems = []
+    _, err = dcomposio("GOOGLEDRIVE_DELETE_FILE", {"file_id": file_id}, user)
+    if err:
+        problems.append("delete refused: %s" % err)
+        # Better than nothing while somebody sorts the delete out, but say
+        # plainly that it does not close the hole.
+        _, terr = dcomposio("GOOGLEDRIVE_TRASH_FILE", {"file_id": file_id}, user)
+        problems.append("moved to trash instead, which does NOT stop the "
+                        "link serving the file"
+                        if not terr else "and trashing failed too: %s" % terr)
+    try:
+        code = urllib.request.urlopen(DRIVE_FETCH % file_id, timeout=30).status
+        problems.append("the link still serves the file (HTTP %s)" % code)
+    except urllib.error.HTTPError:
+        pass                       # 404/403 is the outcome we want
+    except Exception:              # noqa: BLE001
+        pass                       # can't reach Drive to check; not a finding
+    return problems
+
+
+def drive_refusal(err):
+    """A Composio error a lawyer can act on rather than forward."""
+    low = (err or "").lower()
+    if "insufficient authentication scopes" in low or "insufficientpermissions" in low:
+        return NO_DRIVE_SCOPE % "<chat-id>"
+    if "multiple" in low and "account" in low:
+        return ("You have connected Google Drive more than once and I will not "
+                "guess which. Re-run with COMPOSIO_ACCOUNT set to the alias "
+                "named here:\n  %s" % err)
+    if ("no connected account" in low or "not connected" in low
+            or "no active connection" in low):
+        return ("Your Google Drive is not connected yet. PandaDoc will only "
+                "take the agreement from a link, so it needs somewhere of "
+                "yours to fetch it from, and that is your own Monaco Google "
+                "account. Connect it once:\n"
+                "  composio-connect --toolkit googledrive --user-id <chat-id>\n"
+                "Send yourself the link it prints, sign in, and run this "
+                "again. The copy lives in a folder called %s for the minute "
+                "or two PandaDoc needs, and revoke deletes it."
+                % DRIVE_FOLDER)
+    return err
+
+
+def mcp_request(plan, url):
+    """The exact documents_create request for the PandaDoc Claude integration.
+
+    Every tag carrying an optId must appear in `fields`, signatures included,
+    or creation fails with a validation error naming the one you missed.
+    `prepare` already writes an entry per placement, so pass them through
+    whole rather than filtering out the empty ones."""
+    roles = {p["role"] for p in plan["placements"]}
+    c = plan["client"]
+    recipients = [{"email": c["email"], "first_name": c.get("first_name") or "",
+                   "last_name": c.get("last_name") or "", "role": "client"}]
+    if "adviser" in roles and plan.get("adviser"):
+        adv = plan["adviser"]
+        first, _, last = (adv.get("name") or "").partition(" ")
+        recipients.append({"email": adv["email"], "first_name": first,
+                           "last_name": last, "role": "adviser"})
+    req = {"source": "file", "name": plan["document_name"], "url": url,
+           "recipients": recipients, "fields": plan.get("fields") or {}}
+    if plan.get("deal_id"):
+        req["metadata"] = {"deal_id": str(plan["deal_id"])}
+    return req
+
+
+def cmd_publish(a):
+    """Put the tagged PDF where PandaDoc can fetch it, once, briefly.
+
+    The Claude integration will only take a file by URL; it has no upload.
+    So the file goes into the firm's own Supabase storage, in a private
+    bucket under an unguessable prefix, and comes back out as a signed URL
+    that expires. PandaDoc fetches it at create time and never again. Run
+    `sa-sign revoke` straight after and the object is gone.
+
+    This is the same shape as the presigned S3 links PandaDoc's own docs
+    recommend, and the file never leaves the firm's infrastructure."""
+    plan = load_plan(a.plan)
+    if not plan.get("placements"):
+        die("nothing is tagged yet — run sa-sign prepare first")
+    if not plan.get("confirmed"):
+        die("the plan is not confirmed. Look at the check images, then set\n"
+            '  "confirmed": true\n'
+            "in %s. That is the only thing between a draft and the client's "
+            "inbox." % a.plan)
+    pdf = plan.get("tagged_pdf")
+    if not pdf or not os.path.exists(pdf):
+        die("the tagged PDF is missing — run sa-sign prepare again")
+
+    via, url, handoff, why = a.via, None, None, []
+    if via in ("auto", "supabase"):
+        url, handoff, err = publish_supabase(pdf, a.expires)
+        if err:
+            if via == "supabase":
+                die("the agreement is tagged and ready, but it could not be "
+                    "handed over.\n%s\nNothing was sent and nothing is left "
+                    "behind." % err)
+            why.append(err)
+    if url is None and via in ("auto", "drive"):
+        user = composio_user(a.composio_user)
+        fid, url, err = drive_publish(pdf, user)
+        if err:
+            for w in why:
+                print(w, file=sys.stderr)
+            die("the agreement is tagged and ready, but it could not be handed "
+                "over.\n%s\nNothing was sent and nothing is left behind." % err)
+        handoff = {"via": "drive", "file_id": fid, "composio_user": user}
+
+    plan["handoff"] = handoff
+    plan["published_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+    if handoff["via"] == "supabase":          # kept for older plans on disk
+        plan["storage_key"] = handoff["key"]
+    with open(a.plan, "w") as fh:
+        json.dump(plan, fh, indent=1)
+
+    out = {"handoff": handoff["via"],
+           "documents_create_request": mcp_request(plan, url)}
+    if handoff["via"] == "supabase":
+        out["expires_in_seconds"] = a.expires
+    else:
+        # No expiry is possible on a link-readable Drive file, so the only
+        # thing that ends the exposure is the revoke. Say so where it will be
+        # read, not in a manual.
+        out["note"] = ("This copy is readable by link until you revoke it. "
+                       "Run `sa-sign revoke --plan %s` as soon as PandaDoc "
+                       "reaches Draft, whether or not the send worked."
+                       % a.plan)
+    print(json.dumps(out, indent=1))
+    return 0
+
+
+def publish_supabase(pdf, expires):
+    """The firm's own storage. Best when it is available: the link is signed
+    and time-limited, and the file is never public for a moment."""
+    key = "%s/%s/%s" % (BUCKET, secrets.token_urlsafe(24),
+                        os.path.basename(pdf))
+    with open(pdf, "rb") as fh:
+        code, res = storage("POST", "/object/" + key, fh.read(),
+                            "application/pdf")
+    if code != 200:
+        return None, None, storage_refusal(code, res)
+    code, res = storage("POST", "/object/sign/" + key,
+                        json.dumps({"expiresIn": expires}).encode())
+    if code != 200:
+        storage("DELETE", "/object/" + BUCKET,
+                json.dumps({"prefixes": [key.split("/", 1)[1]]}).encode())
+        return None, None, storage_refusal(code, res)
+    return SUPA + res["signedURL"], {"via": "supabase", "key": key}, None
+
+
+def cmd_revoke(a):
+    """Delete the published copy. Always run this after sending.
+
+    On the Drive route this is not tidying up, it is the thing that ends the
+    exposure, so it runs whether or not the send worked and it says plainly
+    when it could not finish."""
+    plan = load_plan(a.plan)
+    handoff = plan.get("handoff")
+    if not handoff and plan.get("storage_key"):     # a plan from before --via
+        handoff = {"via": "supabase", "key": plan["storage_key"]}
+    if not handoff:
+        print("nothing was published for this plan")
+        return 0
+
+    if handoff["via"] == "supabase":
+        key = handoff["key"]
+        code, res = storage("DELETE", "/object/" + BUCKET,
+                            json.dumps({"prefixes": [key.split("/", 1)[1]]})
+                            .encode())
+        if code != 200:
+            die("could not delete the published copy (HTTP %s). It is at %s "
+                "and should be removed by hand.\n%s"
+                % (code, key, json.dumps(res)[:300]))
+    else:
+        user = handoff.get("composio_user") or composio_user(a.composio_user)
+        problems = drive_revoke(handoff["file_id"], user)
+        if problems:
+            die("the copy on Drive is still there and still readable by "
+                "link.\n  %s\nOpen Drive, delete the file in the %s folder, "
+                "and tell Tom." % ("\n  ".join(problems), DRIVE_FOLDER))
+
+    plan.pop("storage_key", None)
+    plan["handoff"] = None
+    plan["revoked_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+    with open(a.plan, "w") as fh:
+        json.dump(plan, fh, indent=1)
+    print("published copy deleted")
+    return 0
+
+
+def cmd_sweep(a):
+    """Anything an interrupted session left shared on Drive.
+
+    A session that dies between publish and revoke leaves a readable file
+    behind and no one would know. This is the backstop.
+
+    `--revoke` deletes permanently and cannot be undone, so it acts only on
+    files this tool can prove it uploaded: the 32-character random name it
+    gives a handoff copy. Being in the folder is not enough. An earlier version
+    trusted the folder alone, and a bug in the folder lookup pointed it at real
+    client documents, so it would have deleted a signed settlement agreement.
+    Anything with a name a human would recognise is listed and left alone.
+    """
+    user = composio_user(a.composio_user)
+    folder, err = drive_lookup_folder(user)
+    if err:
+        die("could not check your Drive, so I cannot say whether anything is "
+            "still shared.\n%s" % err)
+    if not folder:
+        print("no %s folder on this Drive, so nothing was left behind"
+              % DRIVE_FOLDER)
+        return 0
+    data, err = dcomposio(
+        "GOOGLEDRIVE_LIST_FILES",
+        {"q": "'%s' in parents and trashed = false" % folder}, user)
+    if err:
+        die(drive_refusal(err))
+    files = (data or {}).get("files") or []
+    mine = [f for f in files if is_handoff_name(f.get("name"))]
+    theirs = [f for f in files if not is_handoff_name(f.get("name"))]
+
+    if theirs:
+        print("Not mine, left alone (%d):" % len(theirs))
+        for f in theirs:
+            print("  %s  %s" % (f.get("id"), f.get("name")))
+        print()
+    if not mine:
+        print("no handoff copies left shared")
+        return 0
+    for f in mine:
+        print("%s  %s  %s" % (f.get("id"), f.get("createdTime", "?"),
+                              f.get("name")))
+    if not a.revoke:
+        print("\n%d handoff copy/copies still on Drive. Re-run with --revoke "
+              "to delete them." % len(mine))
+        return 2
+    bad = 0
+    for f in mine:
+        problems = drive_revoke(f["id"], user)
+        print("%s  %s" % (f["id"], "; ".join(problems) if problems else "gone"))
+        bad += bool(problems)
+    return 2 if bad else 0
+
+
+def cmd_note(a):
+    """Record the send on the matter, once the document has actually gone."""
+    plan = load_plan(a.plan)
+    plan["document_id"] = a.document_id
+    plan["sent_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+    with open(a.plan, "w") as fh:
+        json.dump(plan, fh, indent=1)
+    if not plan.get("deal_id"):
+        print("no deal on this plan, so no note was written")
+        return 0
+    code = deal_note(plan["deal_id"],
+                     "Settlement agreement sent for signature (PandaDoc).\n"
+                     "Document: %s\nPandaDoc id: %s\nSent to: %s"
+                     % (plan["document_name"], a.document_id,
+                        plan["client"]["email"]))
+    print("Pipedrive note: HTTP %s" % code)
+    return 0 if code < 300 else 1
+
+
+def cmd_status(a):
+    """There is no API key here, so this cannot ask PandaDoc itself. Say what
+    to call instead rather than failing with an authentication error that
+    sends somebody looking for a key that was never needed."""
+    print("Ask PandaDoc through the Claude integration:\n"
+          "  mcp__PandaDoc__documents_status_get  id=%s\n"
+          "  mcp__PandaDoc__documents_details_get id=%s   (fields, recipients)"
+          % (a.document_id, a.document_id))
+    return 0
+
+
+def cmd_anchors(a):
+    found, deed_pages = anchor_records(a.pdf, a.page)
+    for f in found:
+        ev = f.get("evidence") or {}
+        print("%-8s %-38s  hint %-9s <- %s%s"
+              % (f["ref"], f["text"][:38], f["role_hint"] or "-",
+                 ev.get("line", "nothing in range"),
+                 (" (%spt)" % ev["points_away"]) if ev else ""))
+    if deed_pages:
+        print("\nreads as a deed on page %s"
+              % ", ".join(str(p) for p in deed_pages))
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("scan", help="number the signature lines and pull the "
+                                    "client off the deal")
+    s.add_argument("pdf")
+    s.add_argument("--deal", help="Pipedrive deal id")
+    s.add_argument("--client-name")
+    s.add_argument("--client-email")
+    s.add_argument("--adviser-email", help="if the adviser signs too")
+    s.add_argument("--adviser-name")
+    s.add_argument("--name", help="document name the client sees")
+    s.add_argument("--page", type=int, help="only look at this page")
+    s.add_argument("--out", help="where to write the plan")
+    s.set_defaults(fn=cmd_scan)
+
+    p = sub.add_parser("prepare", help="put fields on the lines you picked")
+    p.add_argument("--plan", required=True)
+    p.add_argument("--sign", action="append", metavar="pN#K")
+    p.add_argument("--date", action="append", metavar="pN#K")
+    p.add_argument("--name", action="append", metavar="pN#K",
+                   help="a line for the signer's name, pre-filled from the deal")
+    p.add_argument("--initials", action="append", metavar="pN#K")
+    p.add_argument("--text", action="append", metavar="pN#K")
+    p.add_argument("--no-fill-date", action="store_true",
+                   help="leave the date for the signer instead of today")
+    p.add_argument("--no-cover", action="store_true",
+                   help="keep the dotted rule under the field")
+    p.add_argument("--deed-anyway", action="store_true")
+    p.set_defaults(fn=cmd_prepare)
+
+    pub = sub.add_parser("publish", help="make the tagged PDF fetchable by "
+                                         "PandaDoc for a few minutes")
+    pub.add_argument("--plan", required=True)
+    pub.add_argument("--expires", type=int, default=900,
+                     help="seconds the signed link stays alive, firm storage "
+                          "only (default 900)")
+    pub.add_argument("--via", choices=["auto", "supabase", "drive"],
+                     default="auto",
+                     help="where to put the file for PandaDoc to fetch. auto "
+                          "uses the firm's storage if this pod has it and "
+                          "your Google Drive if not.")
+    pub.add_argument("--composio-user", metavar="CHAT_ID",
+                     help="your numeric Telegram chat id, for the Drive "
+                          "route. Remembered after the first time.")
+    pub.set_defaults(fn=cmd_publish)
+
+    rev = sub.add_parser("revoke", help="delete the published copy")
+    rev.add_argument("--plan", required=True)
+    rev.add_argument("--composio-user", metavar="CHAT_ID")
+    rev.set_defaults(fn=cmd_revoke)
+
+    sw = sub.add_parser("sweep", help="anything left shared on Drive by an "
+                                      "interrupted send")
+    sw.add_argument("--revoke", action="store_true",
+                    help="unshare and bin everything found")
+    sw.add_argument("--composio-user", metavar="CHAT_ID")
+    sw.set_defaults(fn=cmd_sweep)
+
+    nt = sub.add_parser("note", help="record the send on the Pipedrive deal")
+    nt.add_argument("--plan", required=True)
+    nt.add_argument("--doc", dest="document_id", required=True)
+    nt.set_defaults(fn=cmd_note)
+
+    c = sub.add_parser("check", help="is the signing route working for me")
+    c.add_argument("--composio-user", metavar="CHAT_ID")
+    c.set_defaults(fn=cmd_check)
+
+    st = sub.add_parser("status")
+    st.add_argument("document_id")
+    st.set_defaults(fn=cmd_status)
+
+    an = sub.add_parser("anchors", help="the lines as text, without pictures")
+    an.add_argument("pdf")
+    an.add_argument("--page", type=int)
+    an.set_defaults(fn=cmd_anchors)
+
+    a = ap.parse_args()
+    sys.exit(a.fn(a))
+
+
+if __name__ == "__main__":
+    main()
