@@ -191,10 +191,17 @@ def main():
         mark = "END" if pid in confirmed else ("watch" if pid in firsttime else "keep")
         print("  %-5s %-8s %-20s age=%5.1fh %s" % (mark, pid, s["user"][:20], s["age_h"], s["why"]))
 
-    os.makedirs(os.path.dirname(STATE), exist_ok=True)
-    with open(STATE, "w") as fh:
-        json.dump({"at": time.time(),
-                   "candidates": {(s["session"] or p): s["user"] for p, s in stale.items()}}, fh)
+    # A --dry-run must NOT arm the next real run. It did on 2026-09-07: the dry run
+    # recorded all 35 sessions as first sightings, so the following real run counted them
+    # as twice-confirmed and ended all 35 instead of the 2 it had announced. A dry run has
+    # to be inspectable without changing what happens next.
+    if not args.dry_run:
+        os.makedirs(os.path.dirname(STATE), exist_ok=True)
+        with open(STATE, "w") as fh:
+            json.dump({"at": time.time(),
+                       "candidates": {(s["session"] or p): s["user"] for p, s in stale.items()}}, fh)
+    else:
+        print("  (dry run: two-strike state left untouched)")
 
     print(f"  to end now: {len(confirmed)} | first sighting, will end next run: {len(firsttime)}")
     if args.dry_run:
