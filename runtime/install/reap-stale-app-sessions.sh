@@ -106,11 +106,26 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--idle-hours", type=float, default=48.0)
     ap.add_argument("--sample-seconds", type=int, default=90)
+    ap.add_argument("--busy-cpu-pct", type=float, default=5.0,
+                    help="CPU%% of one core across the sample above which a session counts "
+                         "as working. Idle ones measured ~1%%.")
+    ap.add_argument("--self-test", metavar="USER:SESSION_ID",
+                    help="prove the session-to-transcript matcher can find a known id")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
     if os.geteuid() != 0:
         sys.exit("run as root")
+
+    if args.self_test:
+        user, sid = args.self_test.split(":", 1)
+        hit = transcript_for(user, sid)
+        if hit:
+            print(f"matcher OK: {sid} found in {os.path.basename(hit[0])}, "
+                  f"last written {hit[1]:.1f}h ago")
+            return
+        sys.exit(f"matcher FAILED: {sid} not found in any of {user}'s transcripts — "
+                 "do not trust a 'no conversation ever' verdict until this passes")
 
     first = ps_snapshot()
     print(f"App sessions: {len(first)}")
@@ -144,10 +159,16 @@ def main():
             if pid not in second:
                 del stale[pid]  # exited on its own
                 continue
-            if second[pid]["cpu"] > s["cpu"]:
-                s["why"] += f"; but burned {second[pid]['cpu'] - s['cpu']}s CPU — SPARED"
+            delta = second[pid]["cpu"] - s["cpu"]
+            # An IDLE session still ticks: measured 1s per 90s (~1% of a core) on all 33
+            # abandoned sessions in the first dry run. Treating any movement as "busy"
+            # therefore spared everything and reclaimed nothing. Real work sits far above
+            # this, so the line goes between them rather than at zero.
+            if delta >= args.busy_cpu_pct / 100.0 * args.sample_seconds:
+                s["why"] += f"; but burned {delta}s CPU in {args.sample_seconds}s — SPARED"
                 del stale[pid]
                 continue
+            s["cpu_delta"] = delta
             if has_children(pid):
                 s["why"] += "; but running a tool — SPARED"
                 del stale[pid]
