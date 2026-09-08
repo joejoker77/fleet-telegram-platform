@@ -36,6 +36,14 @@ import { readFileSync, writeFileSync, appendFileSync, unlinkSync, statSync } fro
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR
 const SESSION = process.env.PROGRESS_TMUX_SESSION || 'claude'
+// The PANE, not the session. `-t claude` is ambiguous here: since the remote-control
+// listener arrived, BOTH tmux sessions contain a window called "claude", and tmux
+// resolves the bare name to the rc window — so this sampler was reading
+// "Ready · work · HEAD / Capacity: 0/32", a pane that never shows a spinner, and no
+// status message could ever be produced. Verified 2026-09-08 inside a pod: `-t claude`
+// returns the rc pane, `-t claude:0` returns the bot's. Diagnosed on 2026-08-26 and
+// never actually fixed, which is why status messages have been dead since ~08-24.
+const PANE = SESSION.includes(':') ? SESSION : `${SESSION}:0`
 if (!STATE_DIR) {
   process.stderr.write('progress-sidecar: no TELEGRAM_STATE_DIR, exiting\n')
   process.exit(0)
@@ -167,7 +175,7 @@ function captureFrame() {
       resolve(v)
     }
     try {
-      const child = spawn('tmux', ['capture-pane', '-t', SESSION, '-p', '-S', '-60'], {
+      const child = spawn('tmux', ['capture-pane', '-t', PANE, '-p', '-S', '-60'], {
         stdio: ['ignore', 'pipe', 'ignore'],
       })
       let out = ''
@@ -457,4 +465,4 @@ process.on('unhandledRejection', (e) => logln(`unhandled: ${e}`))
 
 await reapOrphan()
 setInterval(() => { void fsmTick() }, STATUS_TICK_MS)
-logln(`up (session=${SESSION}, token=${getToken() ? 'present' : 'MISSING'})`)
+logln(`up (pane=${PANE}, token=${getToken() ? 'present' : 'MISSING'})`)
