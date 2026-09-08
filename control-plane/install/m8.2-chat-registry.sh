@@ -167,6 +167,12 @@ server {
     location / { return 404; }
 }
 CONF
+# The bridge IP only exists once the first pod starts, which is AFTER nginx. Without
+# non-local bind, `listen $GW:$POD_PORT` makes nginx fail its config test at boot and not
+# start AT ALL — on 2026-09-07 that took the Composio callback and the GitHub webhook down
+# with it for 13 hours. Ordering cannot fix it; this can.
+sysctl -w net.ipv4.ip_nonlocal_bind=1 >/dev/null
+printf 'net.ipv4.ip_nonlocal_bind = 1\n' > /etc/sysctl.d/99-fleet-nonlocal-bind.conf
 nginx -t >/dev/null 2>&1 || { nginx -t; rm -f "$NGINX_CONF"; die "nginx config invalid — reverted"; }
 systemctl reload nginx || die "nginx reload failed"
 echo "  nginx reloaded"
@@ -182,8 +188,12 @@ fi
 TMPL="$REPO_ROOT/runtime/nftables/cl-egress.nft.tmpl"
 if [ -f "$TMPL" ] && ! grep -q "dport $POD_PORT" "$TMPL"; then
   sed -i "s#\(.*ip saddr __SUBNET__ tcp dport 10255 counter accept\)#\1\n    ip saddr __SUBNET__ tcp dport $POD_PORT counter accept#" "$TMPL"
-  echo "  added to the nft template for reboot persistence"
+  echo "  added to the nft template"
 fi
+# Editing the template is NOT persistence — boot applies /etc/cl-egress.nft, which starts
+# with `delete table`, so a runtime insert that is only in the template is wiped. This is
+# what removed tcp/22, tcp/10256 and tcp/10257 on the 2026-09-07 reboot.
+bash "$REPO_ROOT/runtime/install/render-egress-nft.sh" --apply
 
 # ── 4. prove it end-to-end from inside a pod ─────────────────────────────────
 log "verifying from a tenant pod (catalog read with that tenant's own token)"

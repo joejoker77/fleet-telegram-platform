@@ -24,6 +24,11 @@ table inet cl_egress {
   chain input {
     type filter hook input priority -10; policy accept;
     ip saddr __SUBNET__ ct state established,related counter accept
+    # tcp/22 is the host-sudo broker (forced-command, WORM-audited). It had only ever
+    # been inserted at runtime, so the 2026-09-07 reboot silently removed root access
+    # to the host from every admin bot. It belongs in the ruleset, not in someone's
+    # shell history.
+    ip saddr __SUBNET__ tcp dport 22 counter accept
     ip saddr __SUBNET__ tcp dport 10255 counter accept
     ip saddr __SUBNET__ tcp dport 10257 counter accept
     ip saddr __SUBNET__ tcp dport 10256 counter accept
