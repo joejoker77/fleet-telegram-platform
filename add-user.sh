@@ -203,6 +203,17 @@ else
   info "5/6 role=user — no host access (skipping make-admin)"
 fi
 
+# 5b) skills marketplace: the per-tenant key that share-skill needs. Without it a fresh
+#     tenant comes up with everything else working and `share-skill` refusing to run
+#     ("No sharing key found for this account") — which is exactly how ben-holtom landed
+#     on 2026-09-09, because m8.2 minted keys only for the tenants that existed then.
+log "5b/6 skills marketplace key"
+if [ -x "$RT_INSTALL/mint-registry-token.sh" ]; then
+  run_cmd bash "$RT_INSTALL/mint-registry-token.sh" "$USER_NAME"
+else
+  info "mint-registry-token.sh not present — skipping (marketplace not installed here)"
+fi
+
 # 6) reconcile skills/MCP for this tenant via the control plane
 log "6/6 reconcile skills + MCP"
 if [ "$DRY_RUN" = "1" ]; then info "would run: cp-api deploy-reconcile.ts $USER_NAME --all --apply"
