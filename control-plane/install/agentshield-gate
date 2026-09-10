@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# Periodic scan with --gate against the saved baseline.
+# Gate fires on ANY new finding vs baseline (regardless of severity).
+# Alert is filtered to critical/high only inside this script.
+set -u
+
+u="${1:?usage: agentshield-gate USER}"
+BASELINE="/var/lib/agentshield/baselines/${u}.json"
+LOG="/var/log/agentshield/${u}.log"
+ALERTER_ENV="/etc/agentshield/alerter.env"
+
+if [ ! -f "$BASELINE" ]; then
+  echo "$(date -Is) no baseline for $u, skipping" >> "$LOG"
+  exit 0
+fi
+
+# Which plugins this tenant has actually ENABLED. Everything the official marketplace
+# ships is cached under ~/.claude/plugins/marketplaces/**, whether enabled or not — on
+# 2026-09-02 that catalogue gained context7 plus fifteen others, and the scanner duly
+# reported `MCP server "context7" connects to external URL` (high, active-runtime) for a
+# file no process ever loads. It cannot clear, so every run logged a REGRESSION and
+# auto-suspend-monitor mailed the admin on the 3-in-60min threshold. With ENFORCE=1 it
+# would have paused bots for something nobody did, on every catalogue update.
+# So catalogue findings are dropped UNLESS the plugin is enabled — enable context7 and it
+# alerts again, which is the behaviour we actually want.
+ENABLED=$(jq -r '(.enabledPlugins // {}) | to_entries[] | select(.value == true) | .key | split("@")[0]' \
+  "/home/$u/.claude/settings.json" 2>/dev/null | paste -sd, - || true)
+export ENABLED
+
+CURRENT="/tmp/agentshield-current-${u}.json"
+# NOTE: do NOT pass --min-severity here — it filters current scan but not
+# baseline, causing false-positive "regression" on every run.
+runuser -u "$u" -- bash -c "cd /home/$u && npx --yes ecc-agentshield scan -f json --baseline $BASELINE --gate 2>/dev/null" \
+  > "$CURRENT"
+rc=$?
+
+if [ $rc -ne 0 ]; then
+  # Gate failed. Pull out the truly-new findings (in current but not in baseline)
+  # AND keep only critical/high for the alert.
+  NEW_HIGH=$(jq --arg enabled "${ENABLED:-}" --slurpfile base "$BASELINE" '
+    ([$base[0].findings[].id] | unique) as $baseline_ids
+    | [.findings[]
+        | select(.severity == "critical" or .severity == "high")
+        | select((.id | IN($baseline_ids[])) | not)
+        | select((.runtimeConfidence // "") != "docs-example")
+        | select(((.file // "") | test("[.]md$")) | not)
+        # marketplace catalogue cache: only judge it if the plugin is enabled
+        | select(
+            (((.file // "") | test("plugins/marketplaces/")) | not)
+            or (((.file // "") | capture("external_plugins/(?<n>[^/]+)/").n) as $n
+                | ($enabled | split(",") | index($n)) != null)
+          )]
+  ' "$CURRENT" 2>/dev/null)
+
+  new_count=$(echo "$NEW_HIGH" | jq 'length' 2>/dev/null)
+  if [ "${new_count:-0}" -eq 0 ]; then
+    # No truly-new high/critical findings -> nothing actionable, stay SILENT.
+    # This used to log a line every run. For low-scoring tenants the tool's gate
+    # trips on its SCORE check (not on findings) on every single run, so that
+    # produced ~90 identical lines per bot per day. A log full of tolerated
+    # alarms is a log nobody reads — which is how the medium findings came to be
+    # ignored in the first place. Real regressions still log AND alert below;
+    # that this timer is alive is observable via systemd LastTriggerUSec.
+    rm -f "$CURRENT"
+    exit 0
+  fi
+
+  ts=$(date -Is)
+  {
+    echo "==================== $ts REGRESSION for $u ===================="
+    echo "$NEW_HIGH" | jq '.'
+  } >> "$LOG" 2>&1
+
+  # Telegram alert via shared security-alerter (replaces inline curl).
+  if command -v /usr/local/sbin/security-alerter >/dev/null 2>&1; then
+    crit=$(echo "$NEW_HIGH" | jq '[.[] | select(.severity == "critical")] | length')
+    high=$(echo "$NEW_HIGH" | jq '[.[] | select(.severity == "high")] | length')
+    titles=$(echo "$NEW_HIGH" | jq -r '[.[] | .severity + ": " + .title] | .[:8] | join("
+")')
+    sev="HIGH"
+    [ "$crit" -gt 0 ] 2>/dev/null && sev="CRITICAL"
+    printf "%s" "$titles" | /usr/local/sbin/security-alerter "$u" agentshield "$sev" "NEW findings: $crit critical, $high high" || true
+  fi
+  # Phase E auto-rollback REMOVED 2026-08-25 (operator decision, Vitaliy).
+  # This used to `git revert --no-edit HEAD` on ~/.claude and then restart the
+  # bot. Both steps were broken and silent: the revert always failed because the
+  # tree is permanently dirty (bots write logs/tokens constantly; `git revert`
+  # refuses on a dirty tree -- reproduced, rc=128), and the restart called the
+  # legacy graceful-restart-bot, which targets claude-tg@ units that no longer
+  # exist on this host. Both were wrapped in `|| true`, so the log claimed
+  # "auto-revert HEAD" while nothing reverted and nothing restarted.
+  #
+  # It is not being repaired, by design. This detector produces frequent false
+  # positives, and on a noisy detector auto-remediation turns a false alarm into
+  # a false OUTAGE: reverted settings plus a bot killed mid-task. Detection and
+  # the Telegram alert above are kept; rollback is now a deliberate human step.
+  # Pre-change snapshots remain available via agentshield-prestate-commit, and
+  # agentshield-settings-guard still reverts unauthorised settings.json edits
+  # (that one compares an exact file against a golden copy, so it is not a
+  # heuristic and does not misfire).
+
+fi
+rm -f "$CURRENT"
