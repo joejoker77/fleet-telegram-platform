@@ -214,6 +214,26 @@ else
   info "mint-registry-token.sh not present — skipping (marketplace not installed here)"
 fi
 
+# 5c) agentshield golden copy. provision-tenant enables agentshield-settings-guard@<user>.path,
+#     but the guard compares settings.json against a root-owned golden copy — with no golden
+#     copy it comes up `active` and protects NOTHING. Silent, and it looks healthy in
+#     systemctl. Missed on helen-alty (2026-09-01), again on ben-holtom (2026-09-09) and
+#     ricky-domnick (2026-09-10) — three tenants found by peer diff, never by a checklist,
+#     which is why it is a step here now instead of a note in a memory file.
+log "5c/6 agentshield golden copy for the settings guard"
+if [ -x /usr/local/sbin/agentshield-settings-rebaseline ]; then
+  if [ -f "/var/lib/agentshield/golden/$USER_NAME.settings.json" ]; then
+    info "golden copy already present"
+  else
+    run_cmd /usr/local/sbin/agentshield-settings-rebaseline "$USER_NAME"
+    if [ "$DRY_RUN" != "1" ] && [ ! -f "/var/lib/agentshield/golden/$USER_NAME.settings.json" ]; then
+      warn "golden copy still absent — agentshield-settings-guard@$USER_NAME is guarding nothing"
+    fi
+  fi
+else
+  info "agentshield-settings-rebaseline not present — skipping (guard not installed here)"
+fi
+
 # 6) reconcile skills/MCP for this tenant via the control plane
 log "6/6 reconcile skills + MCP"
 if [ "$DRY_RUN" = "1" ]; then info "would run: cp-api deploy-reconcile.ts $USER_NAME --all --apply"
