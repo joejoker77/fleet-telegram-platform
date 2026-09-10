@@ -20,7 +20,10 @@ Action on threshold:
 
 Config via EnvironmentFile /etc/agentshield/autosuspend.conf:
   WINDOW_MIN (default 60), THRESHOLD (default 3), ENFORCE (default 0).
-Idempotent: never re-suspends an already-paused container.
+Idempotent: never re-suspends an already-paused container, and alerts once per
+incident — the newest signal it has alerted on is remembered in
+/var/lib/agentshield/autosuspend/<user>.last-alert (AUTOSUSPEND_STATE_DIR), so a
+5-min timer over a 60-min window no longer repeats one burst ~12 times an hour.
 """
 import os
 import re
@@ -69,6 +72,7 @@ def main() -> int:
 
     cutoff = now() - timedelta(minutes=window_min)
     count = 0
+    newest = None
     for line in log_path.read_text(errors="replace").splitlines():
         if not SIGNAL_RE.search(line):
             continue
@@ -81,9 +85,28 @@ def main() -> int:
             continue
         if ts >= cutoff:
             count += 1
+            if newest is None or ts > newest:
+                newest = ts
 
     if count < threshold:
         return 0
+
+    # Alert once per incident, not once per tick. The timer runs every 5 min and the
+    # window is 60 min, so a single burst of signals used to send the admin the same
+    # message ~12 times an hour until it aged out — which is how a fixed problem keeps
+    # looking like an active one (2026-09-10: 9 identical Telegram alerts for one
+    # already-diagnosed cause). We remember the newest signal we have alerted on; a
+    # later run only speaks up when there is genuinely NEWER evidence.
+    # Suppression is per user and only affects the ALERT: enforcement below is
+    # unchanged, and a still-unpaused pod is re-evaluated on every run.
+    state_dir = Path(os.environ.get("AUTOSUSPEND_STATE_DIR", "/var/lib/agentshield/autosuspend"))
+    state_file = state_dir / f"{user}.last-alert"
+    already = None
+    try:
+        already = datetime.fromisoformat(state_file.read_text().strip())
+    except (OSError, ValueError):
+        already = None
+    fresh_evidence = newest is not None and (already is None or newest > already)
 
     # Already paused? (idempotent). Tolerate podman being absent (e.g. offline test).
     try:
@@ -99,12 +122,21 @@ def main() -> int:
 
     sev = "CRITICAL"
     msg = f"{count} abuse signals (tamper/regression) in {window_min}m ≥ threshold {threshold}"
-    if Path(ALERTER).exists():
-        subprocess.run([ALERTER, user, "auto-suspend", sev, msg],
+    newest_str = newest.isoformat() if newest else "?"
+    if fresh_evidence and Path(ALERTER).exists():
+        subprocess.run([ALERTER, user, "auto-suspend", sev,
+                        f"{msg} (newest {newest_str})"],
                        input=msg + "\n", text=True, timeout=15, check=False)
+        try:
+            state_dir.mkdir(parents=True, exist_ok=True)
+            state_file.write_text(newest_str)
+        except OSError as exc:
+            log(f"could not record alert state ({exc}) — may re-alert on the next run")
 
     if not enforce:
-        log(f"WOULD SUSPEND claude-{user}: {msg} (ENFORCE=0, alert-only)")
+        if fresh_evidence:
+            log(f"WOULD SUSPEND claude-{user}: {msg} (ENFORCE=0, alert-only)")
+        # else: same evidence as the last alert — stay quiet, in the log too.
         return 0
 
     # ENFORCE: pause the pod + mark suspended in the control plane.
