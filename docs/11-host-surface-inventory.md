@@ -106,6 +106,14 @@ All `*.bak*` under `/usr/local/{bin,sbin}`: `claude-tg-launcher.bak.*` (×8), `d
 `mcp-scanner-gate.bak-*`, `skill-scanner-gate.bak-*`, `deploy-mcp-experimental`,
 `agentshield-gate-experimental`, `__pycache__`.
 
+`agentshield-gate-experimental` was not inert cruft: a 2026-05-29 drop-in
+(`/etc/systemd/system/agentshield-gate@vitaliy.service.d/override.conf`) pointed one
+tenant's ExecStart at it, so that tenant ran 3.5-month-old gate logic and ignored every
+later fix to the canonical script — 8 alerts per cycle where canonical raises 2. Retired
+2026-09-10 to `…-experimental.bak-retired-20260910`, drop-in removed, all 8 tenants
+verified on `/usr/local/bin/agentshield-gate`. Sweep + per-tenant verification:
+`control-plane/install/agentshield-gate-uniform.sh`.
+
 ---
 
 ## Productization workstreams this implies (beyond the per-bot migration)
