@@ -632,6 +632,25 @@ channel_attached() {
     | grep -q 'Channels are not currently available'
 }
 
+dismiss_login_modal() {
+  # A finished /login leaves the pane on "Login successful. Press Enter to continue…" and
+  # the session stays parked there: no channel, no plugin. Meanwhile the loop below counts
+  # down CHAN_START_GRACE, exits, systemd restarts the pod, the fresh session shows the same
+  # modal, and after four attempts systemd gives up and the container is simply GONE. That
+  # is what happened to alex-thorpe on 2026-09-11 — he had signed in correctly and his bot
+  # stayed dead for half an hour, with nothing in the logs naming the cause.
+  # rc_start already answers its own "Enable Remote Control?" prompt for the same reason;
+  # this is the same trick for the login prompt. One keypress, only when that text is on
+  # screen, so it cannot type into a working session.
+  case "$(tmux capture-pane -p -t "${SESSION}:0" 2>/dev/null)" in
+    *"Login successful"*"Press Enter"*|*"Press Enter to continue"*)
+      echo "[supervise] login modal is waiting on a keypress → pressing Enter for it"
+      tmux send-keys -t "${SESSION}:0" Enter 2>/dev/null
+      sleep 2
+      ;;
+  esac
+}
+
 creds_fresh() {
   # An EXPIRED login is not something a relaunch can fix — claude refuses channels until the
   # person runs /login, so healing there would hot-loop against a human-only fix. Hence this
@@ -746,6 +765,7 @@ if [ "${DISABLE_TELEGRAM_CHANNEL:-0}" != "1" ]; then
   until channel_alive; do
     # If claude itself died while we waited, restart now.
     tmux has-session -t "$SESSION" 2>/dev/null || { echo "[supervise] claude session gone during startup → exit for restart"; exit 1; }
+    dismiss_login_modal
     if [ "$waited" -ge "$CHAN_START_GRACE" ]; then
       echo "[supervise] telegram channel did not come up within ${CHAN_START_GRACE}s → exit for restart"
       exit 1
@@ -808,6 +828,7 @@ while tmux has-session -t "$SESSION" 2>/dev/null; do
   if [ "$heal_tick" -ge 60 ]; then
     heal_tick=0
     if [ "${DISABLE_TELEGRAM_CHANNEL:-0}" != "1" ] && creds_fresh && ! channel_attached; then
+      dismiss_login_modal
       if [ "$chan_heals" -lt "$CHAN_HEAL_MAX" ]; then
         chan_heals=$((chan_heals + 1))
         echo "[supervise] session came up without the telegram channel although the login is valid → relaunching claude (attempt ${chan_heals}/${CHAN_HEAL_MAX})"
