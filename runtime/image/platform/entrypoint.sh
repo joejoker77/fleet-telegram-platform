@@ -610,6 +610,42 @@ channel_alive() {
   [ -n "$p" ] && kill -0 "$p" 2>/dev/null
 }
 
+# ---- the channel the SESSION holds, which is a different fact --------------------------
+# channel_alive() above answers "is the plugin process running", and that is not the same
+# question. The plugin is enabled globally in settings.json, so its MCP server starts in
+# EVERY session — including one that decided at startup it has no channel. On 2026-09-11
+# the firm host proved how far apart the two facts can drift: unattended apt-daily-upgrade
+# stopped the egress forwarder and all 32 pods at 06:01; the pods came back while the
+# network was still down, claude printed "--channels ignored / Channels are not currently
+# available", and then polled Telegram happily for five hours with nobody to hand the
+# messages to. bot.pid was present, the process was alive, the watchdog saw a healthy pod,
+# and thirty-odd lawyers saw a bot that never answered. Only a manual restart of every pod
+# fixed it. claude does not revisit that startup decision on its own, so we must.
+CHAN_HEAL_MAX="${CHANNEL_HEAL_MAX:-3}"
+chan_heals=0
+heal_tick=0
+
+channel_attached() {
+  # Ground truth is what the session itself says. ":0" is deliberate — the rc window is
+  # also called "claude", so a bare -t "$SESSION" can resolve to the wrong pane.
+  ! tmux capture-pane -p -t "${SESSION}:0" 2>/dev/null \
+    | grep -q 'Channels are not currently available'
+}
+
+creds_fresh() {
+  # An EXPIRED login is not something a relaunch can fix — claude refuses channels until the
+  # person runs /login, so healing there would hot-loop against a human-only fix. Hence this
+  # is stricter than logged_in(): the file must exist AND the access token must still be in
+  # date. Four tenants were in exactly that state on 2026-09-11 (10h to 86h past expiry).
+  local exp now
+  [ -s "$HOME/.claude/.credentials.json" ] || return 1
+  exp="$(sed -n 's/.*"expiresAt"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p' \
+        "$HOME/.claude/.credentials.json" | head -1)"
+  [ -n "$exp" ] || return 1
+  now="$(date +%s)"
+  [ "$((exp / 1000))" -gt "$now" ]
+}
+
 # ---- remote control ---------------------------------------------------------------------
 # The `--remote-control <name>` flag on the assistant above NAMES the machine and nothing
 # else: it does not register anything with the account. Verified 2026-08-24 across the firm's
@@ -763,6 +799,29 @@ while tmux has-session -t "$SESSION" 2>/dev/null; do
   # Deliberately not a reason to exit the pod — remote control going away is an inconvenience,
   # the assistant and the chat bot are the things worth restarting for.
   rc_start
+  # Every minute, check the OTHER channel fact: the session may have started without a
+  # channel while the plugin process runs anyway (see channel_attached above). Relaunching
+  # claude is the only way back, and it is cheap — the pane is respawned the same way a
+  # session switch does it. Capped at CHAN_HEAL_MAX so a genuinely broken setup degrades to
+  # one honest log line instead of a respawn loop; the counter resets once a channel appears.
+  heal_tick=$((heal_tick + 5))
+  if [ "$heal_tick" -ge 60 ]; then
+    heal_tick=0
+    if [ "${DISABLE_TELEGRAM_CHANNEL:-0}" != "1" ] && creds_fresh && ! channel_attached; then
+      if [ "$chan_heals" -lt "$CHAN_HEAL_MAX" ]; then
+        chan_heals=$((chan_heals + 1))
+        echo "[supervise] session came up without the telegram channel although the login is valid → relaunching claude (attempt ${chan_heals}/${CHAN_HEAL_MAX})"
+        launch_claude "$ACTIVE_DIR" boot
+        down=0
+        sleep 10
+      elif [ "$chan_heals" -eq "$CHAN_HEAL_MAX" ]; then
+        chan_heals=$((chan_heals + 1))
+        echo "[supervise] channel still absent after ${CHAN_HEAL_MAX} relaunches — stopping, this one needs a human"
+      fi
+    elif channel_attached; then
+      chan_heals=0
+    fi
+  fi
   # Same reasoning as Phase 1: a logged-out tenant has no channel by design, and restarting the
   # pod over it only takes away the terminal somebody needs in order to log in.
   if [ "${DISABLE_TELEGRAM_CHANNEL:-0}" != "1" ] && logged_in && ! channel_alive; then
