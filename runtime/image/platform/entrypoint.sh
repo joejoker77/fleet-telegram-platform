@@ -894,7 +894,13 @@ while tmux has-session -t "$SESSION" 2>/dev/null; do
   fi
   # Same reasoning as Phase 1: a logged-out tenant has no channel by design, and restarting the
   # pod over it only takes away the terminal somebody needs in order to log in.
-  if [ "${DISABLE_TELEGRAM_CHANNEL:-0}" != "1" ] && logged_in && ! channel_alive; then
+  # creds_fresh, NOT logged_in: an EXPIRED login leaves the credentials file in place, so
+  # logged_in() stayed true and this exit fired every ${CHAN_FLAP_GRACE}s against a state only a
+  # human can fix — the exact harm the comment above describes. Seen on sarah-o-brien 2026-09-17,
+  # three pod restarts in half an hour while her 30-day session sat a day past expiry. A healthy
+  # tenant refreshes the access token continuously, so this reads true for them; a token that is
+  # briefly stale only delays a legitimate restart by minutes.
+  if [ "${DISABLE_TELEGRAM_CHANNEL:-0}" != "1" ] && creds_fresh && ! channel_alive; then
     down=$((down + 5))
     if [ "$down" -ge "$CHAN_FLAP_GRACE" ]; then
       echo "[supervise] telegram channel down for ${down}s → exit for restart"
