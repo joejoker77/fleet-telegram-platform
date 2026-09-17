@@ -15,7 +15,9 @@
 #     The legacy initiate() endpoint is being retired for Composio-managed
 #     OAuth (400 after 2026-07-03) — do NOT switch back to it.
 #   * Composio appends status=success|failed and connected_account_id to our
-#     callback_url; we pre-embed uid + toolkit (+ alias) so cp-api can notify.
+#     callback_url; we pre-embed uid + toolkit (+ alias) so cp-api can notify,
+#     plus a single-use nonce (M6.5) that lets cp-api prove the return is real
+#     before it hands the news to the assistant's session.
 #   * MULTI-ACCOUNT (M7.5): /link allows multiple accounts of the same toolkit
 #     per user BY DEFAULT (verified in the REST reference — there is NO
 #     allow_multiple field on the endpoint; the allow_multiple/allowMultiple
@@ -48,6 +50,24 @@ TOOLKIT="$(echo "$TOOLKIT" | tr 'A-Z' 'a-z')"
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
+# Single-use nonce (M6.5). The callback is a public URL, so cp-api cannot tell a
+# real return-from-sign-in from a hand-typed one — and it now hands a line to the
+# assistant, which is worth more than a chat notice. The nonce is minted HERE,
+# lives only in this tenant's home, and travels out solely inside the link we
+# just asked Composio to redirect to. cp-api delivers to the session only when
+# the returned nonce matches an unexpired file here; without it the old
+# behaviour (page + chat notice) still stands.
+PENDING_DIR="$HOME/.claude/run/composio-pending"
+mkdir -p "$PENDING_DIR" && chmod 700 "$PENDING_DIR"
+# links the user opened but never finished — cp-api enforces the same 30 min
+find "$PENDING_DIR" -maxdepth 1 -type f -name '*.json' -mmin +30 -delete 2>/dev/null || true
+NONCE="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+[ ${#NONCE} -eq 32 ] || { echo "ERROR: could not generate a nonce" >&2; exit 1; }
+( umask 077
+  jq -n --arg n "$NONCE" --arg t "$TOOLKIT" --arg a "$ALIAS" --arg u "$UID_ARG" \
+     --argjson ts "$(date -u +%s)" \
+     '{nonce:$n, toolkit:$t, alias:$a, uid:$u, created:$ts}' > "$PENDING_DIR/$NONCE.json" )
+
 # 1) resolve the toolkit's auth_config (bootstrapped once per fleet)
 HTTP="$(curl -sS -o "$TMP/ac.json" -w '%{http_code}' \
   "$BASE/api/v3/auth_configs?toolkit_slug=$TOOLKIT&limit=10")"
@@ -61,7 +81,7 @@ fi
 # 2) create the Connect Link bound to this user
 # Embed alias in the callback too so cp-api can tell the user WHICH account
 # connected ("✅ Gmail (work) connected"); cp-api ignores it if unhandled.
-CB_URL="$CB_BASE/integrations/composio/callback?uid=$UID_ARG&toolkit=$TOOLKIT"
+CB_URL="$CB_BASE/integrations/composio/callback?uid=$UID_ARG&toolkit=$TOOLKIT&nonce=$NONCE"
 [ -n "$ALIAS" ] && CB_URL="$CB_URL&alias=$ALIAS"
 jq -n --arg ac "$AC_ID" --arg uid "$UID_ARG" --arg cb "$CB_URL" --arg alias "$ALIAS" \
   '{auth_config_id:$ac, user_id:$uid, callback_url:$cb} + (if $alias=="" then {} else {alias:$alias} end)' > "$TMP/req.json"

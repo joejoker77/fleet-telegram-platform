@@ -147,8 +147,16 @@ TASK_RES="$RUN_DIR/session-task.result.json"
 # pair so it can't race the switch/checkpoint contracts.
 REGISTRY_REQ="$RUN_DIR/registry-task.json"
 REGISTRY_RES="$RUN_DIR/registry-task.result.json"
+# M6.5 integration notices: cp-api leaves a single [SYSTEM] line here when the
+# user comes back from signing in to an external service, so the assistant hears
+# about it instead of waiting to be told again. No result file — nobody polls it.
+INJECT_REQ="$RUN_DIR/session-inject.json"
+INJECT_TTL=1800   # older than this and the news is no longer worth delivering
 # a request that survived a pod restart is stale — never execute it blind
 rm -f "$SWITCH_REQ" "$SWITCH_RES" "$TASK_REQ" "$TASK_RES" "$REGISTRY_REQ" "$REGISTRY_RES"
+# INJECT_REQ is deliberately NOT cleared here: unlike the requests above it
+# changes nothing, and a notice that landed while the pod was restarting is
+# still worth handing over. The TTL, not the restart, decides.
 
 session_dir() { # name → absolute dir on stdout; empty = invalid name
   case "$1" in
@@ -794,6 +802,42 @@ process_registry_request() {
   rm -f "$req"
 }
 
+# M6.5: hand cp-api's integration notice to the assistant by typing it into the
+# pane, exactly as the user would. Everything about the line is bounded here as
+# well as in cp-api: it must carry the [SYSTEM] marker, it is stripped to
+# printable characters on a single line, and it is capped — a notice can inform
+# the session, never drive it.
+process_inject_request() {
+  [ -f "$INJECT_REQ" ] || return 0
+  local req created now age text
+  req=$(cat "$INJECT_REQ" 2>/dev/null)
+  created=$(printf '%s' "$req" | python3 -c 'import json,sys
+try: d=json.load(sys.stdin)
+except Exception: d={}
+try: print(int(d.get("created",0)))
+except Exception: print(0)' 2>/dev/null)
+  now=$(date -u +%s)
+  age=$(( now - ${created:-0} ))
+  if [ "${created:-0}" -le 0 ] || [ "$age" -gt "$INJECT_TTL" ]; then
+    echo "[integrations] dropping a stale session notice (age ${age}s)"
+    rm -f "$INJECT_REQ"
+    return 0
+  fi
+  # A notice is only useful to a session that exists and can read it; keep it
+  # queued until then — the TTL above bounds the wait.
+  logged_in || return 0
+  text=$(printf '%s' "$req" | python3 -c 'import json,sys
+try: d=json.load(sys.stdin)
+except Exception: d={}
+t="".join(c for c in str(d.get("text","")) if c.isprintable())[:600]
+print(t if t.startswith("[SYSTEM] ") else "")' 2>/dev/null)
+  rm -f "$INJECT_REQ"
+  [ -n "$text" ] || { echo "[integrations] ignoring a malformed session notice"; return 0; }
+  tmux send-keys -t "$SESSION" -l -- "$text" 2>/dev/null || return 0
+  tmux send-keys -t "$SESSION" Enter 2>/dev/null || true
+  echo "[integrations] handed a connection notice to the assistant"
+}
+
 # Phase 2 — steady state. Exit (→ Restart) if claude OR the channel drops, the
 # latter only after CHAN_FLAP_GRACE of continuous absence to ride out flaps.
 # M5.7: each tick also executes a pending session-switch request. The respawn
@@ -814,6 +858,11 @@ while tmux has-session -t "$SESSION" 2>/dev/null; do
   # we do NOT reset `down`). curl in the helper is --max-time bounded.
   if [ -f "$REGISTRY_REQ" ]; then
     process_registry_request
+  fi
+  # M6.5: integration notice → the pane. Types into the existing session, so no
+  # respawn and no reason to reset `down`.
+  if [ -f "$INJECT_REQ" ]; then
+    process_inject_request
   fi
   # Keep the RC listener up: starts it after the first /login, and brings it back if it dies.
   # Deliberately not a reason to exit the pod — remote control going away is an inconvenience,
