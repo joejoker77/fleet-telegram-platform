@@ -1,0 +1,15 @@
+[Unit]
+Description=Daily check for Claude sign-ins about to lapse
+
+[Timer]
+# Once a day, early enough that a warning lands before the working day rather than after
+# somebody has already been met with silence. The script itself stays quiet unless the
+# picture changed, so a daily tick is not a daily message.
+OnCalendar=*-*-* 07:30:00 UTC
+RandomizedDelaySec=300
+# A host that was down at 07:30 still gets its check.
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

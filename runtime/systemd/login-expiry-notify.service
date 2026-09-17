@@ -1,0 +1,24 @@
+[Unit]
+Description=Report Claude sign-ins that are about to lapse (to the firm admin, over Telegram)
+Documentation=file:///opt/ftp-src/fleet-telegram-platform/runtime/install/login-expiry-notify.sh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/login-expiry-notify
+# It reads one integer per tenant out of ~/.claude/.credentials.json, so it needs to see
+# the homes — read-only is enough. The only thing it writes is its own state file, which
+# is what keeps it from repeating itself every morning.
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/fleet
+StateDirectory=fleet
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+# Network stays on: the whole job is one call to api.telegram.org.
+TimeoutStartSec=120
