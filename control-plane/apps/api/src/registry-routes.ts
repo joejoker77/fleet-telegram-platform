@@ -621,7 +621,18 @@ export function registerRegistryRoutes(app: FastifyInstance, deps: RegistryDeps)
         actor: `miniapp:${ctx.osUsername}`,
         payload: { artifactVersionId: ver.vId, verdict: scan.verdict, severity: scan.severity },
       }).catch(() => {});
-      return reply.code(422).send({ error: "the import did not pass the re-scan (fail-closed)", verdict: scan.verdict, severity: scan.severity });
+      // Send back WHY, exactly as the publish path above does. A refusal nobody can read is
+      // a refusal nobody can act on: the judge's reason is already written to
+      // judge_verdicts.report_ref, while the person installing is told only "did not pass
+      // the re-scan" and has nothing to fix.
+      return reply.code(422).send({
+        error: "the import did not pass the re-scan (fail-closed)",
+        verdict: scan.verdict,
+        severity: scan.severity,
+        decidedBy: scan.decidedBy,
+        findings: scan.findings,
+        reportRef: scan.reportRef,
+      });
     }
 
     // Install straight away. The approval card this used to raise was unanswerable on a

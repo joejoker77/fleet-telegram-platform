@@ -110,6 +110,25 @@ def cmd_list(_args):
         print("  offer one with:  share-skill publish <name>")
 
 
+def print_refusal(d):
+    """Everything the server said about a refusal, in both directions.
+
+    A refusal you cannot read is a refusal you cannot act on. The judge writes a plain
+    sentence saying what it objected to; until this was shared, `get` printed only "did
+    not pass the re-scan" and threw the sentence away, so a skill could be unusable for
+    days with nobody able to say why.
+    """
+    print(f"Refused by the safety check: {d.get('error')}")
+    if d.get("reportRef"):
+        print(f"  reason: {d['reportRef']}")
+    if d.get("severity"):
+        print(f"  severity: {d['severity']} (decided by {d.get('decidedBy')})")
+    for f in (d.get("findings") or [])[:5]:
+        print(f"  - {json.dumps(f)[:160]}")
+    print("  The same content is refused the same way every time, so re-running will not")
+    print("  help: change what it objected to, or ask an administrator to look at it.")
+
+
 def cmd_publish(args):
     mine = local_skills()
     if args.name not in mine:
@@ -151,11 +170,7 @@ def cmd_publish(args):
         )
         return
     if st == 422:
-        print(f"Refused by the safety check: {d.get('error')}")
-        if d.get("severity"):
-            print(f"  severity: {d['severity']} (decided by {d.get('decidedBy')})")
-        for f in (d.get("findings") or [])[:5]:
-            print(f"  - {json.dumps(f)[:160]}")
+        print_refusal(d)
         sys.exit(2)
     if st == 404:
         print(f"The server could not find the skill files: {d.get('error')}")
@@ -201,7 +216,7 @@ def cmd_get(args):
         )
         return
     if st == 422:
-        print(f"Refused by the safety check: {d.get('error')}")
+        print_refusal(d)
         sys.exit(2)
     print(f"Install failed ({st}): {d.get('error')}")
     sys.exit(4)
