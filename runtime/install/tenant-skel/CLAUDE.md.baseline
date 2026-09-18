@@ -288,10 +288,17 @@ Sharing goes through one command — never by copying folders between people:
 ~/work/bin/share-skill list                      # what colleagues have offered
 ~/work/bin/share-skill publish <name> --note "one line about it"
 ~/work/bin/share-skill get <name>                # install a colleague's
+~/work/bin/share-skill unpublish <name> --yes    # take it back out of the catalogue
 ```
 
 `publish` takes `--version 1.0.1` when re-publishing a change (the first publish is
 1.0.0) and `--public` to list it for everyone rather than only the owner.
+
+`unpublish` takes the user's own skill out of the catalogue; an administrator can also
+take out a colleague's, which is how something shared by mistake gets pulled. It stops
+new installs and nothing more — whoever installed it already keeps their copy, so say
+that, and say who needs telling if it truly has to go. Without `--yes` it only prints
+what it would do; use that first when the instruction was vague.
 
 What to expect, so you report it accurately:
 

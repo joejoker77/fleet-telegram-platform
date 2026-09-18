@@ -9,12 +9,13 @@ Skills a person writes are private to their own machine. Nothing copies them acr
 five people have independently built without-prejudice tooling that none of the others can
 see. This is how that stops.
 
-## The three things you can do
+## The four things you can do
 
 ```
 ~/work/bin/share-skill list                      # what colleagues have offered, and what you have
 ~/work/bin/share-skill publish <name> --note "one line about it"
 ~/work/bin/share-skill get <name>                # install a colleague's
+~/work/bin/share-skill unpublish <name> --yes    # take it back out of the catalogue
 ```
 
 `publish` takes `--version 1.0.1` when re-publishing a change (the first publish defaults
@@ -35,6 +36,22 @@ the owner.
   tell them to restart.
 - **Names are per person.** If the user asks for "Daria's WP letter skill", run `list`
   first and use the exact name from it rather than guessing.
+
+## Taking something back out
+
+`unpublish` removes the catalogue entry. The user can always do it to their own; an
+administrator can also do it to a colleague's, which is how something shared by mistake,
+or left behind by someone who has gone, gets pulled.
+
+Two things to say plainly when you run it, because neither is obvious:
+
+- **It stops new installs; it does not recall the copies already taken.** Whoever
+  installed it still has their own copy in their workspace. If it must actually go —
+  a client name, a credential — say so and tell the user who needs telling.
+- **Without `--yes` the command only describes what it would do.** Run it that way first
+  when you are acting on a vague instruction, show the user the line, and then confirm.
+
+An administrator removing a colleague's skill is recorded, with both names. Say that too.
 
 ## Judgement before publishing
 

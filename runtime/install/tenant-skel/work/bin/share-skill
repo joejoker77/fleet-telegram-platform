@@ -4,11 +4,18 @@
     share-skill list                     what is on offer (yours + shared with the firm)
     share-skill publish <name> [opts]    offer one of your own skills
     share-skill get <name|version-id>    install a colleague's skill for yourself
+    share-skill unpublish <name> --yes   take it out of the catalogue
 
 Options for publish:
     --version X.Y.Z   default 1.0.0; use a new number to publish a change
     --public          offer it to everyone (default: only you can see it listed)
     --note "..."      one line so colleagues know what it does
+
+`unpublish` takes your own skill out of the catalogue. Administrators can also take out
+a colleague's — that is the way to pull something that should not have been shared, or
+that belongs to someone who has left. Without `--yes` it only says what it would do.
+It removes the catalogue entry, not the copies: anyone who already installed it keeps
+theirs, so a real recall means telling those people.
 
 Nothing here is instant-and-silent. Every publish and every install is scanned first,
 and unless you are an admin it also waits for an approval — so the answer may be
@@ -222,6 +229,44 @@ def cmd_get(args):
     sys.exit(4)
 
 
+def cmd_unpublish(args):
+    hits = [a for a in catalogue() if a.get("name") == args.ref]
+    if hits:
+        art_id = hits[0].get("id")
+        owner = "you" if hits[0].get("mine") else (hits[0].get("ownerUsername") or "someone else")
+    elif len(args.ref) >= 32:
+        # An id for something the catalogue does not list to you — a colleague's private
+        # one, say. The server decides whether you may touch it; the point here is only
+        # that a name you cannot see is not a name you can type.
+        art_id, owner = args.ref, "someone else"
+    else:
+        sys.exit(f"'{args.ref}' is not in the catalogue. Run: share-skill list")
+
+    if not args.yes:
+        print(f"Would take '{args.ref}' out of the catalogue (owner: {owner}).")
+        print("  This stops new installs. It does not reach into anyone's workspace:")
+        print("  people who already installed it keep their copy.")
+        print(f"  To go ahead:  share-skill unpublish {args.ref} --yes")
+        return
+
+    st, d = call("DELETE", f"/registry/items/{art_id}")
+    if st == 200 and d.get("ok"):
+        print(f"'{d.get('name') or args.ref}' is out of the catalogue — nobody can install it now.")
+        if d.get("asAdmin"):
+            print(f"  You did that as an administrator, on {owner}'s skill. It is in the audit log.")
+        print("  Anyone who already installed it still has their copy — tell them if it has to go.")
+        return
+    if st == 403:
+        print(f"Refused: {d.get('error')}")
+        print("  Only the owner, or an administrator, can take a skill out of the catalogue.")
+        sys.exit(2)
+    if st == 404:
+        print("The catalogue has nothing with that id — it may already be gone.")
+        sys.exit(3)
+    print(f"Unpublish failed ({st}): {d.get('error')}")
+    sys.exit(4)
+
+
 def main():
     p = argparse.ArgumentParser(add_help=True, description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -238,6 +283,11 @@ def main():
     get = sub.add_parser("get", help="install a colleague's skill")
     get.add_argument("ref", help="skill name, or the version id from `list`")
     get.set_defaults(fn=cmd_get)
+
+    un = sub.add_parser("unpublish", help="take a skill out of the catalogue")
+    un.add_argument("ref", help="skill name as `list` prints it, or its id")
+    un.add_argument("--yes", action="store_true", help="actually do it (without this it only says what it would do)")
+    un.set_defaults(fn=cmd_unpublish)
 
     args = p.parse_args()
     args.fn(args)

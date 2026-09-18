@@ -8,7 +8,7 @@
 //   POST   /registry/import   { artifactVersionId }
 //                              → fetch pinned version → re-scan → approval (always)
 //                                → install into the importer's .claude/ on allow
-//   DELETE /registry/items/:id                   unpublish (owner only)
+//   DELETE /registry/items/:id                   unpublish (owner, or an administrator)
 //
 // SECRET/EGRESS SPLIT: cp-api runs host-side WITHOUT the GitHub PAT (OneCLI
 // injects it only at the tenant pod's egress proxy). So PUBLISH (git WRITE) is
@@ -664,22 +664,29 @@ export function registerRegistryRoutes(app: FastifyInstance, deps: RegistryDeps)
     });
   });
 
-  // unpublish (owner only) — removes the registry rows; does not rewrite git history
+  // unpublish (owner, or an administrator) — removes the registry rows; does not rewrite
+  // git history and does not reach into workspaces that already installed it.
   app.delete("/registry/items/:id", async (req, reply) => {
     const ctx = await authed(req, reply);
     if (!ctx) return;
     const id = (req.params as { id: string }).id;
     const art = (await db.select().from(schema.artifacts).where(eq(schema.artifacts.id, id)).limit(1))[0];
     if (!art) return reply.code(404).send({ error: "not found" });
-    if (art.ownerUserId !== ctx.userId) return reply.code(403).send({ error: "not your artifact" });
+    // A firm catalogue needs someone who can take a skill down when its owner is away or
+    // has left. The API has always known who the administrators are; this route was the
+    // one place that ignored it, so nobody could remove anything but their own.
+    const asAdmin = art.ownerUserId !== ctx.userId;
+    if (asAdmin && !ctx.isAdmin) return reply.code(403).send({ error: "not your artifact" });
     await db.delete(schema.artifacts).where(eq(schema.artifacts.id, id)); // versions cascade
     await sendAudit(deps.auditSocket, {
       userId: ctx.userId,
       kind: "registry.unpublish",
       actor: `miniapp:${ctx.osUsername}`,
-      payload: { artifactId: id, type: art.type, name: art.name },
+      // Who removed whose, not just what: an administrator acting on someone else's skill
+      // is the case worth being able to find again months later.
+      payload: { artifactId: id, type: art.type, name: art.name, asAdmin, ownerUserId: art.ownerUserId },
     }).catch(() => {});
-    return reply.send({ ok: true });
+    return reply.send({ ok: true, name: art.name, asAdmin });
   });
 }
 
