@@ -1,10 +1,14 @@
 # Working on matters at Monaco Solicitors
 
 Tools installed in `~/work/bin`. They are not on PATH, so call them by path.
-Every one of them reads only, with one exception: **`sa-sign` sends.** It emails a
-client and writes a note on the deal. It will not do either until a plan on disk
-says `"confirmed": true`, which you set after looking at a picture of the page.
-Nothing else here writes to Pipedrive or sends anything.
+Most of them only read. Two write. **`sa-sign` sends**: it emails a client and writes a
+note on the deal, and will not do either until a plan on disk says `"confirmed": true`,
+which you set after looking at a picture of the page. **`pd-upload` puts a file on a
+deal**: use it whenever the user asks for a document to go on a matter; it checks the
+deal exists and shows its title before sending. Beyond these two, writing to Pipedrive
+(a note, a field, a stage move) is allowed when the user asks for it: call the REST API
+directly and say what you changed. Do not refuse a write the user asked for on the
+strength of this paragraph.
 
 | Command | What it answers |
 |---|---|
@@ -13,6 +17,7 @@ Nothing else here writes to Pipedrive or sends anything.
 | `~/work/bin/my-matters` | which of my matters have gone quiet with nothing diarised |
 | `~/work/bin/deal-brief <deal-id>` | everything on one matter, on one screen |
 | `~/work/bin/pd-attachments list\|get\|send <id>` | documents attached to a matter's emails |
+| `~/work/bin/pd-upload <deal-id> <file>` | put a document on a matter's Files tab |
 | `~/work/bin/sa-sign scan\|prepare\|publish` | send a settlement agreement to a client for e-signature |
 | `~/work/bin/report-schedule` | reports that arrive in Telegram on a timer |
 | `~/work/bin/tg-file <path> "caption"` | send the user a real file in Telegram |

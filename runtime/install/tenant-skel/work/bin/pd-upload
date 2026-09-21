@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# pd-upload — attach a local file to a Pipedrive deal (Files tab).
+#
+# Why this exists: the shell guard denies any multipart file upload typed on a command line
+# (exfil:curl_upload_file), which is exactly the shape of Pipedrive's file upload. Rather than
+# weaken that rule, the exception is scoped here, like voice-transcribe:
+#   * the endpoint is hardcoded — this script cannot post anywhere else
+#   * the deal must exist (checked first) and its title is shown before anything is sent
+#   * the credential is never handled: the egress proxy injects x-api-token for this host
+#
+# This WRITES to Pipedrive: the file appears on the deal for every user of the CRM.
+# Only run it when the user has asked for this file to go on this deal.
+#
+# Usage: pd-upload <deal-id> <file> [<file> ...]
+set -euo pipefail
+BASE='https://monacosolicitors2.pipedrive.com/api/v1'
+MAX_BYTES=52428800   # 50 MB
+
+if [ $# -lt 2 ]; then echo "usage: pd-upload <deal-id> <file> [<file> ...]" >&2; exit 64; fi
+deal="$1"; shift
+[[ "$deal" =~ ^[0-9]+$ ]] || { echo "pd-upload: deal id must be a number" >&2; exit 64; }
+
+title=$(curl -sS "$BASE/deals/$deal" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+if not d.get("success") or not d.get("data"):
+    sys.stderr.write("pd-upload: deal not found or no access: %s\n" % json.dumps(d)[:200]); sys.exit(3)
+x = d["data"]; print("%s | %s | owner %s" % (x.get("title"), x.get("status"), (x.get("user_id") or {}).get("name")))') || exit 3
+echo "deal $deal: $title"
+
+rc=0
+for f in "$@"; do
+  if [ ! -f "$f" ]; then echo "pd-upload: no such file: $f" >&2; rc=66; continue; fi
+  sz=$(stat -c %s "$f")
+  if [ "$sz" -gt "$MAX_BYTES" ]; then echo "pd-upload: $f is $sz bytes, over the 50 MB limit" >&2; rc=65; continue; fi
+  resp=$(curl -sS -X POST "$BASE/files" -F "deal_id=$deal" -F "file=@$f")
+  echo "$resp" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+if not d.get("success"):
+    sys.stderr.write("pd-upload: Pipedrive refused: %s\n" % json.dumps(d)[:300]); sys.exit(4)
+x = d["data"]; print("uploaded: %s  (file id %s, %s bytes)  https://monacosolicitors2.pipedrive.com/deal/%s#files" % (x.get("name"), x.get("id"), x.get("file_size"), x.get("deal_id")))' || rc=4
+done
+exit $rc
