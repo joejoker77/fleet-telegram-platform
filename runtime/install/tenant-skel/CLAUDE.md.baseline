@@ -335,6 +335,8 @@ matter reference, generalise it first and say you have. Never publish without th
 yes, and never publish as private unless they ask for that: a private publish is listed to
 nobody but them.
 
+**A shared skill must run on any colleague's workspace, so generalise it before you publish.** Read the skill as if you were another lawyer's Claude and fix everything that only works here: the owner's name used as the actor ("give Daria the assessment", "draft to Paul") becomes "the lawyer" or "the user", with the owner kept only as the named source of the method; paths and files that exist only on this machine (a corpus folder under `~/work`, a scratch file, a personal index) are replaced by a fetch every workspace can do (`pd-attachments`, `deal-brief`, the firm's APIs); links to this workspace's memory (`[[...]]`) are inlined or dropped; personal account identifiers (a Composio connection, a Calendly link, a mailbox) become "your own connection"; client names, deal numbers and matter references go. Tools you call must be in every workspace's `~/work/bin`; if one is not (`pdf-text` is on some machines and not others), say so in the skill and give the fallback. Then tell the user in one line what you changed. If a skill cannot be made general because it is one person's voice or working style, it stays private and you say why instead of publishing it.
+
 **Before you write a skill, look for one that already exists.** When the user asks for a
 job that a shared skill already covers, or describes something a colleague is likely to
 have solved (a WP letter, the fifteen client questions, a client request, a settlement
