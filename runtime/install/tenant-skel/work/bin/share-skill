@@ -117,6 +117,26 @@ def cmd_list(_args):
         print("  offer one with:  share-skill publish <name>")
 
 
+def print_portability(warnings):
+    """What will not work on a colleague's machine. Advice, never a refusal.
+
+    The skill is already published when this prints. Nothing here blocked it and
+    nothing here can: it is a list of things to fix in the next version, because a
+    skill that only runs in its author's workspace is a skill the catalogue cannot
+    honestly offer to anyone else.
+    """
+    if not warnings:
+        return
+    print(f"\n  It is shared, but {len(warnings)} thing(s) will not work on a colleague's machine:")
+    for w in warnings[:10]:
+        print(f"    {w.get('file')}:{w.get('line')}  {w.get('message')}")
+        if w.get("excerpt"):
+            print(f"      > {w['excerpt'][:100]}")
+    if len(warnings) > 10:
+        print(f"    … and {len(warnings) - 10} more")
+    print("  Fix them and publish again with a new version number (--version).")
+
+
 def print_refusal(d):
     """Everything the server said about a refusal, in both directions.
 
@@ -166,6 +186,7 @@ def cmd_publish(args):
             )
             if d.get("prUrl"):
                 print(f"  waiting here: {d['prUrl']}")
+        print_portability(d.get("portability") or [])
         return
     if st == 200 and d.get("approvalId"):
         # Non-admins get an approval card instead of an immediate publish (design §3).

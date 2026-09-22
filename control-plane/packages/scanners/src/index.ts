@@ -20,6 +20,9 @@ export type { JudgeClient } from "./judge-client.js";
 // Re-exported for boundary-1 callers (e.g. the authoring save flow) that want the
 // free deterministic advisory WITHOUT a judge call.
 export { builtinScan } from "./deterministic.js";
+// Advice only — see portability.ts for why it is not part of the verdict.
+export { portabilityLint, lintText, formatWarnings } from "./portability.js";
+export type { PortabilityWarning } from "./portability.js";
 
 export const SCAN_RESULT_KIND = "scan.result";
 

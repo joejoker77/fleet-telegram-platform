@@ -22,7 +22,7 @@ import path from "node:path";
 import { randomUUID, createHash } from "node:crypto";
 import { and, eq, or, desc } from "drizzle-orm";
 import { getDb, schema } from "@fleet/db";
-import { scanArtifact, httpJudgeClient, type ScanInput, type ScanResult } from "@fleet/scanners";
+import { scanArtifact, httpJudgeClient, portabilityLint, type ScanInput, type ScanResult } from "@fleet/scanners";
 import { requireAuth, AuthError, type AuthCtx } from "./authz.js";
 import { createApproval, type ApprovalsDeps } from "./approvals.js";
 import { sendAudit } from "./audit.js";
@@ -566,7 +566,16 @@ export function registerRegistryRoutes(app: FastifyInstance, deps: RegistryDeps)
     // that is already in your own sandbox.
     const res = await runPublish(deps, payload);
     if (!res.ok) return reply.code(502).send({ error: res.error });
-    return reply.send({ published: true, versionId: res.versionId, prUrl: res.prUrl, gitRef: res.gitRef, merged: res.merged, mergeState: res.mergeState, verdict: scan.verdict });
+    // Portability advice, never a gate: it has no vote on the verdict above and is not
+    // shown to the judge. A skill that only runs on its author's machine still publishes
+    // — the author is simply told what to fix before someone installs it.
+    let portability: ReturnType<typeof portabilityLint> = [];
+    try {
+      portability = portabilityLint(src, ctx.osUsername);
+    } catch {
+      /* advice is best-effort — a lint fault must never affect a publish that passed */
+    }
+    return reply.send({ published: true, versionId: res.versionId, prUrl: res.prUrl, gitRef: res.gitRef, merged: res.merged, mergeState: res.mergeState, verdict: scan.verdict, portability });
   });
 
   // import
