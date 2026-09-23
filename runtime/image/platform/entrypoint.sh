@@ -304,7 +304,7 @@ checkpoint_rewind() { # $1=name $2=ckpt-id → 0 ok; error message on stdout on 
   if [ "$was_active" = 1 ]; then
     # park the pane first so the dying claude can't append to the jsonl or
     # write files AFTER we restore them (respawn-window kills synchronously)
-    tmux respawn-window -k -t "$SESSION" "sleep 600" 2>/dev/null || true
+    tmux respawn-window -k -t "${SESSION}:0" "sleep 600" 2>/dev/null || true
     set_session_state "$name" starting
   fi
   ckpt_git "$name" reset -q --hard "$commit" 2>/dev/null \
@@ -420,6 +420,41 @@ arm_readiness_watch() { # $1 = name — flips starting→ready when the plugin i
   ) &
 }
 
+EGRESS_WAIT_MAX="${EGRESS_WAIT_MAX:-120}"
+wait_for_egress() {
+  # Claude decides ONCE, at startup, whether it has channels: with no way out to
+  # the network it cannot resolve plugin:telegram, prints "--channels ignored /
+  # Channels are not currently available", and never reconsiders. So the pod must
+  # not start claude until the egress proxy is actually carrying traffic.
+  #
+  # This is not hypothetical. 2026-09-23: unattended-upgrades pulled in libglib2.0,
+  # needrestart auto-restarted everything linking it — all 32 tenant pods AND the
+  # podman stack holding the onecli proxy. The pods were up at 06:01:23, the proxy
+  # only at 06:01:34, and those eleven seconds cost the firm a morning: 24 of 32
+  # lawyers had a bot that received their messages and answered none.
+  #
+  # systemd ordering cannot express this: onecli is a podman container with no unit
+  # of its own, so there is nothing to put in After=. Waiting here also covers the
+  # cases ordering would miss — a proxy that restarts on its own, a slow start, a
+  # human bouncing the stack.
+  [ -n "${HTTPS_PROXY:-}" ] || return 0
+  local i=0 code
+  while [ "$i" -lt "$EGRESS_WAIT_MAX" ]; do
+    # Any answer at all proves the path works; 404 is the healthy reply here and
+    # costs nothing. Only a dead proxy yields the empty/000 curl gives on failure.
+    code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 https://api.anthropic.com/ 2>/dev/null)"
+    if [ -n "$code" ] && [ "$code" != "000" ]; then
+      [ "$i" -gt 0 ] && echo "[egress] proxy answered after ${i}s — starting claude"
+      return 0
+    fi
+    [ "$i" -eq 0 ] && echo "[egress] no route out yet — holding claude until the proxy answers"
+    sleep 2; i=$((i + 2))
+  done
+  # Starting anyway beats never starting: the channel heal below is the backstop,
+  # and a tenant with a terminal can at least be looked at.
+  echo "[egress] proxy still silent after ${EGRESS_WAIT_MAX}s — starting claude regardless"
+}
+
 launch_claude() { # $1 = dir, $2 = boot|switch
   local dir="$1" mode="$2" cmd="$CLAUDE_CMD"
   trust_workdir "$dir"
@@ -428,13 +463,24 @@ launch_claude() { # $1 = dir, $2 = boot|switch
   # below); a switch resumes the target project's own conversation instead.
   [ "$mode" = "switch" ] && cmd="$cmd $(resume_flag "$dir")"
   if tmux has-session -t "$SESSION" 2>/dev/null; then
-    tmux respawn-window -k -t "$SESSION" "cd '$dir' && exec $cmd"
+    # ":0" is NOT decoration. The rc listener lives in its own session whose only
+    # window is ALSO named "claude", so the bare target "claude" is ambiguous and
+    # tmux is free to resolve it to rc:0 — which it does on roughly half the pods
+    # (verified 2026-09-23: same command, same image, helen-alty resolved to
+    # claude:0 and sshjulianpg to rc:0). When it lands on rc, this respawn kills
+    # the remote-control listener and starts a SECOND claude beside the broken
+    # first one, which still owns window 0 and still has no channel. That is why
+    # the channel self-heal below "ran" three times on 24 tenants at 06:03-06:05
+    # and changed nothing: it was never respawning the session it was measuring.
+    # channel_attached() already reads ":0" for the same reason — this is the
+    # other half of that fix.
+    tmux respawn-window -k -t "${SESSION}:0" "cd '$dir' && exec $cmd"
   else
     tmux -f "$TMUX_CFG" new-session -d -s "$SESSION" -x 200 -y 60 -c "$dir" "exec $cmd"
   fi
   # Non-destructively capture the pane (claude's TUI/errors) to a log so launch
   # failures are diagnosable from the host; re-armed after every respawn.
-  tmux pipe-pane -t "$SESSION" -o "cat >> '$TELEGRAM_STATE_DIR/logs/claude-pane.log'" 2>/dev/null || true
+  tmux pipe-pane -t "${SESSION}:0" -o "cat >> '$TELEGRAM_STATE_DIR/logs/claude-pane.log'" 2>/dev/null || true
 }
 
 # The supervisor executes a pending switch request (validated, atomic result).
@@ -495,6 +541,7 @@ mkdir -p "$TELEGRAM_STATE_DIR/logs"
 SESS_LOG="$TELEGRAM_STATE_DIR/logs/session_current.txt"
 [ -s "$SESS_LOG" ] && mv -f "$SESS_LOG" "$TELEGRAM_STATE_DIR/logs/session_$(date -u +%Y%m%d_%H%M%S).txt"
 
+wait_for_egress
 launch_claude "$ACTIVE_DIR" boot
 set_session_state "${ACTIVE_NAME:-default}" starting
 arm_readiness_watch "${ACTIVE_NAME:-default}"
@@ -571,10 +618,13 @@ fi
     echo; echo '----- BEGIN PREVIOUS SESSION TAIL -----'; echo "$TAIL"; echo '----- END PREVIOUS SESSION TAIL -----'
   } > "$MSG_FILE"
   tmux load-buffer -b session_restore "$MSG_FILE"
-  tmux paste-buffer -t "$SESSION" -b session_restore -d -p
+  # ":0" — the rc listener's only window is also named "claude", so a bare target
+  # can land there and paste the whole session tail into the remote-control
+  # listener instead of the bot. See the note in launch_claude().
+  tmux paste-buffer -t "${SESSION}:0" -b session_restore -d -p
   rm -f "$MSG_FILE"
   sleep 0.4
-  tmux send-keys -t "$SESSION" Enter
+  tmux send-keys -t "${SESSION}:0" Enter
 ) &
 
 # Supervise: exit (→ unit Restart=always) when EITHER the claude tmux session
@@ -632,6 +682,9 @@ channel_alive() {
 CHAN_HEAL_MAX="${CHANNEL_HEAL_MAX:-3}"
 chan_heals=0
 heal_tick=0
+# Survives a pod restart on purpose (the ~/.claude volume is the only thing that
+# does), so the one-shot escalation below cannot become a restart loop.
+CHAN_ESCALATED="$HOME/.claude/.channel-escalated"
 
 channel_attached() {
   # Ground truth is what the session itself says. ":0" is deliberate — the rc window is
@@ -833,8 +886,10 @@ t="".join(c for c in str(d.get("text","")) if c.isprintable())[:600]
 print(t if t.startswith("[SYSTEM] ") else "")' 2>/dev/null)
   rm -f "$INJECT_REQ"
   [ -n "$text" ] || { echo "[integrations] ignoring a malformed session notice"; return 0; }
-  tmux send-keys -t "$SESSION" -l -- "$text" 2>/dev/null || return 0
-  tmux send-keys -t "$SESSION" Enter 2>/dev/null || true
+  # ":0" — see launch_claude(): a bare target can resolve to the rc listener, and
+  # this notice would then be typed at remote control instead of the assistant.
+  tmux send-keys -t "${SESSION}:0" -l -- "$text" 2>/dev/null || return 0
+  tmux send-keys -t "${SESSION}:0" Enter 2>/dev/null || true
   echo "[integrations] handed a connection notice to the assistant"
 }
 
@@ -886,10 +941,23 @@ while tmux has-session -t "$SESSION" 2>/dev/null; do
         sleep 10
       elif [ "$chan_heals" -eq "$CHAN_HEAL_MAX" ]; then
         chan_heals=$((chan_heals + 1))
-        echo "[supervise] channel still absent after ${CHAN_HEAL_MAX} relaunches — stopping, this one needs a human"
+        # Relaunching inside the pod has run out. The next bigger hammer is the one
+        # a human reaches for and the only one that has ever worked in the field: a
+        # full pod restart, which destroys the container and every process claude
+        # left behind. Take it ONCE — the marker survives the restart (it lives on
+        # the ~/.claude volume), so a pod that comes back still channel-less stops
+        # here instead of bouncing the lawyer's terminal every five minutes. The
+        # marker is cleared the moment a channel appears.
+        if [ ! -f "$CHAN_ESCALATED" ]; then
+          : > "$CHAN_ESCALATED"
+          echo "[supervise] channel still absent after ${CHAN_HEAL_MAX} relaunches → restarting the whole pod (once)"
+          exit 1
+        fi
+        echo "[supervise] channel still absent after ${CHAN_HEAL_MAX} relaunches and a pod restart — stopping, this one needs a human"
       fi
     elif channel_attached; then
       chan_heals=0
+      rm -f "$CHAN_ESCALATED"
     fi
   fi
   # Same reasoning as Phase 1: a logged-out tenant has no channel by design, and restarting the
