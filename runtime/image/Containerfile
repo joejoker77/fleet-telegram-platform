@@ -28,7 +28,18 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 # claude-fable-5-1: the model shipped 09-01 and the "stable" tag (2.1.236,
 # published 08-19) does not carry it. Previous value 2.1.177; the pre-upgrade
 # image is kept on the host as claude-user:pre-cc-upgrade-20260903.
-ARG CLAUDE_VERSION=2.1.259
+#
+# 2026-09-23: 2.1.280 (npm "latest"; "stable" is 2.1.267). This is the version
+# the pods were ALREADY running — every session self-updates on start, so the
+# baked version only decides what a pod runs BEFORE that update lands. That
+# matters more than it sounds now that the fleet is pinned to claude-opus-5-5:
+# 2.1.259 does not know that model and refuses it outright ("isn't described by
+# this version's model catalog"), so a pod that starts without egress — exactly
+# the 06:01 case earlier today — can neither self-update nor run. Baking the
+# version the fleet is pinned against removes that dependency. Gate met the same
+# way as last time: a real turn on wiperawa (v2.1.280, "Opus 5.5 · Claude Team")
+# that actually answered, not a pod that merely looked healthy.
+ARG CLAUDE_VERSION=2.1.280
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_VERSION}"
 
 # Bun — dependency of the official Telegram plugin. Install to /usr/local so it
