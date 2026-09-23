@@ -74,9 +74,16 @@ watcher_capture_pane() {
   # Capture last 60 lines of the bot's tmux 'claude' session FROM INSIDE the
   # container. tmux socket lives at $HOME/.claude (TMUX_TMPDIR), which podman
   # exec does not inherit — so we pass it explicitly. exec runs as the tenant uid.
+  #
+  # "claude:0", never a bare "claude": the remote-control listener sits in its own
+  # session whose only window is ALSO named "claude", and tmux resolves the bare
+  # name to that one on about half the pods (measured 2026-09-23). Reading the
+  # wrong pane here means seeing an idle rc listener while the lawyer is
+  # mid-sentence, and restarting the pod out from under them — the one thing this
+  # script exists to avoid.
   local u="$1"
   podman exec -e "TMUX_TMPDIR=${HOME_ROOT}/${u}/.claude" "claude-${u}" \
-    tmux capture-pane -p -S -60 -t claude 2>/dev/null || true
+    tmux capture-pane -p -S -60 -t claude:0 2>/dev/null || true
 }
 
 is_busy() {
