@@ -111,6 +111,22 @@ if [ -f "$MODEL_FILE" ]; then
   [ -n "${CLAUDE_FALLBACK_MODEL:-}" ] && MODEL_ARGS=(-e CLAUDE_FALLBACK_MODEL="$CLAUDE_FALLBACK_MODEL")
 fi
 
+# Auto-compaction window. On a 1M-context model Claude Code only compacts near 1M tokens, so a
+# lawyer who keeps every matter in one long session re-sends ~600k tokens with every message and
+# burns the seat's usage limit in a few turns (daria-rudenko, 2026-09-24: 633k, limit hit). This
+# makes compaction happen at ~200k instead. It must be a real process env var: the same variable
+# in settings.json's env block reaches tool subprocesses but not Claude Code's own compaction
+# logic. Host-overridable in /etc/claudeapp/compact.env; setting it to an empty value there
+# turns this off (Claude Code's own default applies again).
+CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000
+COMPACT_FILE=/etc/claudeapp/compact.env
+# shellcheck disable=SC1090
+[ -f "$COMPACT_FILE" ] && . "$COMPACT_FILE"
+COMPACT_ARGS=()
+if [ -n "${CLAUDE_CODE_AUTO_COMPACT_WINDOW:-}" ]; then
+  COMPACT_ARGS=(-e CLAUDE_CODE_AUTO_COMPACT_WINDOW="$CLAUDE_CODE_AUTO_COMPACT_WINDOW")
+fi
+
 # Per-tenant runtime overrides. The entrypoint already defaults REMOTE_CONTROL_NAME to
 # "<user>-main" and keeps both the Telegram channel and the remote-control listener on, so an
 # absent file is the normal case and changes nothing. This exists for the exceptions: a tenant
@@ -222,7 +238,7 @@ exec /usr/bin/podman run --rm --name "claude-$U" \
   --cap-drop=ALL \
   --read-only --tmpfs /tmp --tmpfs /run \
   --memory=4g --memory-reservation=3g --cpus=2 --pids-limit=2048 \
-  -e HOME="$HOME_DIR" -e XDG_RUNTIME_DIR=/tmp -e HOST_ADMIN_USER="$U" "${PROXY_ARGS[@]}" "${CLAUDE_AUTH_ARGS[@]}" "${COMPOSIO_ARGS[@]}" "${MODEL_ARGS[@]}" "${TENANT_ARGS[@]}" "${SECRETD_ARGS[@]}" \
+  -e HOME="$HOME_DIR" -e XDG_RUNTIME_DIR=/tmp -e HOST_ADMIN_USER="$U" "${PROXY_ARGS[@]}" "${CLAUDE_AUTH_ARGS[@]}" "${COMPOSIO_ARGS[@]}" "${MODEL_ARGS[@]}" "${COMPACT_ARGS[@]}" "${TENANT_ARGS[@]}" "${SECRETD_ARGS[@]}" \
   -v "$HOME_DIR/.claude:$HOME_DIR/.claude" \
   -v "$HOME_DIR/work:$HOME_DIR/work" \
   -v "$HOME_DIR/.config:$HOME_DIR/.config" \
