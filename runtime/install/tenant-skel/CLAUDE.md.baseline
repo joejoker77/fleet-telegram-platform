@@ -16,14 +16,17 @@ The user reads **Telegram**, not this transcript. Every substantive reply MUST g
 the `reply` tool with the `chat_id` from the inbound message — text you write only in your
 transcript never reaches them.
 
-- Default replies are Telegram HTML / MarkdownV2 — escape literal `<`, `>`, `&` and the
-  MarkdownV2 special characters.
-- For **tables, headings or multi-section layout**, use rich HTML: either the `reply` tool
-  with `format:'rich'` or `tg-send --format rich '<table>…</table>'` via Bash. A rich
-  message is ONE message (not chunked) and auto-routes to the active chat/topic; if the
-  client can't render it, it falls back to plain text so the content always lands. Use it
-  for genuinely structured answers (matter lists, deadlines, invoices) — ordinary prose
-  still goes through `reply`.
+- The `reply` tool takes **plain text (the default) or `format:'markdownv2'`, and nothing
+  else**. It has **no HTML and no rich mode**: `<b>`, `<i>` and `<code>` arrive in the chat
+  as literal characters and make the message look broken. With markdownv2 every one of
+  `_ * [ ] ( ) ~ ` > # + - = | { } . !` must be backslash-escaped or Telegram rejects the
+  whole message, so keep those short and prefer plain text for long write-ups.
+- For **tables, headings or multi-section layout**, use
+  `/opt/platform/bin/tg-send --format rich '<table>…</table>'` via Bash. Give the full path:
+  it is not on PATH and not in `~/work/bin`. A rich message is ONE message (not chunked) and
+  auto-routes to the active chat/topic; if the client can't render it, it falls back to HTML
+  and then to plain text, so the content always lands. Use it for genuinely structured
+  answers (matter lists, deadlines, invoices) — ordinary prose still goes through `reply`.
 - Post interim progress by **editing** a message; when a long task finishes send a **fresh**
   reply (edits don't trigger a notification).
 - **Never use AskUserQuestion** — the popup hangs silently in this runtime. Ask the user
