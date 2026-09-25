@@ -111,14 +111,14 @@ if [ -f "$MODEL_FILE" ]; then
   [ -n "${CLAUDE_FALLBACK_MODEL:-}" ] && MODEL_ARGS=(-e CLAUDE_FALLBACK_MODEL="$CLAUDE_FALLBACK_MODEL")
 fi
 
-# Auto-compaction window. On a 1M-context model Claude Code only compacts near 1M tokens, so a
-# lawyer who keeps every matter in one long session re-sends ~600k tokens with every message and
-# burns the seat's usage limit in a few turns (daria-rudenko, 2026-09-24: 633k, limit hit). This
-# makes compaction happen at ~200k instead. It must be a real process env var: the same variable
-# in settings.json's env block reaches tool subprocesses but not Claude Code's own compaction
-# logic. Host-overridable in /etc/claudeapp/compact.env; setting it to an empty value there
-# turns this off (Claude Code's own default applies again).
-CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000
+# Auto-compaction window — OFF by default. On 2026-09-25 this was set to 200000 to stop long
+# sessions burning the usage limit (daria-rudenko hit it at 633k tokens), but in practice it caps
+# every conversation at ~200k: nothing grows past the threshold, so to the lawyers it was the
+# same as cutting Opus's 1M window, and they said so. Reverted the same day at Vitaliy's request.
+# The mechanism stays: put CLAUDE_CODE_AUTO_COMPACT_WINDOW=<tokens> in /etc/claudeapp/compact.env
+# to turn it back on. It must be a real process variable — set in settings.json it reaches tool
+# subprocesses but not Claude Code's own compaction logic.
+CLAUDE_CODE_AUTO_COMPACT_WINDOW=
 COMPACT_FILE=/etc/claudeapp/compact.env
 # shellcheck disable=SC1090
 [ -f "$COMPACT_FILE" ] && . "$COMPACT_FILE"
