@@ -122,6 +122,12 @@ CLAUDE_CODE_AUTO_COMPACT_WINDOW=
 COMPACT_FILE=/etc/claudeapp/compact.env
 # shellcheck disable=SC1090
 [ -f "$COMPACT_FILE" ] && . "$COMPACT_FILE"
+# Per-tenant override, read after the host-wide one so it wins for that tenant only
+# (e.g. CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000 for one person who keeps very long sessions).
+# Deleting the file and restarting that pod is the rollback.
+COMPACT_TENANT_FILE="/etc/claudeapp/compact-$U.env"
+# shellcheck disable=SC1090
+[ -f "$COMPACT_TENANT_FILE" ] && . "$COMPACT_TENANT_FILE"
 COMPACT_ARGS=()
 if [ -n "${CLAUDE_CODE_AUTO_COMPACT_WINDOW:-}" ]; then
   COMPACT_ARGS=(-e CLAUDE_CODE_AUTO_COMPACT_WINDOW="$CLAUDE_CODE_AUTO_COMPACT_WINDOW")
