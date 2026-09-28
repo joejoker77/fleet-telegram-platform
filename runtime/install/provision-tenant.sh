@@ -111,7 +111,10 @@ fi
 # or "my deadlines". Copied only when absent: ~/work is the tenant's own space and
 # anything they wrote there must survive re-provisioning.
 if [ -d "$SKEL/work" ]; then
-  for _p in bin CLAUDE.md .claude; do
+  # esign: pd-tag, which bin/sa-sign runs from ~/work/esign/bin. It was rolled out by
+  # hand on 2026-09-07 and never reached the skeleton, so tenants created later had a
+  # sa-sign that could not tag an agreement (found onboarding tolulope-adefeso).
+  for _p in bin CLAUDE.md .claude esign; do
     if [ -e "$SKEL/work/$_p" ] && [ ! -e "/home/$USER_NAME/work/$_p" ]; then
       cp -a "$SKEL/work/$_p" "/home/$USER_NAME/work/$_p"
       chown -R "$USER_NAME:$USER_NAME" "/home/$USER_NAME/work/$_p"

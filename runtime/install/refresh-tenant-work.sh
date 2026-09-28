@@ -49,6 +49,7 @@ done
 # stray __pycache__ in the skeleton into 64 bogus "would install" entries.
 mapfile -t FILES < <(cd "$SKEL" && {
   find bin -maxdepth 1 -type f ! -name '*.pyc' -printf '%p\n' 2>/dev/null | sort
+  find esign/bin -maxdepth 1 -type f ! -name '*.pyc' -printf '%p\n' 2>/dev/null | sort
   [ -f CLAUDE.md ] && echo CLAUDE.md
 })
 [ "${#FILES[@]}" -gt 0 ] || { echo "skeleton has nothing to ship" >&2; exit 2; }
@@ -98,7 +99,12 @@ for t in $(tenants); do
     if [ "$DRY" = 1 ]; then
       printf '  %-19s %-28s would %s\n' "$t" "$rel" "$action"
     else
-      mkdir -p "$(dirname "$dst")"
+      if [ ! -d "$(dirname "$dst")" ]; then
+        # A directory we create is the tenant's, like the rest of ~/work: sa-sign writes
+        # ~/work/esign/work and .composio-user and fails on a root-owned esign/.
+        mkdir -p "$(dirname "$dst")"
+        chown -R "$t:$t" "$home/work/${rel%%/*}"
+      fi
       install -m "$mode" -o "$t" -g "$t" "$src" "$dst" || { printf '  %-19s %-28s FAILED\n' "$t" "$rel"; continue; }
       printf '  %-19s %-28s %sd\n' "$t" "$rel" "$action"
     fi

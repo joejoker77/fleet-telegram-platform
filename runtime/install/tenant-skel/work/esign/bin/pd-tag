@@ -1,0 +1,209 @@
+#!/usr/bin/env python3
+"""Put PandaDoc field tags onto a flat settlement agreement.
+
+A settlement agreement arrives from the other side's solicitors as a flat
+PDF: no AcroForm, no widgets, nothing for a signing platform to attach a
+signature to. Checked on five live agreements, all five were flat. Upload
+one to PandaDoc as-is and the recipient gets a document they can read and
+cannot sign.
+
+PandaDoc's answer is a field tag — brace text like `{signature:client:sig1__}`
+written into the document, which the API turns into a real field at that
+spot on upload. So the job is to write those tags onto the execution page
+at the right coordinates. That is what this does.
+
+The braces are not a detail. PandaDoc's own docs page writes the example
+with square brackets; the sample PDF it links from that page uses braces,
+and only the braces parse. A square-bracket tag uploads as ordinary text
+and the recipient gets a document with nothing to sign.
+
+It never guesses. `anchors` lists what it found and where; a person picks
+the ones to use; `stamp` writes exactly those. Placement is checked by
+rendering the page to PNG, not by trusting the coordinates.
+
+  pd-tag anchors <pdf> [--page N]
+  pd-tag stamp   <pdf> --out <pdf> --place '<json>' [--cover]
+  pd-tag preview <pdf> --page N --out <png> [--boxes]
+
+`--place` is a list of objects:
+
+  [{"page": 12, "anchor": 3, "tag": "{signature:client:clientsig____}"},
+   {"page": 12, "x": 90, "y": 640, "tag": "{date:client:clientdate___}"}]
+
+`anchor` refers to an index from `anchors` on that page. Give either an
+anchor or an explicit x/y in PDF points, origin top-left.
+
+Tag syntax (developers.pandadoc.com/docs/field-tags):
+  {<type>:<role>:<optId><underscores>}  — signature, date, text, initials,
+  checkbox. The role must match a recipient role in the create-document
+  call. Underscores widen the field. No underscores are allowed inside a
+  role name. Use the long type names: the shorthand is documented but the
+  long names are what the working sample uses.
+"""
+import argparse
+import json
+import re
+import sys
+
+try:
+    import pymupdf
+except ImportError:  # older installs expose it as fitz
+    import fitz as pymupdf
+
+# A signature line in these agreements is a run of dots or underscores, or a
+# labelled blank. Anything shorter than this is prose, not a place to sign.
+ANCHOR_RE = re.compile(r"(\.{6,}|_{6,}|…{3,})")
+LABEL_RE = re.compile(
+    r"^\s*(signed|signature|witness.{0,3} signature|date[d]?|name in full|"
+    r"director|employee|position|print name)\b[\s:.…_]*$",
+    re.I,
+)
+
+
+def anchors(path, page_no=None):
+    doc = pymupdf.open(path)
+    out = []
+    for pi in range(doc.page_count):
+        if page_no and pi + 1 != page_no:
+            continue
+        page = doc[pi]
+        for block in page.get_text("dict")["blocks"]:
+            for line in block.get("lines", []):
+                text = "".join(s["text"] for s in line["spans"])
+                if not text.strip():
+                    continue
+                m = ANCHOR_RE.search(text)
+                if m or LABEL_RE.match(text):
+                    x0, y0, x1, y1 = line["bbox"]
+                    # Where the blank actually starts. "Signed ........." must
+                    # not have the tag written over the word "Signed", so
+                    # estimate the x of the first dot from the span it sits in.
+                    rule_x = x0
+                    if m:
+                        seen = 0
+                        for sp in line["spans"]:
+                            t = sp["text"]
+                            if seen + len(t) > m.start():
+                                off = max(0, m.start() - seen)
+                                per = ((sp["bbox"][2] - sp["bbox"][0])
+                                       / max(1, len(t)))
+                                rule_x = sp["bbox"][0] + off * per
+                                break
+                            seen += len(t)
+                    else:
+                        # A bare label — "SIGNED:" with nothing after it, the
+                        # blank being white space rather than a printed rule.
+                        # The tag goes after the word, never over it.
+                        rule_x = x1 + 6
+                    out.append({
+                        "page": pi + 1,
+                        "index": len(out),
+                        "text": text.strip()[:70],
+                        "x": round(x0, 1), "y": round(y0, 1),
+                        "x1": round(x1, 1), "y1": round(y1, 1),
+                        "rule_x": round(rule_x, 1),
+                        "rule": bool(m),
+                        "height": round(y1 - y0, 1),
+                    })
+    doc.close()
+    return out
+
+
+def stamp(path, out_path, places, cover):
+    doc = pymupdf.open(path)
+    # Indices are per-page, matching what `anchors --page N` printed. Anything
+    # else invites stamping a signature onto the wrong page.
+    per_page = {}
+    for a in anchors(path):
+        per_page.setdefault(a["page"], []).append(a)
+
+    applied = []
+    for p in places:
+        page = doc[p["page"] - 1]
+        if "anchor" in p:
+            cands = per_page.get(p["page"], [])
+            idx = p["anchor"]
+            if idx < 0 or idx >= len(cands):
+                raise SystemExit("no anchor %s on page %s (page has %s)"
+                                 % (idx, p["page"], len(cands)))
+            hit = cands[idx]
+            x, y, x1, y1 = hit["rule_x"], hit["y"], hit["x1"], hit["y1"]
+            # Only ever white out a printed rule. On a bare label the tag sits
+            # after the word, and covering would rub out "SIGNED".
+            if cover and hit["rule"]:
+                page.draw_rect(pymupdf.Rect(x - 1, y - 1, x1 + 1, y1 + 1),
+                               color=None, fill=(1, 1, 1))
+            # baseline sits a little above the bottom of the line box
+            point = pymupdf.Point(x + p.get("dx", 0), y1 - 2 + p.get("dy", 0))
+        else:
+            point = pymupdf.Point(p["x"], p["y"])
+        page.insert_text(point, p["tag"], fontname="helv",
+                         fontsize=p.get("size", 9), color=(0, 0, 0))
+        applied.append({"page": p["page"], "tag": p["tag"],
+                        "at": [round(point.x, 1), round(point.y, 1)]})
+
+    doc.save(out_path, garbage=3, deflate=True)
+    doc.close()
+    return applied
+
+
+def preview(path, page_no, out_png, dpi=110, boxes=False):
+    """Render a page. With boxes, draw a numbered red rectangle round every
+    candidate signature line, so a person can point at one by number instead
+    of trusting a guess about whose signature it is."""
+    doc = pymupdf.open(path)
+    page = doc[page_no - 1]
+    if boxes:
+        cands = [a for a in anchors(path) if a["page"] == page_no]
+        for i, a in enumerate(cands):
+            r = pymupdf.Rect(a["x"] - 3, a["y"] - 3, a["x1"] + 3, a["y1"] + 3)
+            page.draw_rect(r, color=(0.85, 0.1, 0.1), width=1.2)
+            page.insert_text(pymupdf.Point(r.x1 + 5, r.y1 - 1), "#%d" % i,
+                             fontname="hebo", fontsize=11,
+                             color=(0.85, 0.1, 0.1))
+    pix = page.get_pixmap(dpi=dpi)
+    pix.save(out_png)
+    doc.close()
+    return {"png": out_png, "width": pix.width, "height": pix.height}
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    a = sub.add_parser("anchors")
+    a.add_argument("pdf")
+    a.add_argument("--page", type=int)
+
+    s = sub.add_parser("stamp")
+    s.add_argument("pdf")
+    s.add_argument("--out", required=True)
+    s.add_argument("--place", required=True)
+    s.add_argument("--cover", action="store_true",
+                   help="white out the dotted line under the tag")
+
+    p = sub.add_parser("preview")
+    p.add_argument("pdf")
+    p.add_argument("--page", type=int, required=True)
+    p.add_argument("--out", required=True)
+    p.add_argument("--boxes", action="store_true",
+                   help="number every candidate signature line")
+
+    args = ap.parse_args()
+    if args.cmd == "anchors":
+        found = anchors(args.pdf, args.page)
+        for f in found:
+            print("p%-3s #%-3s y=%-6s  %s"
+                  % (f["page"], f["index"], f["y"], f["text"]))
+        print("\n%d anchors" % len(found), file=sys.stderr)
+    elif args.cmd == "stamp":
+        applied = stamp(args.pdf, args.out, json.loads(args.place), args.cover)
+        print(json.dumps(applied, indent=1))
+    else:
+        print(json.dumps(preview(args.pdf, args.page, args.out,
+                                 boxes=args.boxes), indent=1))
+
+
+if __name__ == "__main__":
+    main()
