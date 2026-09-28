@@ -2,7 +2,10 @@
 Description=Every 5 minutes: re-check who needs the 200k auto-compaction saver
 
 [Timer]
+# OnActiveSec starts the cycle when the timer is enabled on a running host; without it
+# OnUnitActiveSec has nothing to count from and the timer never fires.
 OnBootSec=5min
+OnActiveSec=1min
 OnUnitActiveSec=5min
 AccuracySec=30s
 
