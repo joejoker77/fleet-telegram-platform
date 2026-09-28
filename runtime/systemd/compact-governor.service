@@ -1,0 +1,12 @@
+[Unit]
+Description=Switch auto-compaction to 200k only for tenants running out of their usage limit
+Documentation=file:///opt/ftp-src/fleet-telegram-platform/runtime/install/compact-governor.py
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/compact-governor
+# Reads each enabled tenant's ~/.claude/usage-snapshot.json and types /autocompact into its
+# pod with `podman exec` (which needs root and the container store), so no sandboxing that
+# would break podman. No network, no LLM: it compares numbers from a file.
+StateDirectory=fleet
+TimeoutStartSec=300
