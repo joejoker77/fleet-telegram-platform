@@ -20,10 +20,22 @@ CLAUDE_CODE_AUTO_COMPACT_WINDOW (/etc/claudeapp/compact*.env) overrides the comm
 such tenants are skipped.
 
 THE RULE, per window (5 h and 7 days): saver on when used% >= THRESHOLD and usage runs
-ahead of time (used% > share of the window already elapsed). Examples from Vitaliy:
-10% used, 2 h to reset -> no; 60% used, 3 h to reset -> yes; weekly 30%, 2 days left ->
-no; weekly 70%, 6 days left -> yes. A window whose reset has passed counts as unknown ->
-no. Missing/stale data therefore always falls back to 1M, never to 200k.
+ahead of time (used% > share of the window already elapsed), i.e. at the current pace
+the window runs out before it resets. Examples from Vitaliy: 10% used, 2 h to reset ->
+no; 60% used, 3 h to reset -> yes; weekly 30%, 2 days left -> no; weekly 70%, 6 days
+left -> yes. Hysteresis once on (see window_hot). A window whose reset has passed
+counts as no data.
+
+STALE DATA IS NEVER USED. A snapshot older than MAX_AGE_MIN (or from the future) decides
+nothing: the tenant keeps its current mode. The one change made without fresh numbers
+is ending the saver once every window that triggered it has reset, which needs no
+numbers. So stale data can neither switch the saver on nor keep it on past a reset.
+
+CLAUDE APP. The numbers are per account, so a fresh snapshot is right for App work too.
+But App sessions (the remote-control server's headless children) run no status line,
+so work done ONLY in the App lets the snapshot go stale -> no decision -> stays as is.
+A running App conversation keeps the window it started with; App conversations started
+after a switch pick it up (the command saves it to settings.json).
 
 NOT AN LLM CALL: reads files, compares numbers, types a command. Safe on a timer.
 Opt-in per tenant via TENANTS in /etc/claudeapp/compact-governor.env; empty = no-op.
@@ -72,6 +84,7 @@ def load_conf():
         "threshold": float(c.get("THRESHOLD_PCT", "50")),
         "saver": int(c.get("SAVER_WINDOW", "200000")),
         "dwell": int(c.get("DWELL_MIN", "30")) * 60,
+        "max_age": int(c.get("MAX_AGE_MIN", "20")) * 60,
     }
 
 
@@ -83,30 +96,64 @@ def static_override(user):
     return None
 
 
-def window_hot(w, length, now, threshold):
+def window_hot(w, length, now, threshold, in_saver=False):
+    """(hot, reset_at, why) for one window.
+
+    used > elapsed is the same as "at the current pace this window runs out before it
+    resets" (projected = used / elapsed * 100 > 100). The threshold floor keeps the
+    first minutes after a reset, when the projection is noise, from counting.
+    HYSTERESIS so a tenant hovering on the line does not flip every run: once the saver
+    is on it stays on until the window is clearly back under (5 points below the floor
+    or 10 points behind time).
+    """
     if not isinstance(w, dict):
-        return False, "no data"
+        return False, None, "no data"
     try:
         used, reset = float(w["used_percentage"]), int(w["resets_at"])
     except (KeyError, TypeError, ValueError):
-        return False, "bad data"
+        return False, None, "bad data"
+    if not (0 <= used <= 100) or reset - now > length * 1.05:
+        return False, None, "implausible data"
     if reset <= now:
-        return False, "reset passed"
+        return False, None, "reset passed"
     elapsed = max(0.0, min(100.0, (1 - (reset - now) / length) * 100))
-    hot = used >= threshold and used > elapsed
-    return hot, f"{used:.0f}% used, {elapsed:.0f}% of window elapsed"
+    if in_saver:
+        hot = used >= threshold - 5 and used > elapsed - 10
+    else:
+        hot = used >= threshold and used > elapsed
+    return hot, reset, f"{used:.0f}% used, {elapsed:.0f}% of window elapsed"
 
 
-def decide(snap, now, threshold):
-    """Return (want_saver, reason)."""
-    if not snap:
-        return False, "no snapshot"
-    parts, want = [], False
+def snapshot_age(snap, now):
+    try:
+        return now - int(snap["ts"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def decide(snap, now, threshold, max_age, in_saver=False):
+    """Return (verdict, reason, hold_until).
+
+    verdict: "saver" / "normal" from FRESH data only, or "stale" when the snapshot is
+    missing, unreadable, from the future or older than max_age — stale numbers are never
+    used to decide. hold_until = latest reset among the hot windows (the saver can end
+    by itself then, even if no fresh data ever arrives).
+    """
+    age = snapshot_age(snap, now) if isinstance(snap, dict) else None
+    if age is None:
+        return "stale", "no snapshot", None
+    if age < -120 or age > max_age:
+        return "stale", f"snapshot {age // 60} min old", None
+    parts, hot_resets = [], []
     for key, length in WINDOWS:
-        hot, why = window_hot(snap.get(key), length, now, threshold)
+        hot, reset, why = window_hot(snap.get(key), length, now, threshold, in_saver)
         parts.append(f"{key}: {why}{' -> HOT' if hot else ''}")
-        want = want or hot
-    return want, "; ".join(parts)
+        if hot:
+            hot_resets.append(reset)
+    reason = "; ".join(parts) + f"; snapshot {max(age, 0) // 60} min old"
+    if hot_resets:
+        return "saver", reason, max(hot_resets)
+    return "normal", reason, None
 
 
 def load_json(path, default=None):
@@ -149,32 +196,37 @@ def pane_ready(styled):
         return False, "pane unreadable (pod down?)"
     if SPINNER.search(plain):
         return False, "session busy"
-    prompts = [l for l in styled.splitlines() if "❯" in ANSI.sub("", l)]
-    if prompts:
-        after = prompts[-1].split("❯", 1)[1].lstrip("\xa0 ").rstrip()
-        after = re.sub(r"^(\x1b\[[0-9;]*m)*\x1b\[2m", "\x1b[2m", after)  # drop leading resets
-        if ANSI.sub("", after).strip() and not GHOST.match(after):
-            return False, "prompt holds typed text"
+    lines = [l for l in styled.splitlines() if ANSI.sub("", l).strip()]
+    prompts = [i for i, l in enumerate(lines) if "❯" in ANSI.sub("", l)]
+    # The input box is the last ❯ and sits at the bottom, above the rule and the footer.
+    # A ❯ higher up is a menu or a permission dialog: not the moment to type.
+    if not prompts or len(lines) - prompts[-1] > 4:
+        return False, "no input prompt at the bottom (dialog open?)"
+    after = lines[prompts[-1]].split("❯", 1)[1].lstrip("\xa0 ").rstrip()
+    after = re.sub(r"^(\x1b\[[0-9;]*m)*\x1b\[2m", "\x1b[2m", after)  # drop leading resets
+    if ANSI.sub("", after).strip() and not GHOST.match(after):
+        return False, "prompt holds typed text"
     return True, ""
 
 
 def switch(user, arg):
     """Type /autocompact <arg> into the main session and confirm it took."""
+    """Returns (ok, why, retryable) — retryable = the pane was simply not ready."""
     styled = capture(user, styled=True)
     ok, why = pane_ready(styled)
     if not ok:
-        return False, why
+        return False, why, True
     marker = "Auto-compact window set to"
     before = ANSI.sub("", styled).count(marker)  # an earlier switch may still be on screen
     text = f"/autocompact {arg}"
     if pod_tmux(user, "send-keys", "-t", "claude:0", "-l", "--", text).returncode != 0:
-        return False, "send-keys failed"
+        return False, "send-keys failed", False
     pod_tmux(user, "send-keys", "-t", "claude:0", "Enter")
     for _ in range(10):
         time.sleep(1)
         if capture(user).count(marker) > before:
-            return True, "confirmed"
-    return False, "no confirmation on screen"
+            return True, "confirmed", False
+    return False, "no confirmation on screen", False
 
 
 def run_one(user, conf, now, dry):
@@ -185,11 +237,22 @@ def run_one(user, conf, now, dry):
         log(f"{user}: skipped, static window set in {ov}")
         return
     snap = load_json(f"{HOME_ROOT}/{user}/.claude/usage-snapshot.json")
-    want, reason = decide(snap, now, conf["threshold"])
-    target = "saver" if want else "normal"
-    age = f", snapshot {int((now - snap['ts']) / 60)} min old" if snap and snap.get("ts") else ""
+    verdict, reason, hold = decide(snap, now, conf["threshold"], conf["max_age"], mode == "saver")
+    if verdict == "stale":
+        # Stale numbers decide nothing. The one exception needs no numbers at all: the
+        # saver was switched on for windows that have all reset since, so it ends.
+        if mode == "saver" and now >= st.get("hold_until", 0):
+            target, reason = "normal", f"{reason}; every window that triggered the saver has reset"
+        else:
+            log(f"{user}: stays {mode}, no decision ({reason})")
+            return
+    else:
+        target = verdict
     if target == mode:
-        log(f"{user}: stays {mode} ({reason}{age})")
+        if target == "saver" and hold and hold != st.get("hold_until"):
+            st["hold_until"] = hold
+            save_state(user, st)
+        log(f"{user}: stays {mode} ({reason})")
         return
     if now - st.get("since", 0) < conf["dwell"]:
         log(f"{user}: wants {target} but in {mode} < {conf['dwell'] // 60} min, waiting ({reason})")
@@ -199,15 +262,17 @@ def run_one(user, conf, now, dry):
         return
     arg = str(conf["saver"]) if target == "saver" else "auto"
     if dry:
-        log(f"{user}: WOULD switch {mode} -> {target} (/autocompact {arg}); {reason}{age}")
+        log(f"{user}: WOULD switch {mode} -> {target} (/autocompact {arg}); {reason}")
         return
-    ok, why = switch(user, arg)
+    ok, why, retryable = switch(user, arg)
     if ok:
-        save_state(user, {"mode": target, "since": now, "reason": reason, "fails": 0})
-        log(f"{user}: switched {mode} -> {target} (/autocompact {arg}); {reason}{age}")
+        save_state(user, {"mode": target, "since": now, "reason": reason, "fails": 0,
+                          "hold_until": hold or 0})
+        log(f"{user}: switched {mode} -> {target} (/autocompact {arg}); {reason}")
     else:
-        st.update(fails=st.get("fails", 0) + 1, last_try=now)
-        save_state(user, st)
+        if not retryable:  # busy / typed text is normal life, only real failures count
+            st.update(fails=st.get("fails", 0) + 1, last_try=now)
+            save_state(user, st)
         log(f"{user}: switch to {target} not done: {why}; retry next run")
 
 
@@ -219,7 +284,7 @@ def main():
     a = ap.parse_args()
     conf = load_conf()
     if a.restore:
-        ok, why = switch(a.restore, "auto")
+        ok, why, _ = switch(a.restore, "auto")
         try:
             os.unlink(os.path.join(STATE_DIR, f"{a.restore}.json"))
         except FileNotFoundError:

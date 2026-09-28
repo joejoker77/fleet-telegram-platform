@@ -34,6 +34,8 @@ THRESHOLD_PCT=50
 SAVER_WINDOW=200000
 # Minimum minutes between two switches for one tenant (no flapping).
 DWELL_MIN=30
+# Snapshots older than this decide nothing (the tenant keeps its current mode).
+MAX_AGE_MIN=20
 CFG
     chmod 0644 "$CONF"
   fi
