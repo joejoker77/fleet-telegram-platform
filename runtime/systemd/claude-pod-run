@@ -184,7 +184,9 @@ fi
 # who uses the Claude App only (DISABLE_TELEGRAM_CHANNEL=1), one who should not be reachable
 # over remote control at all (DISABLE_REMOTE_CONTROL=1), or a machine that must appear in the
 # app under a different name. Host-side file, no image rebuild to flip any of it.
-# Only these three names are forwarded — the file is sourced, so anything else it happens to
+# CLAUDE_DEBUG_LOG=1 turns on Claude Code's own debug log (DEBUG=1 -> ~/.claude/debug/<session>.txt,
+# on the home volume) — for diagnosing a tenant, not for leaving on: it grows fast.
+# Only these four names are forwarded — the file is sourced, so anything else it happens to
 # set stays in this wrapper and never reaches the container.
 TENANT_ARGS=()
 TENANT_ENV_FILE="/etc/claudeapp/tenant-$U.env"
@@ -194,6 +196,7 @@ if [ -f "$TENANT_ENV_FILE" ]; then
   [ -n "${REMOTE_CONTROL_NAME:-}" ]     && TENANT_ARGS+=(-e REMOTE_CONTROL_NAME="$REMOTE_CONTROL_NAME")
   [ -n "${DISABLE_TELEGRAM_CHANNEL:-}" ] && TENANT_ARGS+=(-e DISABLE_TELEGRAM_CHANNEL="$DISABLE_TELEGRAM_CHANNEL")
   [ -n "${DISABLE_REMOTE_CONTROL:-}" ]   && TENANT_ARGS+=(-e DISABLE_REMOTE_CONTROL="$DISABLE_REMOTE_CONTROL")
+  [ "${CLAUDE_DEBUG_LOG:-}" = 1 ]         && TENANT_ARGS+=(-e DEBUG=1)
 fi
 
 # ~/.ssh: mount the tenant's own SSH keys so the agent can reach remote servers
