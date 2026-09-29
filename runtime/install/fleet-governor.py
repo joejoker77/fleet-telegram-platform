@@ -12,13 +12,23 @@ OUTPUT. /var/lib/fleet/ctl/<user>/window, mounted read-only into the pod; the ta
 into CLAUDE_CODE_AUTO_COMPACT_WINDOW, which Claude Code re-reads before every request. So a
 change reaches running sessions, App ones included, within seconds.
 
-THE RULE, per window (5 h and 7 days), every poll:
+THE 5-HOUR RULE, every poll (bursts):
   projected = utilization now + rate x time left until reset
   rate = the faster of (a) the recent rate, a least-squares slope over the last
   rate_window_s of samples, and (b) the average rate since the window began. (a) catches a
   burst like 2026-09-28 (36% -> 77% in 10 min), (b) keeps a steady heavy user honest.
   The step is chosen by `projected` against projected_thresholds; utilization >= hard_used
-  forces the smallest step. The stricter of the two windows wins.
+  forces the smallest step.
+THE WEEKLY RULE (context_window.weekly) is different, because the weekly counter is slow and
+Anthropic reports it in whole percent: one 1% tick in ten minutes looked like "108% by the
+reset" and squeezed daria-rudenko to 200k for nothing (2026-09-29 10:43). So no short-term
+pace at all for the week. The stricter of two things:
+  A. a cap by what is used: used_caps [[used, step], ...] — e.g. 60% -> at most 600k. With less
+     than near_reset_s to the reset the cap is eased by near_reset_relief steps.
+  B. a forecast from the LONG pace: the rise over the last pace_window_s, counted only when it
+     spans min_pace_span_s and is at least min_rise (so a rounding tick is never a pace),
+     projected to the reset and stepped by weekly.projected_thresholds.
+The stricter of the 5-hour and weekly results wins.
 DOWN (smaller window) happens at once, as many steps as needed. UP happens one step at a
 time and only after the looser target has held for relax_hold_s, computed with
 relax_margin of slack, so a tenant on a boundary does not flap.
@@ -122,7 +132,33 @@ def step_for(projected, used, cfg, margin=0.0):
     return min(i, len(cfg["ladder"]) - 1)
 
 
-def decide(history, now, cfg, fresh):
+def weekly(week, now, cfg, margin=0.0):
+    """(step, why) for the 7-day window from the long weekly history [[ts, u, reset], ...]."""
+    w = cfg["weekly"]
+    ts, u, reset = week[-1]
+    left = reset - now
+    a = 0
+    for th, st in w["used_caps"]:
+        if u >= th - margin:
+            a = max(a, st)
+    if a and left < w["near_reset_s"]:
+        a = max(a - w["near_reset_relief"], 0)
+    pts = [(t, uu) for t, uu, r in week if r == reset and t >= now - w["pace_window_s"]]
+    b, pace = 0, None
+    if pts:
+        span, rise = pts[-1][0] - pts[0][0], pts[-1][1] - pts[0][1]
+        if span >= w["min_pace_span_s"] and rise >= w["min_rise"]:
+            pace = rise / span
+            p = u + pace * left
+            b = sum(1 for th in w["projected_thresholds"] if p >= th - margin)
+    b = min(b, len(cfg["ladder"]) - 1)
+    why = (f"seven_day: {u*100:.0f}% used, {left/3600:.1f}h to reset, cap step {a}, "
+           + (f"long pace {pace*360000:.2f} %/h -> projected {(u + pace*left)*100:.0f}%, step {b}"
+              if pace is not None else "long pace -"))
+    return max(a, b), why
+
+
+def decide(history, now, cfg, fresh, week=None):
     """(target_step, relax_step, drivers_reset_max, why). target = where the numbers say we
     must be now; relax = where we may go when relaxing (with margin)."""
     if not fresh:
@@ -130,6 +166,17 @@ def decide(history, now, cfg, fresh):
     target = relax = 0
     resets, whys = [], []
     for key, length in WINDOWS:
+        if key == "seven_day" and cfg.get("weekly"):
+            if not week or week[-1][2] <= now:
+                whys.append(f"{key}: no current data")
+                continue
+            t, why = weekly(week, now, cfg)
+            target = max(target, t)
+            relax = max(relax, weekly(week, now, cfg, margin=cfg["relax_margin"])[0])
+            if t > 0:
+                resets.append(week[-1][2])
+            whys.append(why + (f" => step {t}" if t else ""))
+            continue
         r = project(history, key, length, now, cfg)
         if r is None:
             whys.append(f"{key}: no current data")
@@ -160,7 +207,20 @@ def run_one(user, cfg, now, dry):
     age = now - hist[-1]["ts"] if hist else None
     fresh = age is not None and -120 <= age <= cfg["max_age_s"]
 
-    target, relax, drivers_reset, why = decide(hist, now, cfg, fresh)
+    # Long weekly history for the weekly rule: a point when the number or the reset changes,
+    # else one per sample_every_s; only the current weekly window, only pace_window_s of it.
+    week = st.get("week", [])
+    w = cfg.get("weekly")
+    if w and hist and (hist[-1].get("seven_day") or {}).get("resets_at"):
+        sd = hist[-1]["seven_day"]
+        pt = [hist[-1]["ts"], sd["utilization"], sd["resets_at"]]
+        if not week or pt[0] > week[-1][0] and (pt[1] != week[-1][1] or pt[2] != week[-1][2]
+                                                or pt[0] - week[-1][0] >= w["sample_every_s"]):
+            week.append(pt)
+        week = [p for p in week if p[2] == pt[2] and p[0] >= now - w["pace_window_s"] - w["sample_every_s"]]
+    st["week"] = week
+
+    target, relax, drivers_reset, why = decide(hist, now, cfg, fresh, week)
     new = step
     if target is None:
         # Stale: never tighten. Relax one step once every window that drove us down has reset.

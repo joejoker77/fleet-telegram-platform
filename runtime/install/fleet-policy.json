@@ -33,6 +33,34 @@
     "rate_window_s": 900,
     "min_rate_span_s": 120,
     "max_age_s": 1200,
-    "poll_s": 30
+    "poll_s": 30,
+    "weekly": {
+      "used_caps": [
+        [
+          0.6,
+          2
+        ],
+        [
+          0.75,
+          3
+        ],
+        [
+          0.9,
+          4
+        ]
+      ],
+      "near_reset_s": 86400,
+      "near_reset_relief": 1,
+      "pace_window_s": 43200,
+      "min_pace_span_s": 21600,
+      "min_rise": 0.03,
+      "projected_thresholds": [
+        0.9,
+        1.0,
+        1.1,
+        1.2
+      ],
+      "sample_every_s": 600
+    }
   }
 }

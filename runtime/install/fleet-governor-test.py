@@ -112,4 +112,33 @@ check("5h 10% used, 2h left -> 1M", window(), "auto")
 reset(); snap(T0, 0.60, T0 + 3 * 3600); run(T0 + 5)
 check("5h 60% used, 3h left -> tight", window() != "auto", True)
 
+# ---- 8. weekly rule (A: cap by used, B: long pace), 2026-09-29
+def weekly_run(points, now_offset=5):
+    """points: [(dt_s, u7)] from T0, weekly reset R7 fixed; 5h window idle."""
+    reset()
+    for dt_s, u7 in points:
+        t = T0 + dt_s
+        snap(t, 0.05, t + 4 * 3600, u7=u7, r7=R7); run(t + now_offset)
+    return window()
+
+R7 = T0 + 12 * 3600 + 20 * 60                               # Daria: 12.3h to the weekly reset
+check("Daria 10:43: weekly 32% -> 33% in 10 min -> stays 1M",
+      weekly_run([(60 * i, 0.32 if i < 7 else 0.33) for i in range(12)]), "auto")
+R7 = T0 + 4 * 86400
+check("A: 65% used, 4 days left -> 600k", weekly_run([(0, 0.65)]), str(L[2]))
+check("A: 80% used, 4 days left -> 400k", weekly_run([(0, 0.80)]), str(L[3]))
+check("A: 92% used -> 200k", weekly_run([(0, 0.92)]), str(L[4]))
+R7 = T0 + 20 * 3600
+check("A: 65% used but reset in 20h -> eased one step, 800k", weekly_run([(0, 0.65)]), str(L[1]))
+R7 = T0 + 3 * 86400
+check("B: 40% -> 50% over 6h, 3 days left -> 200k",
+      weekly_run([(600 * i, 0.40 + 0.10 * i / 36) for i in range(37)]), str(L[4]))
+check("B: +2% over 8h (below min_rise) -> 1M",
+      weekly_run([(600 * i, 0.30 + 0.02 * i / 48) for i in range(49)]), "auto")
+check("B: fast but only 1h of history -> no pace yet, 1M",
+      weekly_run([(60 * i, 0.10 + 0.001 * i) for i in range(60)]), "auto")
+R7 = T0 + 6 * 86400 + 23 * 3600
+check("start of the week: 5% after 1h -> 1M (no average-pace scare)",
+      weekly_run([(60 * i, 0.05) for i in range(10)]), "auto")
+
 print("FAILURES:", bad)
