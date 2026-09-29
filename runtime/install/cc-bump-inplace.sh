@@ -2,6 +2,9 @@
 # Bump ONLY the Claude Code version in the existing tenant image.
 #
 #   cc-bump-inplace.sh 2.1.280
+#   cc-bump-inplace.sh 2.1.284 --canary <tenant>   build cc2.1.284, pin ONE tenant to it
+#                                                   (/etc/claudeapp/image-pin/<tenant>),
+#                                                   leave :latest alone for everyone else
 #
 # Layers the new CLI on top of whatever :latest is today instead of rebuilding
 # from the Containerfile. That matters on a host whose image is months old: a
@@ -16,7 +19,9 @@
 set -euo pipefail
 
 VER="${1:-}"
-[ -n "$VER" ] || { echo "usage: $0 <claude-code-version>   e.g. $0 2.1.280"; exit 1; }
+[ -n "$VER" ] || { echo "usage: $0 <claude-code-version> [--canary <tenant>]   e.g. $0 2.1.280"; exit 1; }
+CANARY=""
+[ "${2:-}" = "--canary" ] && { CANARY="${3:?--canary needs a tenant}"; id "$CANARY" >/dev/null || exit 1; }
 [ "$(id -u)" -eq 0 ] || { echo "run as root"; exit 1; }
 
 IMAGE=localhost/claude-user
@@ -30,6 +35,13 @@ log "current image"
 cur="$(podman run --rm --entrypoint /bin/sh "$IMAGE:latest" -c 'claude --version' | awk '{print $1}')"
 echo "  :latest carries claude $cur"
 [ "$cur" = "$VER" ] && { echo "  already $VER — nothing to do"; exit 0; }
+# A canary builds from :latest but must not overwrite an existing cc<ver> tag.
+if [ -n "$CANARY" ] && podman image exists "$IMAGE:$NEW_TAG"; then
+  echo "  $IMAGE:$NEW_TAG already built — pinning $CANARY to it"
+  mkdir -p /etc/claudeapp/image-pin; echo "$NEW_TAG" > "/etc/claudeapp/image-pin/$CANARY"
+  echo "  pinned. Restart $CANARY's pod to use it. Rollback: rm /etc/claudeapp/image-pin/$CANARY"
+  exit 0
+fi
 
 log "keep it for rollback → $BACKUP_TAG"
 if podman image exists "$IMAGE:$BACKUP_TAG"; then
@@ -58,6 +70,17 @@ for m in wait_for_egress 'tmux respawn-window'; do
   podman run --rm --entrypoint /bin/sh "$IMAGE:$NEW_TAG" -c "grep -qF -- '$m' /opt/platform/entrypoint.sh 2>/dev/null" \
     && echo "  ok: $m" || echo "  note: '$m' not present (fine if this host never had it)"
 done
+
+if [ -n "$CANARY" ]; then
+  log "canary: pinning $CANARY to $NEW_TAG (:latest untouched)"
+  mkdir -p /etc/claudeapp/image-pin
+  echo "$NEW_TAG" > "/etc/claudeapp/image-pin/$CANARY"
+  echo "  /etc/claudeapp/image-pin/$CANARY -> $NEW_TAG"
+  echo
+  echo "Restart $CANARY's pod to use it. Rollback: rm /etc/claudeapp/image-pin/$CANARY (then restart)."
+  echo "Promote to everyone later: podman tag $IMAGE:$NEW_TAG $IMAGE:latest"
+  exit 0
+fi
 
 log "moving :latest"
 podman tag "$IMAGE:$NEW_TAG" "$IMAGE:latest"
