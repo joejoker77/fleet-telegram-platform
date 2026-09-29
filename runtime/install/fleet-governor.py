@@ -9,8 +9,10 @@ anthropic-ratelimit-unified-* headers of responses Claude Code already receives.
 no request of our own to Anthropic.
 
 OUTPUT. /var/lib/fleet/ctl/<user>/window, mounted read-only into the pod; the tap mirrors it
-into CLAUDE_CODE_AUTO_COMPACT_WINDOW, which Claude Code re-reads before every request. So a
-change reaches running sessions, App ones included, within seconds.
+into CLAUDE_CODE_AUTO_COMPACT_WINDOW, which Claude Code re-reads before every request.
+TIMING: the tap writes the usage file on every response; the governor notices the change
+within watch_s (1 s) and decides; the tap re-reads the window every second and after every
+response. So a response's numbers govern the next request, not one 30 s later.
 
 THE 5-HOUR RULE, every poll (bursts):
   projected = utilization now + rate x time left until reset
@@ -274,22 +276,35 @@ def main():
             pass
         log(f"{a.reset}: reset to auto")
         return
+    # Event-driven: a tenant is re-decided as soon as the tap rewrites its fleet-usage.json
+    # (that is, right after a response), checked every watch_s; and at least every poll_s anyway,
+    # so relaxing and stale-data handling keep ticking while nobody is talking to Claude.
+    seen, last_run, idle_logged = {}, {}, 0
     while True:
         policy = load_json(POLICY, {}) or {}
         cfg = policy.get("context_window") or {}
         tenants = a.tenant or rollout(policy, "context_window")
+        now_f = time.time()
         if not cfg.get("ladder") or not tenants:
-            log("no ladder or no tenants in policy — nothing to do")
+            if now_f - idle_logged >= int(cfg.get("poll_s", 30)):
+                log("no ladder or no tenants in policy — nothing to do")
+                idle_logged = now_f
         else:
-            now = int(time.time())
             for u in tenants:
                 try:
-                    run_one(u, cfg, now, a.dry_run)
-                except Exception as e:  # one tenant must never stop the others
-                    log(f"{u}: error {type(e).__name__}: {e}")
+                    m = os.stat(f"{HOME_ROOT}/{u}/.claude/fleet-usage.json").st_mtime
+                except OSError:
+                    m = None
+                due = now_f - last_run.get(u, 0) >= int(cfg.get("poll_s", 30))
+                if m != seen.get(u) or due or a.once or a.dry_run:
+                    seen[u], last_run[u] = m, now_f
+                    try:
+                        run_one(u, cfg, int(now_f), a.dry_run)
+                    except Exception as e:  # one tenant must never stop the others
+                        log(f"{u}: error {type(e).__name__}: {e}")
         if a.once or a.dry_run:
             return
-        time.sleep(int(cfg.get("poll_s", 30)))
+        time.sleep(float(cfg.get("watch_s", 1)))
 
 
 if __name__ == "__main__":

@@ -68,7 +68,11 @@
         const res = await orig.apply(this, arguments);
         try {
           const url = typeof input === "string" ? input : (input && input.url) || String(input || "");
-          if (url.indexOf("/v1/messages") !== -1 && res && res.headers) record(res.headers);
+          if (url.indexOf("/v1/messages") !== -1 && res && res.headers) {
+            record(res.headers);
+            // The governor answers this response's numbers within ~1 s; pick that up promptly.
+            const t2 = setTimeout(applyWindow, 1500); if (t2 && t2.unref) t2.unref();
+          }
         } catch (e) { /* never interfere */ }
         return res;
       };
@@ -90,5 +94,7 @@
       }
     } catch (e) { /* no control file: nothing to do */ }
   }
-  try { applyWindow(); const t = setInterval(applyWindow, 3000); if (t && t.unref) t.unref(); } catch (e) {}
+  // Every second (a tiny file read) — the governor decides within a second of each response,
+  // so the new window is in place before Claude Code prepares the next request.
+  try { applyWindow(); const t = setInterval(applyWindow, 1000); if (t && t.unref) t.unref(); } catch (e) {}
 })();

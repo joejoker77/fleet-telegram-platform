@@ -61,6 +61,7 @@
         1.2
       ],
       "sample_every_s": 600
-    }
+    },
+    "watch_s": 1
   }
 }
