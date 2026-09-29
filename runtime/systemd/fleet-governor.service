@@ -1,0 +1,22 @@
+[Unit]
+Description=Pick each tenant's auto-compaction window from usage-limit headers (fleet-policy.json)
+Documentation=file:///opt/ftp-src/fleet-telegram-platform/runtime/install/fleet-governor.py
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/fleet-governor
+Restart=always
+RestartSec=10
+# Reads ~/.claude/fleet-usage.json of each tenant, writes /var/lib/fleet/{governor,ctl}.
+# No network and no LLM: it compares numbers from files.
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/fleet
+StateDirectory=fleet
+PrivateTmp=true
+PrivateNetwork=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

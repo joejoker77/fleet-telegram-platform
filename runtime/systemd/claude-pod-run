@@ -133,6 +133,46 @@ if [ -n "${CLAUDE_CODE_AUTO_COMPACT_WINDOW:-}" ]; then
   COMPACT_ARGS=(-e CLAUDE_CODE_AUTO_COMPACT_WINDOW="$CLAUDE_CODE_AUTO_COMPACT_WINDOW")
 fi
 
+# Firm usage policy — ONE file, runtime/install/fleet-policy.json -> /etc/claudeapp/fleet-policy.json
+# (fleet-policy-install.sh). Three independent features, each with its own rollout list:
+#   subagent_model  -> CLAUDE_CODE_SUBAGENT_MODEL (subagents run on it; the conversation keeps its model)
+#   effort_cap      -> a root-owned managed-settings.json with maxEffortLevel for the tenant's role,
+#                      mounted read-only: the tenant cannot raise it, and it clamps App sessions and
+#                      subagents too (Claude Code applies it client-side to every request)
+#   context_window  -> fleet-usage-tap.js preloaded into every Claude Code process (BUN_OPTIONS):
+#                      reads the limit headers of responses Claude Code already gets, and applies the
+#                      window fleet-governor writes to /var/lib/fleet/ctl/<user>/window, live.
+# A missing policy file, or a tenant not in a rollout list, changes nothing.
+POLICY_ARGS=()
+POLICY_FILE=/etc/claudeapp/fleet-policy.json
+if [ -f "$POLICY_FILE" ]; then
+  ROLE="$(cat "/etc/claude-role/$U" 2>/dev/null || true)"
+  read -r P_MODEL P_EFFORT P_WINDOW < <(U="$U" ROLE="$ROLE" python3 - "$POLICY_FILE" <<'PY' 2>/dev/null || echo "- - 0"
+import json, os, sys
+p = json.load(open(sys.argv[1])); u = os.environ["U"]; role = os.environ["ROLE"]
+on = lambda s: (p.get(s) or {}).get("rollout") == "all" or u in ((p.get(s) or {}).get("rollout") or [])
+m = (p.get("subagent_model") or {}).get("model") if on("subagent_model") else None
+e = ((p.get("effort_cap") or {}).get("by_role") or {}).get(role) if on("effort_cap") else None
+print(m or "-", e or "-", 1 if on("context_window") else 0)
+PY
+)
+  [ "${P_MODEL:--}" != "-" ] && POLICY_ARGS+=(-e CLAUDE_CODE_SUBAGENT_MODEL="$P_MODEL")
+  if [ "${P_EFFORT:--}" != "-" ]; then
+    MANAGED="/var/lib/fleet/managed/$U.json"
+    install -d -m 0755 /var/lib/fleet/managed
+    printf '{\n  "maxEffortLevel": "%s"\n}\n' "$P_EFFORT" > "$MANAGED"
+    chmod 0644 "$MANAGED"
+    POLICY_ARGS+=(-v "$MANAGED:/etc/claude-code/managed-settings.json:ro")
+  fi
+  TAP=/usr/local/lib/fleet/fleet-usage-tap.js
+  if [ "${P_WINDOW:-0}" = 1 ] && [ -f "$TAP" ]; then
+    CTL_DIR="/var/lib/fleet/ctl/$U"
+    install -d -m 0755 "$CTL_DIR"
+    [ -f "$CTL_DIR/window" ] || echo auto > "$CTL_DIR/window"
+    POLICY_ARGS+=(-e BUN_OPTIONS="--preload $TAP" -v "$TAP:$TAP:ro" -v "$CTL_DIR:/etc/fleet-ctl:ro")
+  fi
+fi
+
 # Per-tenant runtime overrides. The entrypoint already defaults REMOTE_CONTROL_NAME to
 # "<user>-main" and keeps both the Telegram channel and the remote-control listener on, so an
 # absent file is the normal case and changes nothing. This exists for the exceptions: a tenant
@@ -244,7 +284,7 @@ exec /usr/bin/podman run --rm --name "claude-$U" \
   --cap-drop=ALL \
   --read-only --tmpfs /tmp --tmpfs /run \
   --memory=4g --memory-reservation=3g --cpus=2 --pids-limit=2048 \
-  -e HOME="$HOME_DIR" -e XDG_RUNTIME_DIR=/tmp -e HOST_ADMIN_USER="$U" "${PROXY_ARGS[@]}" "${CLAUDE_AUTH_ARGS[@]}" "${COMPOSIO_ARGS[@]}" "${MODEL_ARGS[@]}" "${COMPACT_ARGS[@]}" "${TENANT_ARGS[@]}" "${SECRETD_ARGS[@]}" \
+  -e HOME="$HOME_DIR" -e XDG_RUNTIME_DIR=/tmp -e HOST_ADMIN_USER="$U" "${PROXY_ARGS[@]}" "${CLAUDE_AUTH_ARGS[@]}" "${COMPOSIO_ARGS[@]}" "${MODEL_ARGS[@]}" "${COMPACT_ARGS[@]}" "${POLICY_ARGS[@]}" "${TENANT_ARGS[@]}" "${SECRETD_ARGS[@]}" \
   -v "$HOME_DIR/.claude:$HOME_DIR/.claude" \
   -v "$HOME_DIR/work:$HOME_DIR/work" \
   -v "$HOME_DIR/.config:$HOME_DIR/.config" \
