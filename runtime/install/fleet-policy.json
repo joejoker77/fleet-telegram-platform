@@ -11,9 +11,7 @@
     "rollout": []
   },
   "context_window": {
-    "rollout": [
-      "daria-rudenko"
-    ],
+    "rollout": [],
     "ladder": [
       1000000,
       800000,
