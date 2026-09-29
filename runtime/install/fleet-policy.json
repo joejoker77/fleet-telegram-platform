@@ -1,7 +1,7 @@
 {
   "_about": "Single source of truth for the firm's Claude usage policy. Read by claude-pod-run (subagent model, effort cap, usage tap), fleet-governor (context-window ladder) and fleet-policy-install.sh. Change it here, commit, then run fleet-policy-install.sh. Each feature has its own rollout list: \"all\" or a list of tenants.",
   "subagent_model": {
-    "model": "claude-sonnet-5-5",
+    "model": "claude-sonnet-5",
     "rollout": [
       "daria-rudenko"
     ]
