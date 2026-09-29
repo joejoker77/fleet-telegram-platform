@@ -165,11 +165,16 @@ PY
     POLICY_ARGS+=(-v "$MANAGED:/etc/claude-code/managed-settings.json:ro")
   fi
   TAP=/usr/local/lib/fleet/fleet-usage-tap.js
-  if [ "${P_WINDOW:-0}" = 1 ] && [ -f "$TAP" ]; then
+  if [ "${P_WINDOW:-0}" = 1 ] && [ -f "$TAP" ] && [ -x /usr/local/lib/fleet/bin/bun ]; then
     CTL_DIR="/var/lib/fleet/ctl/$U"
     install -d -m 0755 "$CTL_DIR"
     [ -f "$CTL_DIR/window" ] || echo auto > "$CTL_DIR/window"
     POLICY_ARGS+=(-e BUN_OPTIONS="--preload $TAP" -v "$TAP:$TAP:ro" -v "$CTL_DIR:/etc/fleet-ctl:ro")
+    # BUN_OPTIONS must not reach the bun CLI: it breaks the Telegram plugin's `bun install`
+    # (channel never comes up). fleet-bun-shim, first on PATH, drops it for bun only.
+    # The image sets no PATH of its own, so this is the Debian default with the shim in front.
+    POLICY_ARGS+=(-v /usr/local/lib/fleet/bin:/usr/local/lib/fleet/bin:ro
+                  -e PATH=/usr/local/lib/fleet/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin)
   fi
 fi
 

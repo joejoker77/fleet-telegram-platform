@@ -1,0 +1,10 @@
+#!/bin/sh
+# fleet-bun-shim — installed as /usr/local/lib/fleet/bin/bun, first on PATH in pods that have
+# the context_window rollout. BUN_OPTIONS="--preload fleet-usage-tap.js" is meant for Claude Code
+# only, but every child inherits it, and the bun CLI reads it too: with it set, the Telegram
+# plugin's start script (`bun install --no-summary && bun server.ts`) fails with
+# `error: Script not found "install"` and the channel never comes up (daria-rudenko,
+# 2026-09-29, twice). Claude Code itself is not launched through bun, so dropping the variable
+# for bun keeps the tap in every Claude process and out of every bun one.
+unset BUN_OPTIONS
+exec /usr/local/bin/bun "$@"

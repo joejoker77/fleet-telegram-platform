@@ -24,7 +24,7 @@ for ((j = 0; j < CHANNEL_WAIT; j += 5)); do
   sleep 5
   if podman exec "claude-$U" ps -eo args 2>/dev/null | grep -q "bun server.ts"; then
     echo "$(ts) CHANNEL UP after ~$((j + 5))s — pilot restart OK"
-    podman exec "claude-$U" sh -c 'tr "\0" "\n" < /proc/1/environ' | grep -E "BUN_OPTIONS|SUBAGENT_MODEL" || true
+    podman exec "claude-$U" sh -c 'tr "\0" "\n" < /proc/1/environ' | grep -E "BUN_OPTIONS|SUBAGENT_MODEL|^PATH=" || true
     exit 0
   fi
 done

@@ -24,6 +24,8 @@ python3 "$HERE/fleet-governor-test.py" | tail -1 | grep -q "FAILURES: 0" || die 
 install -d -m 0755 /etc/claudeapp /usr/local/lib/fleet /var/lib/fleet /var/lib/fleet/ctl
 install -m 0644 "$HERE/fleet-policy.json" /etc/claudeapp/fleet-policy.json
 install -m 0644 "$HERE/fleet-usage-tap.js" /usr/local/lib/fleet/fleet-usage-tap.js
+install -d -m 0755 /usr/local/lib/fleet/bin
+install -m 0755 "$HERE/fleet-bun-shim" /usr/local/lib/fleet/bin/bun
 install -m 0755 "$HERE/fleet-governor.py" /usr/local/sbin/fleet-governor
 install -m 0755 "$ROOT/systemd/claude-pod-run" /usr/local/sbin/claude-pod-run
 install -m 0644 "$ROOT/systemd/fleet-governor.service" /etc/systemd/system/
@@ -37,7 +39,7 @@ if [ -x /usr/local/sbin/compact-governor ] && [ -x "$HERE/compact-governor-rollb
   "$HERE/compact-governor-rollback.sh" || echo "WARNING: compact-governor rollback reported a problem"
 fi
 
-echo "installed: policy, tap, governor, claude-pod-run"
+echo "installed: policy, tap, bun shim, governor, claude-pod-run"
 echo
 echo "pods that need a restart to pick up their rollout:"
 NEED=$(python3 - /etc/claudeapp/fleet-policy.json <<'PY'
