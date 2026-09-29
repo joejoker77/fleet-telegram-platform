@@ -197,20 +197,28 @@ if [ -f "$TENANT_ENV_FILE" ]; then
   [ -n "${DISABLE_TELEGRAM_CHANNEL:-}" ] && TENANT_ARGS+=(-e DISABLE_TELEGRAM_CHANNEL="$DISABLE_TELEGRAM_CHANNEL")
   [ -n "${DISABLE_REMOTE_CONTROL:-}" ]   && TENANT_ARGS+=(-e DISABLE_REMOTE_CONTROL="$DISABLE_REMOTE_CONTROL")
   [ "${CLAUDE_DEBUG_LOG:-}" = 1 ]         && TENANT_ARGS+=(-e DEBUG=1)
-  # CLAUDE_CONFIG_IN_VOLUME=1 (pilot, 2026-09-29): Claude Code saves ~/.claude.json by writing
-  # ~/.claude.json.tmp.* and ~/.claude.json.lock NEXT TO it, and $HOME is the read-only rootfs,
-  # so every save fails ("Config fallback write also failed; continuing without persisting") and
-  # nothing — feature-flag cache included — has persisted since early September. Every start is a
-  # cold start, and daria-rudenko's pod intermittently never launched the Telegram plugin at all.
-  # With CLAUDE_CONFIG_DIR=~/.claude the global config is ~/.claude/.claude.json, in the writable
-  # volume; every other path Claude uses (settings, credentials, plugins, projects) is unchanged,
-  # because ~/.claude is already the default config dir. Seeded once from the old file.
-  if [ "${CLAUDE_CONFIG_IN_VOLUME:-}" = 1 ]; then
-    NEWCFG="$HOME_DIR/.claude/.claude.json"
-    if [ ! -f "$NEWCFG" ] && [ -f "$HOME_DIR/.claude.json" ]; then
-      install -m 0600 -o "$U" -g "$U" "$HOME_DIR/.claude.json" "$NEWCFG"
-    fi
-    [ -f "$NEWCFG" ] && TENANT_ARGS+=(-e CLAUDE_CONFIG_DIR="$HOME_DIR/.claude")
+fi
+# Claude's global config lives in the volume, for every tenant (fleet-wide 2026-09-29, after the
+# daria-rudenko pilot; CLAUDE_CONFIG_IN_VOLUME=0 in tenant-<user>.env opts one tenant out).
+# Claude Code saves ~/.claude.json by writing ~/.claude.json.tmp.* and ~/.claude.json.lock NEXT
+# TO it, and $HOME is the read-only rootfs, so every save failed ("Config fallback write also
+# failed; continuing without persisting") and nothing — feature-flag cache included — had
+# persisted since early September. Every start was a cold start, and daria-rudenko's pod
+# intermittently never launched the Telegram plugin at all; with the config in the volume her
+# restarts came up first time, every time. CLAUDE_CONFIG_DIR=~/.claude makes the global config
+# ~/.claude/.claude.json; every other path Claude uses (settings, credentials, plugins, projects)
+# is unchanged, because ~/.claude is already the default config dir. Seeded once from the old file.
+if [ "${CLAUDE_CONFIG_IN_VOLUME:-1}" = 1 ]; then
+  NEWCFG="$HOME_DIR/.claude/.claude.json"
+  if [ ! -f "$NEWCFG" ] && [ -f "$HOME_DIR/.claude.json" ]; then
+    install -m 0600 -o "$U" -g "$U" "$HOME_DIR/.claude.json" "$NEWCFG"
+  fi
+  if [ -f "$NEWCFG" ]; then
+    TENANT_ARGS+=(-e CLAUDE_CONFIG_DIR="$HOME_DIR/.claude")
+    # The entrypoint still edits $HOME/.claude.json in place (workspace trust). Mount the NEW
+    # file there, so that edit lands in the config Claude actually reads — otherwise a tenant
+    # whose session moves to another folder gets an unanswered trust prompt and a dead channel.
+    CFG_ARGS=(-v "$NEWCFG:$HOME_DIR/.claude.json")
   fi
 fi
 
