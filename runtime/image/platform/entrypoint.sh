@@ -827,6 +827,16 @@ if [ "${DISABLE_TELEGRAM_CHANNEL:-0}" != "1" ]; then
     # If claude itself died while we waited, restart now.
     tmux has-session -t "$SESSION" 2>/dev/null || { echo "[supervise] claude session gone during startup → exit for restart"; exit 1; }
     dismiss_login_modal
+    # Claude Code (seen on 2.1.28x) sometimes never STARTS the telegram plugin's MCP server at
+    # boot: /mcp lists it as failed, the debug log says only "1 setup issue: MCP", no error, and
+    # the next boot usually works. daria-rudenko hit it again on 2026-10-02 with the config
+    # already persisted. Instead of waiting out the whole grace and restarting the pod, ask the
+    # running session to connect it: `/mcp reconnect <server>` is a built-in slash command. The
+    # channel registers on connect. Tried at 30s and 75s; the restart below stays the backstop.
+    if { [ "$waited" -eq 30 ] || [ "$waited" -eq 75 ]; } && logged_in; then
+      echo "[supervise] telegram plugin not running after ${waited}s → /mcp reconnect plugin:telegram:telegram"
+      tmux send-keys -t "${SESSION}:0.0" "/mcp reconnect plugin:telegram:telegram" Enter 2>/dev/null || true
+    fi
     if [ "$waited" -ge "$CHAN_START_GRACE" ]; then
       echo "[supervise] telegram channel did not come up within ${CHAN_START_GRACE}s → exit for restart"
       exit 1
