@@ -8,16 +8,15 @@
   },
   "effort_cap": {
     "by_role": {
+      "admin": "high",
+      "manager": "high",
+      "finance": "high",
       "basic": "high"
     },
-    "rollout": [
-      "daria-rudenko"
-    ]
+    "rollout": "all"
   },
   "context_window": {
-    "rollout": [
-      "daria-rudenko"
-    ],
+    "rollout": "all",
     "ladder": [
       1000000,
       800000,
