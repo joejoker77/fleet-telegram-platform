@@ -35,6 +35,21 @@ if [ -f "$PIN_FILE" ]; then
 fi
 
 podman image exists "$IMAGE" || { echo "image $IMAGE missing (run m2.1-build-image.sh)"; exit 1; }
+
+# Claude Code itself comes from the host, not the image (cc-cli-update.sh keeps it current):
+# /etc/claudeapp/cli-version/<user> (canary/pin) else /opt/claude-cli/current, mounted read-only
+# over the image's copy. No usable directory -> the image's own Claude Code, exactly as before.
+CLI_ARGS=()
+CLI_VER="$(tr -d '[:space:]' < "/etc/claudeapp/cli-version/$U" 2>/dev/null || true)"
+if [ -n "$CLI_VER" ] && [ -x "/opt/claude-cli/$CLI_VER/bin/claude.exe" ]; then
+  CLI_DIR="/opt/claude-cli/$CLI_VER"
+else
+  CLI_DIR="$(readlink -f /opt/claude-cli/current 2>/dev/null || true)"
+fi
+if [ -n "$CLI_DIR" ] && [ -x "$CLI_DIR/bin/claude.exe" ]; then
+  CLI_ARGS=(-v "$CLI_DIR:/usr/lib/node_modules/@anthropic-ai/claude-code:ro")
+  echo "claude code: $(basename "$CLI_DIR") from $CLI_DIR"
+fi
 [ -d "$HOME_DIR/.claude" ] || { echo "$HOME_DIR/.claude missing"; exit 1; }
 [ -d "$HOME_DIR/work" ] || { echo "$HOME_DIR/work missing"; exit 1; }
 
@@ -320,6 +335,6 @@ exec /usr/bin/podman run --rm --name "claude-$U" \
   -v "$HOME_DIR/work:$HOME_DIR/work" \
   -v "$HOME_DIR/.config:$HOME_DIR/.config" \
   -v "$HOME_DIR/.local:$HOME_DIR/.local" \
-  "${XEROCALL_ARGS[@]}" "${CFG_ARGS[@]}" "${SSH_ARGS[@]}" "${ICLOUD_ARGS[@]}" "${AUDIT_ARGS[@]}" \
+  "${XEROCALL_ARGS[@]}" "${CFG_ARGS[@]}" "${CLI_ARGS[@]}" "${SSH_ARGS[@]}" "${ICLOUD_ARGS[@]}" "${AUDIT_ARGS[@]}" \
   -w "$HOME_DIR/work" \
   "$IMAGE"

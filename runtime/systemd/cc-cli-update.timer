@@ -1,0 +1,12 @@
+[Unit]
+Description=Nightly Claude Code update for the tenant pods (canary first)
+
+[Timer]
+# 01:00 UTC = 02:00 in London: nobody is working, so graceful restarts happen at once.
+OnCalendar=*-*-* 01:00:00 UTC
+RandomizedDelaySec=600
+Persistent=false
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=Install the newest Claude Code, try it on the canary lawyer, roll out or roll back
+Documentation=file:///usr/local/sbin/cc-cli-update
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/cc-cli-update
+# A rollout waits for each tenant to be idle (graceful restarts, 60 min hard cap) and then
+# checks them, so a full run can take over an hour.
+TimeoutStartSec=6h
