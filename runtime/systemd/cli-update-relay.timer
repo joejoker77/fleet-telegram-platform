@@ -1,0 +1,13 @@
+[Unit]
+Description=Check for new Claude Code fleet-update events to relay
+
+[Timer]
+# A rollout can take over an hour and writes as it goes, so a quarter-hourly tick reports a
+# canary failure while the night is still young. The relay stays silent unless the events
+# file actually grew, so a frequent tick is not a frequent message.
+OnCalendar=*:0/15
+RandomizedDelaySec=60
+Persistent=true
+
+[Install]
+WantedBy=timers.target

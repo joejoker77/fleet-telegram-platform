@@ -1,0 +1,24 @@
+[Unit]
+Description=Relay new Claude Code fleet-update events to the firm admin over Telegram
+Documentation=file:///usr/local/sbin/cli-update-relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/cli-update-relay
+# It reads the events file and one bot token out of the admin's channel dir, so it needs to
+# see the homes — read-only is enough. The only thing it writes is its own offset, which is
+# what stops it re-sending the same rollout every quarter of an hour.
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/fleet
+StateDirectory=fleet
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+# Network stays on: the whole job is one call to api.telegram.org.
+TimeoutStartSec=120

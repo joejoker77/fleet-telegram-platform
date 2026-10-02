@@ -38,7 +38,10 @@ from datetime import datetime, timezone
 
 HOME_ROOT = os.environ.get("FLEET_HOME_ROOT", "/home")
 STATE_FILE = os.environ.get("FLEET_EXPIRY_STATE", "/var/lib/fleet/login-expiry.state")
-DEFAULT_ADMIN = os.environ.get("FLEET_EXPIRY_ADMIN", "tonysoprano1337")
+# Read at call time, not here: load_conf() runs first and only then can the host config
+# in CONF have a say. Binding the env var at import would make FLEET_EXPIRY_ADMIN in that
+# file silently dead, which is exactly the bug this comment replaces.
+DEFAULT_ADMIN = "tonysoprano1337"
 CONF = "/etc/claudeapp/login-expiry-notify.env"
 SKIP = {"cplane"}
 
@@ -154,7 +157,7 @@ def main() -> int:
     load_conf()
     ap = argparse.ArgumentParser()
     ap.add_argument("--warn-days", type=int, default=int(os.environ.get("FLEET_EXPIRY_WARN_DAYS", 5)))
-    ap.add_argument("--to", default=DEFAULT_ADMIN)
+    ap.add_argument("--to", default=os.environ.get("FLEET_EXPIRY_ADMIN", DEFAULT_ADMIN))
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--force", action="store_true", help="send even if nothing changed")
     ap.add_argument("--json", action="store_true")
