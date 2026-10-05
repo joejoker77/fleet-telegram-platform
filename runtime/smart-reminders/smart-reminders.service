@@ -1,0 +1,16 @@
+[Unit]
+Description=smart-reminders: scheduled prompts for tenant Claude sessions (LLM safety check on creation only, never on a timer)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/smart-reminders/smart_reminders.py
+LoadCredential=openrouter:/etc/credstore/smart-reminders-openrouter.key
+Restart=always
+RestartSec=10
+StateDirectory=smart-reminders
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

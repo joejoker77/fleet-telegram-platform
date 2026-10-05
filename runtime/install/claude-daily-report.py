@@ -143,6 +143,31 @@ def send(text):
     return ok
 
 
+
+def smart_reminders_section():
+    """Who is using smart reminders (creations in the last 7 days / all time, active,
+    fired). Read from the service's own stats command; no model involved."""
+    import subprocess
+    try:
+        out = subprocess.run(["/usr/bin/python3", "/opt/smart-reminders/smart_reminders.py", "--stats"],
+                             capture_output=True, text=True, timeout=60)
+        st = json.loads(out.stdout)
+    except Exception as exc:
+        return "<b>Smart reminders: stats unavailable (%s).</b>" % str(exc)[:80]
+    per = st.get("per_tenant", {})
+    tot = st.get("totals", {})
+    lines = ["<b>Smart reminders</b>  —  created: %d in 7 days, %d all time; %d active; fired %d"
+             % (tot.get("created_7d", 0), tot.get("created_all", 0), tot.get("active", 0), tot.get("fired_all", 0))]
+    if not per:
+        lines.append("Nobody has created one yet.")
+        return "\n".join(lines)
+    lines.append("<pre>%-19s %6s %7s %6s" % ("bot", "7 days", "all", "active"))
+    for name, v in sorted(per.items(), key=lambda kv: (-kv[1]["created_7d"], -kv[1]["created_all"], kv[0])):
+        lines.append("%-19s %6d %7d %6d" % (name[:19], v["created_7d"], v["created_all"], v["active"]))
+    lines.append("</pre>")
+    return "\n".join(lines)
+
+
 def main():
     day = dt.datetime.now(dt.timezone.utc).strftime("%a %d %b %Y")
     parts = ["<b>Claude bot activity — %s</b>" % day]
@@ -158,6 +183,7 @@ def main():
         parts.append(render(rows, SERVER_NAME))
     elif len(parts) == 1:
         parts.append("<b>%s: no bots found — collection failed.</b>" % SERVER_NAME)
+    parts.append(smart_reminders_section())
     text = "\n\n".join(parts)
     if "--dry-run" in sys.argv:
         print(text)

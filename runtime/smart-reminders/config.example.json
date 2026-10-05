@@ -1,0 +1,23 @@
+{
+  "admin_tenant": "dmitriirudenko",
+  "admin_chat_id": "99590176",
+  "model": "anthropic/claude-sonnet-5.5",
+  "openrouter_base": "https://openrouter.ai/api/v1",
+  "last_messages": 10,
+  "log_wait_seconds": 150,
+  "late_window_hours": 6,
+  "poll_seconds": 15,
+  "tmux_target": "claude:0.0",
+  "approvers": [
+    "dmitriirudenko"
+  ],
+  "slack_webhook_url": "https://n8n.monacosolicitors.co.uk/webhook/<relay path>",
+  "slack_webhook_token": "<header token shared with the n8n relay>",
+  "approver_slack_ids": [
+    "U06MALEN5EU"
+  ],
+  "slack_decisions_url": "https://n8n.monacosolicitors.co.uk/webhook/<decisions path>",
+  "approver_slack_map": {
+    "U06MALEN5EU": "dmitriirudenko"
+  }
+}

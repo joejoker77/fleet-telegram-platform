@@ -235,12 +235,32 @@ else
 fi
 
 # 6) reconcile skills/MCP for this tenant via the control plane
-log "6/6 reconcile skills + MCP"
+log "6/7 reconcile skills + MCP"
 if [ "$DRY_RUN" = "1" ]; then info "would run: cp-api deploy-reconcile.ts $USER_NAME --all --apply"
 else
   podman exec -w "$CP_DIR" cp-api node_modules/.bin/tsx apps/api/src/deploy-reconcile.ts "$USER_NAME" --all --apply >/dev/null 2>&1 \
     && info "reconciled skills/MCP for $USER_NAME" \
     || warn "reconcile step did not run (cp-api up? deps installed?) — will also happen on the next deploy webhook"
+fi
+
+# 7) smart reminders: the client, the skill, the three directories and the rule text
+# Placed before the finalize restart so the pod comes up with the tool already there. Skipped
+# quietly where the service is not installed — this script also runs on hosts that do not have it,
+# and a missing optional feature is not a failed provisioning.
+log "7/7 smart reminders for $USER_NAME"
+if [ ! -x /opt/smart-reminders/rollout.py ]; then
+  info "smart-reminders is not installed on this host — skipping"
+elif [ "$DRY_RUN" = "1" ]; then
+  info "would run: python3 /opt/smart-reminders/rollout.py $USER_NAME"
+else
+  if python3 /opt/smart-reminders/rollout.py "$USER_NAME" 2>&1 | sed 's/^/    /'; then
+    info "remind + skill installed for $USER_NAME"
+  else
+    # Not fatal: the person has a working assistant without it, and the rollout is idempotent, so
+    # re-running it later costs nothing. Saying so is the point — a silent skip here is how a user
+    # ends up as the only one without reminders.
+    warn "smart-reminders rollout did not complete for $USER_NAME — re-run: python3 /opt/smart-reminders/rollout.py $USER_NAME"
+  fi
 fi
 
 # finalize: restart the pod so it picks up EVERYTHING placed above (Claude OAuth

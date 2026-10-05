@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+"""remind — smart reminders: a prompt that reaches your assistant on a schedule.
+
+    remind add <name> --on 2026-10-13 --at 09:00 --prompt-file notes.md    # one-off; prints a request id
+    remind add <name> --cron "30 8 * * 1" --prompt "…"                        # repeating: Mondays 08:30
+    remind result <rq-id>       # then wait for the safety check's answer (created / sent for approval)
+    remind list                 # yours, plus anything waiting for approval
+    remind show <name>          # the stored prompt
+    remind test <name>          # fire it now
+    remind remove <name>
+    remind approve <id> [--note "..."] / remind decline <id> [--note "..."]   # approvers only
+
+How it works: this command only writes a request into ~/work/.claude/remind-requests/.
+An independent service on the host picks it up, finds this session in the logs, reads
+the last few user messages, and asks an AI checker whether the prompt is safe to run
+unattended. Green: the reminder is created and you are told here. Red: it is parked
+for the tech team; you are told; if they approve it, it is created and this session
+is told; if they decline, likewise. At the set time (London) the service types a
+line into the main Telegram Claude session: which reminder fired, where its prompt
+file is, which chat to answer. The assistant of that day reads the file and does the
+work. So write the prompt as a message to that future assistant: what to do and
+why, how it was done before, the baseline, the traps, what to report.
+
+Two shapes only. --on DATE --at HH:MM fires once. --cron takes a standard 5-field cron
+expression (minute hour day-of-month month weekday, London time) for anything repeating:
+"0 9 * * 1-5" weekdays 09:00, "0 9 13,26 * *" the 13th and 26th, "0 9 1 1,4,7,10 *" quarterly.
+Prompts live in ~/work/.claude/reminders/<name>.md.
+"""
+import argparse, datetime as dt, json, os, sys, time, secrets
+
+HOME = os.path.expanduser("~")
+CDIR = f"{HOME}/work/.claude"
+PDIR = f"{CDIR}/reminders"
+REQ = f"{CDIR}/remind-requests"
+RESP = f"{CDIR}/remind-responses"
+STATE = f"{CDIR}/remind-state.json"
+DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+WAIT = 300   # the service waits up to ~150 s for the session log to catch up, then runs the check
+
+
+
+
+def parse_at(s):
+    try:
+        h, m = (int(x) for x in s.split(":")); assert 0 <= h < 24 and 0 <= m < 60
+    except Exception: sys.exit(f"Not a time: {s}. Use HH:MM, 24-hour clock, London time.")
+    return f"{h:02d}:{m:02d}"
+
+
+def parse_date(s):
+    try: return dt.date.fromisoformat(s).isoformat()
+    except Exception: sys.exit(f"Not a date: {s}. Use YYYY-MM-DD.")
+
+
+def submit(payload):
+    os.makedirs(REQ, exist_ok=True); os.makedirs(RESP, exist_ok=True)
+    rid = "rq-" + dt.datetime.now().strftime("%Y%m%d%H%M%S") + "-" + secrets.token_hex(3)
+    tmp = f"{REQ}/{rid}.tmp"
+    with open(tmp, "w") as f: json.dump(payload, f)
+    os.replace(tmp, f"{REQ}/{rid}.json")
+    return rid
+
+
+def collect(rid, wait=WAIT):
+    deadline = time.time() + wait
+    rp = f"{RESP}/{rid}.json"
+    while time.time() < deadline:
+        if os.path.exists(rp):
+            with open(rp) as f: r = json.load(f)
+            os.remove(rp)
+            return r
+        time.sleep(3)
+    sys.exit(f"No answer from the smart-reminders service for {rid} within {wait // 60} minutes. "
+             "It may be down: ask the tech team. Nothing was created.")
+
+
+def request(payload, wait=WAIT):
+    rid = submit(payload)
+    print(f"request {rid} sent to the smart-reminders service…", flush=True)
+    return collect(rid, wait)
+
+
+def report_add(r, name):
+    if r.get("created"):
+        print(f"Created: '{name}' fires {r.get('schedule')}. The result will be delivered in the user's main Telegram chat. Checker: {r.get('reason')}")
+    elif r.get("pending"):
+        print(f"NOT created yet, approval id {r.get('approval_id')}.\n{r.get('message')}\nChecker said: {r.get('reason')}")
+        sys.exit(2)
+    else:
+        print("Not created: " + str(r.get("error") or r.get("message") or r)); sys.exit(1)
+
+
+def cmd_add(a):
+    if bool(a.on) == bool(a.cron): sys.exit("Give exactly one of --on YYYY-MM-DD --at HH:MM (one-off) or --cron 'm h dom mon dow' (repeating).")
+    if a.cron and a.at: sys.exit("--cron carries its own time; drop --at.")
+    if a.on and not a.at: sys.exit("--at HH:MM is required with --on.")
+    if not (a.prompt or a.prompt_file): sys.exit("Give --prompt 'text' or --prompt-file path.")
+    text = a.prompt if a.prompt else open(os.path.expanduser(a.prompt_file)).read()
+    os.makedirs(PDIR, exist_ok=True)
+    pf = f"{PDIR}/{a.name}.md"
+    if a.cron:
+        if len(a.cron.split()) != 5: sys.exit("--cron needs 5 fields: minute hour day-of-month month day-of-week, e.g. '0 9 * * 1' = Mondays 09:00")
+        sched = {"cron": a.cron.strip()}; when = f"repeating, cron '{sched['cron']}' (London time)"
+    else:
+        sched = {"date": parse_date(a.on), "at": parse_at(a.at)}; when = f"once on {sched['date']} at {sched['at']}"
+    header = (f"# Smart reminder: {a.name}\n\n"
+              f"Set {dt.datetime.now().strftime('%Y-%m-%d %H:%M')} by the assistant for {os.path.basename(HOME)}; fires {when} (London).\n"
+              f"This file is a message from the assistant that set the reminder to the assistant that runs it.\n\n---\n\n")
+    with open(pf, "w") as f: f.write(header + text.rstrip() + "\n")
+    payload = {"op": "add", "name": a.name, "schedule": sched, "prompt_file": pf, "title": a.title or a.name.replace("-", " ")}
+    if a.wait:
+        report_add(request(payload), a.name)
+        return
+    rid = submit(payload)
+    print(f"Request {rid} submitted: '{a.name}', {when} London.")
+    print(f"The service is now checking it (it reads this session's log first). Run:  remind result {rid}")
+
+
+def cmd_result(a):
+    r = collect(a.rid, WAIT)
+    report_add(r, r.get("name") or a.rid)
+
+
+def read_state():
+    try:
+        with open(STATE) as f: return json.load(f)
+    except (OSError, ValueError): return None
+
+
+def cmd_list(a):
+    st = read_state()
+    if st is None:
+        print("No state from the smart-reminders service yet (it writes ~/work/.claude/remind-state.json). "
+              "If you just created one, wait a minute; otherwise the service may be down."); return
+    rems = st.get("reminders", [])
+    if not rems: print("No smart reminders.")
+    for j in rems:
+        s = j.get("schedule") or {}
+        if s.get("cron"): when, at = f"repeating: cron {s['cron']}", ""
+        else: when, at = f"once {s.get('date')}", s.get("at")
+        extra = f"  fired {j['last_fired']}" if j.get("last_fired") else ""
+        print(f"{j['name']:<28} {at or '':<5}  {when:<26} {j.get('status','')}{extra}")
+    for p in st.get("pending_approval", []):
+        print(f"{p['name']:<28} waiting for tech-team approval since {p['since'][:16]} (id {p['id']}): {p.get('reason')}")
+    q = st.get("approval_queue")
+    if q is not None:
+        print("\nApproval queue (you are an approver):")
+        if not q: print("  empty")
+        for p in q:
+            print(f"  id {p['id']}  {p['tenant']}  {p['name']}  since {p['since'][:16]}\n     why: {p.get('reason')}\n     prompt: {p.get('prompt_head','')[:160]}")
+    print(f"\n(state updated {st.get('updated')})")
+
+
+def cmd_show(a):
+    p = f"{PDIR}/{a.name}.md"
+    if not os.path.exists(p): sys.exit(f"No prompt file for '{a.name}'.")
+    print(open(p).read())
+
+
+def cmd_remove(a):
+    r = request({"op": "remove", "name": a.name}, wait=90)
+    print(f"Removed {r.get('removed', 0)} reminder(s) called '{a.name}'." if r.get("ok") else f"Failed: {r}")
+
+
+def cmd_test(a):
+    r = request({"op": "test", "name": a.name}, wait=90)
+    print("Fired into the main session." if r.get("ok") else f"Failed: {r.get('error') or r}")
+
+
+def cmd_decide(op):
+    def run(a):
+        r = request({"op": op, "id": a.id, "note": a.note}, wait=120)
+        if r.get("ok"):
+            print(f"{r.get('outcome','').capitalize()}: {r.get('tenant')}/{r.get('name')}. User's session told: {r.get('user_told')}")
+        else:
+            print(f"Failed: {r.get('error') or r}"); sys.exit(1)
+    return run
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("add"); p.add_argument("name"); p.add_argument("--on"); p.add_argument("--at"); p.add_argument("--cron")
+    p.add_argument("--prompt"); p.add_argument("--prompt-file"); p.add_argument("--title")
+    p.add_argument("--wait", action="store_true", help="block until the safety check answers (default: return at once, then `remind result <rq>`)")
+    p.set_defaults(fn=cmd_add)
+    p = sub.add_parser("result"); p.add_argument("rid"); p.set_defaults(fn=cmd_result)
+    p = sub.add_parser("list"); p.set_defaults(fn=cmd_list)
+    p = sub.add_parser("show"); p.add_argument("name"); p.set_defaults(fn=cmd_show)
+    p = sub.add_parser("remove"); p.add_argument("name"); p.set_defaults(fn=cmd_remove)
+    p = sub.add_parser("test"); p.add_argument("name"); p.set_defaults(fn=cmd_test)
+    for op in ("approve", "decline"):
+        p = sub.add_parser(op); p.add_argument("id"); p.add_argument("--note"); p.set_defaults(fn=cmd_decide(op))
+    a = ap.parse_args(); a.fn(a)
+
+
+if __name__ == "__main__":
+    main()
