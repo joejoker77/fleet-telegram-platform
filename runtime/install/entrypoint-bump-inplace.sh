@@ -80,10 +80,26 @@ while read -r t; do
     "$base-ep"[0-9]*) r="${t##*-ep}"; [ "$r" -gt "$n" ] 2>/dev/null && n="$r" ;;
   esac
 done < <(podman images --format '{{.Tag}}' --filter reference="$IMAGE")
+
+# Idempotence. Without this, every re-run mints another tag — a --dry-run
+# followed by the real thing would ship ep3 having verified ep2, and a canary
+# promoted later would be a tag nobody tested. So if the newest revision already
+# carries exactly this entrypoint, reuse it instead of building past it.
+want="$(sha256sum "$EP" | awk '{print $1}')"
 NEW_TAG="$base-ep$((n + 1))"
+REUSED=0
+if [ "$n" -ge 0 ]; then
+  have="$(podman run --rm --entrypoint /bin/sh "$IMAGE:$base-ep$n" \
+            -c 'sha256sum /opt/platform/entrypoint.sh' 2>/dev/null | awk '{print $1}')"
+  if [ "$have" = "$want" ]; then
+    NEW_TAG="$base-ep$n"
+    REUSED=1
+    echo "  $NEW_TAG already carries this exact entrypoint — reusing it"
+  fi
+fi
 STAMP="$(date -u +%Y%m%d)"
 BACKUP_TAG="pre-$NEW_TAG-$STAMP"
-echo "  building $NEW_TAG"
+[ "$REUSED" = 1 ] || echo "  building $NEW_TAG"
 
 log "keep the current image for rollback → $BACKUP_TAG"
 if podman image exists "$IMAGE:$BACKUP_TAG"; then
@@ -93,16 +109,20 @@ else
 fi
 echo "  $BACKUP_TAG -> $(podman image inspect -f '{{.Id}}' "$IMAGE:$BACKUP_TAG" | cut -c1-12)"
 
-log "layering the entrypoint onto it"
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
-install -m 0755 "$EP" "$tmp/entrypoint.sh"
-cat > "$tmp/Containerfile" <<EOF
+if [ "$REUSED" = 1 ]; then
+  log "nothing to build — verifying the existing $NEW_TAG before any tag moves"
+else
+  log "layering the entrypoint onto it"
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  install -m 0755 "$EP" "$tmp/entrypoint.sh"
+  cat > "$tmp/Containerfile" <<EOF
 FROM $IMAGE:$BACKUP_TAG
 COPY entrypoint.sh /opt/platform/entrypoint.sh
 RUN chmod 0755 /opt/platform/entrypoint.sh
 EOF
-podman build -t "$IMAGE:$NEW_TAG" -f "$tmp/Containerfile" "$tmp"
+  podman build -t "$IMAGE:$NEW_TAG" -f "$tmp/Containerfile" "$tmp"
+fi
 
 log "verify INSIDE the built image, not in the checkout"
 for m in "${MARKERS[@]}"; do
