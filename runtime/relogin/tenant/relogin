@@ -49,9 +49,11 @@ exactly the state where the model cannot be reached, which is the state it is fo
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import time
@@ -218,6 +220,45 @@ def pretty(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%d %B %Y")
 
 
+# ---- the stable button address -----------------------------------------------------
+# A Telegram inline URL button is STATIC: the link in it is fixed when the message is
+# sent. The warning goes out three, two and one day before expiry, and the sign-in
+# behind a Claude link lives twenty minutes — so a link baked into that message is
+# dead long before anyone taps it. The button therefore points at OUR address, which
+# never changes, and cp-api mints the Claude link at the moment of the tap.
+#
+# The token is this pod's own: a random value in the state dir, which cp-api reads
+# back to recognise us. Nothing is signed, no secret is shared, and rotating it is
+# deleting the file.
+
+RELOGIN_BASE_URL = os.environ.get(
+    "RELOGIN_BASE_URL", "https://claude.monacosolicitors.co.uk/relogin")
+
+
+def button_link(sd: str) -> str | None:
+    """The tenant's stable sign-in address, minting the token on first use."""
+    who = os.environ.get("USER_NAME") or os.environ.get("USER") or getpass.getuser()
+    if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", who or ""):
+        return None
+    path = os.path.join(sd, "relogin-token")
+    try:
+        with open(path, encoding="utf8") as fh:
+            secret = fh.read().strip()
+    except OSError:
+        secret = ""
+    if not re.fullmatch(r"[0-9a-f]{32,128}", secret):
+        secret = secrets.token_hex(24)
+        try:
+            # 0600: it is not a credential for anything outside this host, but it is
+            # the one thing that says "this really is that tenant" to cp-api.
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf8") as fh:
+                fh.write(secret + "\n")
+        except OSError:
+            return None
+    return f"{RELOGIN_BASE_URL}/{who}.{secret}"
+
+
 # ---- tmux --------------------------------------------------------------------------
 
 def tmux(*args: str, check: bool = False) -> subprocess.CompletedProcess:
@@ -316,11 +357,27 @@ MESSAGE_WARN = (
     "warning to you or anyone else — so it is worth doing now; it takes about twenty "
     "seconds.\n"
     "\n"
-    "1. Tap Sign in below and approve with your Claude account.\n"
-    "2. The page gives you a code. Copy it.\n"
-    "3. Send it back to me here, as an ordinary message.\n"
+    "1. Tap Sign in below. The page opens straight away.\n"
+    "2. Approve with your Claude account. It gives you a code. Copy it.\n"
+    "3. Send the code back to me here, as an ordinary message.\n"
+    "\n"
+    "Tap it whenever suits you — today, tomorrow, next week. The sign-in is made at "
+    "the moment you tap, so this button cannot go stale sitting here.\n"
     "\n"
     "If you would rather leave it, nothing breaks today — I will ask again tomorrow."
+)
+
+# Same button, but the sign-in has already lapsed, so there is nothing to put off.
+MESSAGE_EXPIRED = (
+    "My Claude sign-in has run out, so I cannot answer you until it is renewed. It "
+    "takes about twenty seconds and only you can do it.\n"
+    "\n"
+    "1. Tap Sign in below. The page opens straight away.\n"
+    "2. Approve with your Claude account. It gives you a code. Copy it.\n"
+    "3. Send the code back to me here, as an ordinary message.\n"
+    "\n"
+    "The sign-in is made at the moment you tap, so this button keeps working however "
+    "long this message has been sitting here."
 )
 
 
@@ -331,11 +388,43 @@ def cmd_start(args: argparse.Namespace) -> int:
     token = bot_token(sd)
     chat, thread = chat_target(sd)
 
+    # The ladder fires DAYS before expiry. Starting a sign-in now would mint a link
+    # whose flow is dead in FLOW_TTL_S (twenty minutes) and leave a tmux session
+    # waiting all night for a code that arrives, if at all, tomorrow — the exact
+    # "the sign-in is no longer running" that sends people to support.
+    #
+    # So a warning starts nothing. It is a nudge carrying our own stable address; the
+    # Claude link is minted when the person taps it, however long that takes.
+    if args.reason in ("warn", "expired") and not args.force:
+        link = button_link(sd)
+        if link is None:
+            # No token, no stable button. Fall through to the old behaviour rather
+            # than send a warning with nothing to tap.
+            print("relogin: could not build the sign-in address — starting a flow instead",
+                  file=sys.stderr)
+        else:
+            left = days_left()
+            if args.reason == "warn" and left is not None and left > 0:
+                whole = int(left)
+                text = MESSAGE_WARN.format(days="a day" if whole <= 1 else f"{whole} days")
+            else:
+                text = MESSAGE_EXPIRED
+            send(token, chat, thread, text, ("Sign in to Claude", link))
+            print(f"relogin: nudge sent to chat {chat} — no flow started, "
+                  f"the link is minted when they tap")
+            return 0
+
     state = read_state()
     live = (state.get("status") == "awaiting_code"
             and tmux_alive()
             and time.time() - float(state.get("started_at_epoch") or 0) < FLOW_TTL_S)
     if live and not args.force:
+        # Standing in the browser on /relogin with a flow already up: hand back the
+        # link that flow is bound to. Minting a second one would invalidate the page
+        # the person may already have open (same PKCE argument as the re-send below).
+        if getattr(args, "print_url", False) and state.get("url"):
+            print(state["url"])
+            return 0
         since = time.time() - float(state.get("sent_at_epoch") or 0)
         if since < RESEND_COOLDOWN_S:
             print(f"relogin: a sign-in is already in flight and was sent "
@@ -373,6 +462,25 @@ def cmd_start(args: argparse.Namespace) -> int:
         screen = "\n".join(line for line in pane().splitlines() if line.strip())[-800:]
         kill_flow()
         die(f"no sign-in link appeared in {URL_WAIT_S}s. Last screen:\n{screen}")
+
+    # --print-url: the person is already standing in their browser on our /relogin
+    # address, waiting for a redirect. Sending them a Telegram message with the same
+    # link would be a second, slower copy of what they are about to get anyway.
+    if getattr(args, "print_url", False):
+        write_state({
+            "status": "awaiting_code",
+            "reason": args.reason,
+            "url": url,
+            "chat_id": chat,
+            "thread_id": thread,
+            "message_id": 0,
+            "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "started_at_epoch": started,
+            "sent_at_epoch": time.time(),
+            "expiry_before": refresh_expiry(),
+        })
+        print(url)
+        return 0
 
     left = days_left()
     if args.reason == "warn" and left is not None and left > 0:
@@ -611,7 +719,11 @@ def main() -> int:
     p.add_argument("--force", action="store_true", help="start a new flow over a live one")
     p.add_argument("--reason", default="manual",
                    choices=["manual", "warn", "expired", "test"],
-                   help="what prompted it; 'warn' changes the wording")
+                   help="what prompted it; 'warn' and 'expired' send a nudge, not a link")
+    p.add_argument("--print-url", action="store_true",
+                   help="print the sign-in link on stdout and send no message — "
+                        "for the /relogin redirect, where the person is already in "
+                        "their browser waiting for it")
     p.set_defaults(fn=cmd_start)
 
     p = sub.add_parser("code", help="hand the pasted code to the waiting sign-in")

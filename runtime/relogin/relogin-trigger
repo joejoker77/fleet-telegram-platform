@@ -140,6 +140,9 @@ def main() -> int:
     ap.add_argument("--status", action="store_true")
     ap.add_argument("--cancel", action="store_true")
     ap.add_argument("--watch", action="store_true")
+    ap.add_argument("--print-url", action="store_true",
+                    help="start a sign-in and print ONLY the link, nothing else — "
+                         "cp-api's /relogin redirect reads this on stdout")
     ap.add_argument("--all-expiring", action="store_true",
                     help="every installed tenant whose sign-in is inside --days")
     ap.add_argument("--days", type=float, default=3.0)
@@ -165,6 +168,31 @@ def main() -> int:
         return act(args.user, ["cancel"])
     if args.watch:
         return act(args.user, ["watch", "--timeout", "900"], quiet=False)
+
+    if args.print_url:
+        # The caller is cp-api answering a browser that is mid-redirect, so stdout
+        # must be the bare link and nothing else — no `user:` prefix, no chatter.
+        # Diagnostics go to stderr, where cp-api logs them without parsing them.
+        if not installed(args.user):
+            print(f"{args.user}: relogin is not installed", file=sys.stderr)
+            return 1
+        if not pod_running(args.user):
+            print(f"{args.user}: pod not running", file=sys.stderr)
+            return 1
+        out = run_in_pod(args.user, ["start", "--reason", "manual", "--print-url"])
+        if out.returncode != 0:
+            print((out.stdout + out.stderr).strip()[-500:], file=sys.stderr)
+            return out.returncode
+        link = ""
+        for line in out.stdout.splitlines():
+            if line.strip().startswith("https://"):
+                link = line.strip()
+        if not link:
+            print((out.stdout + out.stderr).strip()[-500:], file=sys.stderr)
+            return 1
+        print(link)
+        start_watcher(args.user)
+        return 0
 
     argv = ["start", "--reason", args.reason]
     if args.force:
