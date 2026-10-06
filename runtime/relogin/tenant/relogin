@@ -164,7 +164,8 @@ def api(token: str, method: str, payload: dict) -> dict:
             return {"ok": False, "description": f"HTTP {exc.code}"}
 
 
-def send(token: str, chat: str, thread: str, text: str, button: tuple[str, str] | None = None) -> int:
+def send(token: str, chat: str, thread: str, text: str, button: tuple[str, str] | None = None,
+         callback: bool = False) -> int:
     """Plain text, no parse mode — a 500-character URL has nothing safe to escape in.
 
     The link goes twice: as an inline button (nothing to escape at all, and one tap on a
@@ -178,7 +179,13 @@ def send(token: str, chat: str, thread: str, text: str, button: tuple[str, str] 
     if thread:
         payload["message_thread_id"] = int(thread)
     if button:
-        payload["reply_markup"] = {"inline_keyboard": [[{"text": button[0], "url": button[1]}]]}
+        # A URL button carries a STATIC link, fixed when the message is sent. For the
+        # 3/2/1-day warning that is useless: the sign-in behind a link lives twenty
+        # minutes and the warning is read hours or days later. `callback=True` sends a
+        # callback button instead — the tap comes back to the bot, the patched plugin
+        # hands it to the session, and the link is minted right then.
+        key = "callback_data" if callback else "url"
+        payload["reply_markup"] = {"inline_keyboard": [[{"text": button[0], key: button[1]}]]}
     out = api(token, "sendMessage", payload)
     if not out.get("ok"):
         # A topic that has been deleted answers "message thread not found"; the chat
@@ -316,12 +323,17 @@ MESSAGE_WARN = (
     "warning to you or anyone else — so it is worth doing now; it takes about twenty "
     "seconds.\n"
     "\n"
-    "1. Tap Sign in below and approve with your Claude account.\n"
-    "2. The page gives you a code. Copy it.\n"
-    "3. Send it back to me here, as an ordinary message.\n"
+    "Tap Sign in below whenever you are ready — today, tomorrow, next week. I make the "
+    "link at the moment you tap, so it cannot go stale while this message sits unread. "
+    "Then approve with your Claude account, copy the code the page gives you, and send "
+    "it back here as an ordinary message.\n"
     "\n"
     "If you would rather leave it, nothing breaks today — I will ask again tomorrow."
 )
+
+# What the warning's button sends back. The patched plugin hands this to the session
+# like a typed message, and the relogin mod turns it into a fresh sign-in.
+BUTTON_TAP_DATA = "relogin:start"
 
 
 # ---- commands ----------------------------------------------------------------------
@@ -330,6 +342,23 @@ def cmd_start(args: argparse.Namespace) -> int:
     sd = state_dir()
     token = bot_token(sd)
     chat, thread = chat_target(sd)
+
+    # The ladder fires DAYS ahead of expiry. Minting a link now would be pointless: the
+    # flow behind it dies in FLOW_TTL_S (twenty minutes), and the tmux sign-in would sit
+    # all night waiting for a code that arrives tomorrow, if at all. That is exactly the
+    # "the sign-in is no longer running" that sends people to support. So a warning is
+    # only a NUDGE — one callback button, no subprocess, no state. The link is made when
+    # the person taps, by this same command with reason=manual.
+    if args.reason in ("warn", "expired") and not args.force:
+        left = days_left()
+        if args.reason == "warn" and left is not None and left > 0:
+            whole = int(left)
+            text = MESSAGE_WARN.format(days="a day" if whole <= 1 else f"{whole} days")
+        else:
+            text = MESSAGE_START
+        send(token, chat, thread, text, ("Sign in to Claude", BUTTON_TAP_DATA), callback=True)
+        print(f"relogin: nudge sent to chat {chat} — no flow started, the link is made on tap")
+        return 0
 
     state = read_state()
     live = (state.get("status") == "awaiting_code"
