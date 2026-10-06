@@ -478,20 +478,68 @@ def cmd_cancel(_args: argparse.Namespace) -> int:
     return 0
 
 
-def poller_alive(sd: str) -> bool:
-    """Is the Telegram plugin holding the single getUpdates slot?
+# The notice claude prints at startup when it came up with no channel at all.
+# Lifted from the code it replaced; it is matched ONLY inside a launch banner.
+CHANNEL_ABSENT_NOTICE = 'Channels are not currently available'
+BANNER_BYTES = 16384
 
-    Two pollers on one token do not share: the Bot API hands each update to whoever
-    asks first and answers the other with 409. So `watch` must never run beside one.
+
+def launch_banner(sd: str) -> str:
+    """What THIS claude launch printed at startup, and nothing it has printed since.
+
+    The notice above is emitted once, in claude's opening notices. Searching the live
+    tmux pane for it instead — which is what this function replaced — also searches
+    every tool result and every line of conversation on screen, so a session that
+    merely QUOTES the notice reads as channel-less. In the pod supervisor the same
+    mistake respawned the window and killed the running turn four times in an hour
+    (vitaliy, 6 Oct 2026); here it would have sent `watch` to fight a healthy poller
+    for the getUpdates slot. The entrypoint records where each launch begins in the
+    pane log; read that slice, capped to the notices, and nothing else.
+    """
+    try:
+        with open(os.path.join(sd, "claude_launch.offset"), encoding="utf8") as fh:
+            offset = int(fh.read().split()[0])
+    except (OSError, ValueError, IndexError):
+        return ""
+    try:
+        with open(os.path.join(sd, "logs", "claude-pane.log"), "rb") as fh:
+            fh.seek(offset)
+            return fh.read(BANNER_BYTES).decode("utf8", "replace")
+    except OSError:
+        return ""
+
+
+def poller_delivering(sd: str) -> bool:
+    """Is the Telegram plugin actually taking the single getUpdates slot AND using it?
+
+    Two pollers on one token do not share: the Bot API hands each update to whoever asks
+    first and answers the other with 409. So `watch` must never run beside a live one.
+
+    But a live PROCESS is not a live channel, and reading bot.pid alone gets this exactly
+    backwards in the case that matters. marcuscatan, 6 Oct 2026: login dead 28 days, pod
+    restarted an hour before, `bun` alive on the pid in bot.pid — and the session itself
+    reporting no channel at all. The plugin's server starts in
+    every session whether or not a channel attaches; on that pod nothing was being
+    delivered to anyone, and a watcher that stood aside for it would have left the person
+    sending a code into a chat nobody was listening to.
+
+    So the launch banner is asked too, and it is the authority. Not the live pane:
+    see launch_banner() for why reading the screen gets this dangerously wrong.
     """
     try:
         with open(os.path.join(sd, "bot.pid"), encoding="utf8") as fh:
             pid = int(fh.read().strip())
+        os.kill(pid, 0)
     except (OSError, ValueError):
         return False
-    try:
-        os.kill(pid, 0)
-    except OSError:
+    banner = launch_banner(sd)
+    if not banner:
+        # Nothing to judge from: an entrypoint older than this change leaves no launch
+        # marker. Standing aside is the conservative answer — stealing the getUpdates
+        # slot from a poller that IS delivering breaks the chat for the person we are
+        # trying to help. `watch --force` is the deliberate override.
+        return True
+    if CHANNEL_ABSENT_NOTICE in banner:
         return False
     return True
 
@@ -519,8 +567,8 @@ def watch_lock() -> None:
 
 def cmd_watch(args: argparse.Namespace) -> int:
     sd = state_dir()
-    if poller_alive(sd):
-        die("the Telegram poller is running — it will deliver the code; watch is for a "
+    if poller_delivering(sd) and not args.force:
+        die("the Telegram channel is up — it will deliver the code; watch is for a "
             "session that came up with no channel at all")
     state = read_state()
     if state.get("status") != "awaiting_code":
@@ -579,6 +627,8 @@ def main() -> int:
 
     p = sub.add_parser("watch", help="collect the code from Telegram ourselves")
     p.add_argument("--timeout", type=int, default=900)
+    p.add_argument("--force", action="store_true",
+                   help="take the slot even where the channel looks up (last resort)")
     p.set_defaults(fn=cmd_watch)
 
     args = ap.parse_args()

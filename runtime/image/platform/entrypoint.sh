@@ -480,6 +480,14 @@ launch_claude() { # $1 = dir, $2 = boot|switch
   fi
   # Non-destructively capture the pane (claude's TUI/errors) to a log so launch
   # failures are diagnosable from the host; re-armed after every respawn.
+  # Everything this launch prints lands after this offset. Taken BEFORE pipe-pane is
+  # re-armed so no byte of the new session's notices falls outside the window, and
+  # published to a file so relogin (a separate process) can ask the same question.
+  CHAN_LAUNCH_OFFSET="$(wc -c < "$TELEGRAM_STATE_DIR/logs/claude-pane.log" 2>/dev/null || echo 0)"
+  CHAN_LAUNCH_AT="$(date +%s)"
+  CHAN_VERDICT=""
+  printf '%s %s\n' "$CHAN_LAUNCH_OFFSET" "$CHAN_LAUNCH_AT" \
+    > "$TELEGRAM_STATE_DIR/claude_launch.offset" 2>/dev/null || true
   tmux pipe-pane -t "${SESSION}:0" -o "cat >> '$TELEGRAM_STATE_DIR/logs/claude-pane.log'" 2>/dev/null || true
 }
 
@@ -686,11 +694,46 @@ heal_tick=0
 # does), so the one-shot escalation below cannot become a restart loop.
 CHAN_ESCALATED="$HOME/.claude/.channel-escalated"
 
+# Channel verdict, decided once per claude launch (see channel_attached below).
+# `:=` not `=`: the boot launch_claude at line ~553 runs BEFORE this point and has
+# already recorded the real offset. A plain assignment here would wipe it and send the
+# first verdict reading from byte 0 — i.e. over the whole log, the very bug being fixed.
+: "${CHAN_LAUNCH_OFFSET:=0}"   # bytes in claude-pane.log when this launch started
+: "${CHAN_LAUNCH_AT:=0}"       # epoch seconds of that launch
+: "${CHAN_VERDICT:=}"          # "" = not judged yet, 0 = attached, 1 = not attached
+CHAN_VERDICT_DELAY="${CHAN_VERDICT_DELAY:-20}"   # seconds to let the notices appear
+CHAN_BANNER_BYTES="${CHAN_BANNER_BYTES:-16384}"  # how far past launch the notices reach
+
 channel_attached() {
-  # Ground truth is what the session itself says. ":0" is deliberate — the rc window is
-  # also called "claude", so a bare -t "$SESSION" can resolve to the wrong pane.
-  ! tmux capture-pane -p -t "${SESSION}:0" 2>/dev/null \
-    | grep -q 'Channels are not currently available'
+  # Ground truth is what THIS claude launch printed at STARTUP, not what happens to be
+  # on the screen now. claude decides about channels once, at startup, and says so in
+  # its opening notices. The live pane also carries everything the session has done
+  # since — so grepping the whole pane makes any turn that merely DISPLAYS that notice
+  # (a grep over code that contains it, a pasted error, this very function) look like a
+  # dead channel. The heal below then respawns the window and SIGKILLs the running
+  # turn: the person watching Telegram sees the progress message vanish with no reply.
+  # Measured on vitaliy 2026-10-06: four kills in one hour, 07:45/08:28/08:35/08:45,
+  # every one of them self-inflicted by a session reading its own screen.
+  #
+  # So: read only the bytes this launch wrote to the pane log, judge once, and cache.
+  # A launch that never wrote anything (pipe-pane failed to arm) reads as attached —
+  # deliberately, because the failure mode of guessing "detached" is a respawn loop.
+  [ -n "$CHAN_VERDICT" ] && return "$CHAN_VERDICT"
+  # No launch observed at all (should not happen; never guess "detached" from it).
+  [ "$CHAN_LAUNCH_AT" -eq 0 ] && return 0
+  local now; now="$(date +%s)"
+  # Too early to judge: the notices are not out yet. Not detached — just unknown.
+  [ $((now - CHAN_LAUNCH_AT)) -lt "$CHAN_VERDICT_DELAY" ] && return 0
+  CHAN_VERDICT=0
+  launch_banner | grep -q 'Channels are not currently available' && CHAN_VERDICT=1
+  return "$CHAN_VERDICT"
+}
+
+# The slice of the pane log that belongs to the current claude launch, capped to the
+# startup notices. The cap is what keeps conversation out of the answer.
+launch_banner() {
+  tail -c "+$((CHAN_LAUNCH_OFFSET + 1))" "$TELEGRAM_STATE_DIR/logs/claude-pane.log" 2>/dev/null \
+    | head -c "$CHAN_BANNER_BYTES"
 }
 
 dismiss_login_modal() {
