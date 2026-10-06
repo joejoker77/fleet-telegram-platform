@@ -70,7 +70,10 @@ export const register: Register = (on) => {
     if (!(await $.fs.exists(`${configDir}/run/relogin.json`))) return next(e)
     if (!looksLikeCode(text)) return next(e)
 
-    const run = await $.process.run([helper, 'code', text], { timeoutMs: CODE_TIMEOUT_MS })
+    // `-` and stdin, not an argument: a sign-in code is single-use but it is a
+    // credential until it is spent, and an argument is readable out of /proc.
+    const run = await $.process.run([helper, 'code', '-'],
+                                    { stdin: text, timeoutMs: CODE_TIMEOUT_MS })
     if (run.exitCode === 0) return { drop: 'relogin: signed in' }
     if (run.exitCode === 3) return { drop: 'relogin: that code was refused' }
     // Anything else and we were wrong about the message: it was not a code after all,

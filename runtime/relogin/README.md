@@ -93,7 +93,10 @@ relogin-trigger --all-expiring --days 3       what the timer would do
 login-expiry-notify --dry-run                 the whole picture, sending nothing
 ```
 
-Inside a pod, as the tenant: `~/work/bin/relogin status | start | code <CODE> | cancel`.
+Inside a pod, as the tenant: `~/work/bin/relogin status | start | cancel`, and
+`printf %s '<code>' | ~/work/bin/relogin code -` — on standard input, never as an
+argument, because a sign-in code is single-use but is a credential until it is spent and
+an argument is readable out of `/proc` by anything on the host.
 
 ## Limits, stated plainly
 

@@ -15,7 +15,7 @@ no administrator, no terminal for them to open.
 ```
 ~/work/bin/relogin status            what, if anything, is in flight
 ~/work/bin/relogin start             send them a sign-in link with a button
-~/work/bin/relogin code <CODE>       hand back the code they pasted
+~/work/bin/relogin code -            hand back the code they pasted (on stdin)
 ~/work/bin/relogin cancel            drop a flow that has gone stale
 ```
 
@@ -25,9 +25,10 @@ no administrator, no terminal for them to open.
   a message with a *Sign in to Claude* button and tells them to send the code back
   here. Say that you have sent it; do not paste the link into your own reply as well.
 - **They send back a code** (a single long token, often with a `#` in it, or the whole
-  callback URL). Run `relogin code '<what they sent>'`. On success they get a
-  confirmation with the new expiry date — you need add nothing. Exit code 3 means the
-  code was refused and they have already been told to send it again.
+  callback URL). Pipe it in rather than putting it on the command line, where any process
+  on the host can read it out of `/proc`: `printf %s '<what they sent>' | relogin code -`.
+  On success they get a confirmation with the new expiry date — you need add nothing.
+  Exit code 3 means the code was refused and they have already been told to send it again.
 - **The link has gone stale** (more than about fifteen minutes old). `relogin start`
   again; it begins a fresh sign-in on its own.
 

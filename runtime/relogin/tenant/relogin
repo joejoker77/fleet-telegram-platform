@@ -2,7 +2,8 @@
 """relogin — let a person renew their own Claude sign-in from their Telegram chat.
 
     relogin start [--force] [--reason WORD]   begin a sign-in and send the link
-    relogin code <CODE>                       hand the pasted code to that sign-in
+    relogin code <CODE> | -                   hand the pasted code to that sign-in
+                                              (`-` reads it from standard input)
     relogin status [--json]                   what, if anything, is in flight
     relogin cancel                            drop the flow and tidy up
     relogin watch [--timeout 900]             collect the code from Telegram ourselves
@@ -405,7 +406,12 @@ def cmd_code(args: argparse.Namespace) -> int:
         clear_state()
         die("the sign-in is no longer running — start a new one")
 
-    code = clean_code(args.code)
+    # A sign-in code is single-use and dies the moment it is spent, but until then it is
+    # a credential, and a credential on a command line is readable out of /proc by every
+    # process on the host. `-` reads it from standard input instead, which is what the
+    # mod and anything scripted should use.
+    raw = sys.stdin.read() if args.code == "-" else args.code
+    code = clean_code(raw)
     if not code:
         die("that does not look like a sign-in code")
 
@@ -539,7 +545,7 @@ def main() -> int:
     p.set_defaults(fn=cmd_start)
 
     p = sub.add_parser("code", help="hand the pasted code to the waiting sign-in")
-    p.add_argument("code")
+    p.add_argument("code", help="the code, or `-` to read it from standard input")
     p.set_defaults(fn=cmd_code)
 
     p = sub.add_parser("status", help="what, if anything, is in flight")
