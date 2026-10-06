@@ -35,16 +35,6 @@ const CODE_TIMEOUT_MS = 120_000
 const SUMMONS = /^\/?re-?login[.!]?$/i
 
 /**
- * What the inline button sends. A Telegram URL button carries a STATIC link, baked in
- * when the message is sent — useless here, because the warning goes out three, two and
- * one DAY before expiry while the sign-in behind a link lives twenty minutes. So the
- * button is a callback button, the patched plugin hands its data to the session like a
- * typed message (through the same allowlist gate), and this hook mints the link at the
- * moment of the tap.
- */
-const BUTTON_TAP = /^relogin:start$/
-
-/**
  * Could this message be a sign-in code? Deliberately loose — the helper decides, and it
  * also accepts the whole callback URL. The one job here is to let ordinary prose
  * through: a code is a single token with a digit, dash, underscore or '#' in it.
@@ -64,11 +54,11 @@ export const register: Register = (on) => {
 
     const text = (e.text ?? '').trim()
 
-    if (SUMMONS.test(text) || BUTTON_TAP.test(text)) {
+    if (SUMMONS.test(text)) {
       const run = await $.process.run([helper, 'start'], { timeoutMs: START_TIMEOUT_MS })
       return {
         drop: run.exitCode === 0
-          ? 'relogin: fresh sign-in link sent to this chat'
+          ? 'relogin: sign-in link sent to this chat'
           : `relogin: could not start a sign-in — ${run.stderr.trim() || 'see the pod log'}`,
       }
     }

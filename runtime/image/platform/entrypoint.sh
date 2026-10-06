@@ -534,7 +534,7 @@ fi
 echo "${ACTIVE_NAME:-default}" > "$ACTIVE_FILE"
 
 tmux kill-session -t "$SESSION" 2>/dev/null || true
-TMUX_CFG="$(mktemp)"; trap 'rm -f "$TMUX_CFG"; for _p in "${PROGRESS_SIDECAR_PID:-}" "${SESSION_INDEXER_PID:-}" "${TRANSCRIPT_EXPORTER_PID:-}" "${PATCH_WATCHER_PID:-}"; do [ -n "$_p" ] && kill "$_p" 2>/dev/null; done' EXIT
+TMUX_CFG="$(mktemp)"; trap 'rm -f "$TMUX_CFG"; for _p in "${PROGRESS_SIDECAR_PID:-}" "${SESSION_INDEXER_PID:-}" "${TRANSCRIPT_EXPORTER_PID:-}"; do [ -n "$_p" ] && kill "$_p" 2>/dev/null; done' EXIT
 echo "set-option -g history-limit 100000" > "$TMUX_CFG"
 mkdir -p "$TELEGRAM_STATE_DIR/logs"
 
@@ -566,22 +566,6 @@ if [ "${DISABLE_PROGRESS_SIDECAR:-0}" != "1" ] && [ "${DISABLE_TELEGRAM_CHANNEL:
     >>"$TELEGRAM_STATE_DIR/logs/progress-sidecar.log" 2>&1 &
   PROGRESS_SIDECAR_PID=$!
   echo "[progress] sidecar launched (pid $PROGRESS_SIDECAR_PID)"
-fi
-
-# Plugin-patch watcher: keeps the relogin callback bridge alive across Claude Code's
-# own plugin updates. Those land 3-5 MINUTES AFTER a session starts, in a brand-new
-# cache/.../telegram/<version>/ directory, so patching once before launch is correct
-# for five minutes and then irrelevant. This watches for that directory appearing and
-# re-applies the patch before anything reads it. Without it the 3/2/1-day warning
-# keeps a button that silently does nothing.
-PATCH_WATCHER_PID=""
-if [ "${DISABLE_PATCH_WATCHER:-0}" != "1" ] && [ "${DISABLE_TELEGRAM_CHANNEL:-0}" != "1" ] \
-   && command -v node >/dev/null 2>&1 \
-   && [ -f /opt/platform/bin/telegram-patch-watcher.mjs ]; then
-  node /opt/platform/bin/telegram-patch-watcher.mjs \
-    >>"$TELEGRAM_STATE_DIR/logs/patch-watcher.log" 2>&1 &
-  PATCH_WATCHER_PID=$!
-  echo "[patch-watcher] launched (pid $PATCH_WATCHER_PID)"
 fi
 
 # Transcript exporter: Claude Code writes one .jsonl per session (Telegram,
