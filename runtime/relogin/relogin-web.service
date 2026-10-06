@@ -13,16 +13,21 @@ ExecStart=/usr/local/sbin/relogin-web.py
 Restart=always
 RestartSec=5
 
-# It reads one file per tenant and runs one command. Nothing else.
-NoNewPrivileges=true
-ProtectSystem=strict
+# Hardening is deliberately light, and this is why: the service's only job is to run
+# relogin-trigger, which drives `podman inspect` and `podman exec` against a tenant's
+# pod. Under ProtectSystem=strict + PrivateTmp=true podman cannot see the container
+# store or its runtime dir and reports every pod as not running — the first attempt
+# here answered "vitaliy: pod not running" for a pod that was plainly up. So the
+# filesystem protections that break podman are off, and the ones that do not are kept.
+#
+# What actually bounds this service: it listens on 127.0.0.1 only (nginx is the sole
+# way in), it accepts exactly one URL shape, it verifies the caller against a file it
+# does not write, and the single command it runs takes a validated Linux username as
+# its only variable argument.
 ProtectHome=read-only
-PrivateTmp=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
-ProtectControlGroups=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-RestrictNamespaces=false
 LockPersonality=true
 RestrictRealtime=true
 SystemCallArchitectures=native
