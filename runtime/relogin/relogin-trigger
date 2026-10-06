@@ -91,6 +91,27 @@ def refresh_days_left(user: str) -> float | None:
         return None
 
 
+def start_watcher(user: str) -> None:
+    """Leave a getUpdates watcher behind for a pod that has no poller of its own.
+
+    Without this, a tenant who is ALREADY dead gets a link and then sends the code into
+    a chat nobody is listening to — worse than the silence it replaces, because they have
+    been asked to do something and it visibly does nothing. The watcher refuses to start
+    if the plugin's poller is in fact up (409), and there can only be one of it, so this
+    is safe to fire after every start.
+    """
+    entry = pwd.getpwnam(user)
+    home = entry.pw_dir
+    subprocess.run(
+        ["podman", "exec", "-d", "--user", f"{entry.pw_uid}:{entry.pw_gid}",
+         "--env", f"HOME={home}",
+         "--env", f"USER={user}",
+         "--env", f"CLAUDE_CONFIG_DIR={home}/.claude",
+         "--env", f"TELEGRAM_STATE_DIR={home}/.claude/channels/telegram-{user}",
+         container(user), f"{home}/{HELPER}", "watch", "--timeout", "3600"],
+        capture_output=True, text=True)
+
+
 def act(user: str, argv: list[str], quiet: bool = False) -> int:
     if not installed(user):
         print(f"{user}: relogin is not installed for this tenant "
@@ -105,6 +126,8 @@ def act(user: str, argv: list[str], quiet: bool = False) -> int:
     if not quiet or out.returncode != 0:
         for line in text.splitlines():
             print(f"{user}: {line}")
+    if argv and argv[0] == "start" and out.returncode == 0:
+        start_watcher(user)
     return out.returncode
 
 

@@ -496,6 +496,27 @@ def poller_alive(sd: str) -> bool:
     return True
 
 
+def watch_lock() -> None:
+    """One watcher per pod, or the two of them take each other's updates.
+
+    Both the mod (at session.start) and the host trigger (when a pod has no poller) start
+    one, and they can land within seconds of each other on a tenant who was already dead
+    when the timer ran. Whoever is second exits here.
+    """
+    path = os.path.join(RUN_DIR, "relogin.watch.pid")
+    try:
+        with open(path, encoding="utf8") as fh:
+            other = int(fh.read().strip())
+        if other != os.getpid():
+            os.kill(other, 0)
+            die(f"another watcher is already running (pid {other})")
+    except (OSError, ValueError):
+        pass
+    os.makedirs(RUN_DIR, exist_ok=True)
+    with open(path, "w", encoding="utf8") as fh:
+        fh.write(str(os.getpid()))
+
+
 def cmd_watch(args: argparse.Namespace) -> int:
     sd = state_dir()
     if poller_alive(sd):
@@ -504,6 +525,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
     state = read_state()
     if state.get("status") != "awaiting_code":
         die("no sign-in is waiting for a code")
+    watch_lock()
     token = bot_token(sd)
     want = str(state.get("chat_id") or "")
 
