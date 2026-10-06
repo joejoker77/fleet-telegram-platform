@@ -75,12 +75,16 @@ server {
     # Self-service sign-in. This address is deliberately STABLE and the Claude link is
     # minted per request behind it — that is the whole point: the expiry warning's
     # button is read days after it is sent, and a link baked into the message would be
-    # long dead. cp-api checks the token against the tenant's own file. A prefix match,
-    # not an exact one, because the token is in the path.
-    # The timeout is generous on purpose: starting a sign-in in the pod and waiting for
-    # the link to appear takes tens of seconds, and the browser is mid-redirect.
+    # long dead.
+    # This one goes to relogin-web on :8099, a HOST service — not cp-api. cp-api runs
+    # in a container with /home mounted but no podman and no host sbin, and reaching
+    # into the tenant's pod is the entire job. relogin-web checks the token against
+    # the tenant's own file and drives relogin-trigger.
+    # A prefix match, not an exact one, because the token is in the path. The timeout
+    # is generous on purpose: starting a sign-in in the pod and waiting for the link
+    # takes tens of seconds, and the browser is mid-redirect.
     location ^~ /relogin/ {
-        proxy_pass http://127.0.0.1:8080;
+        proxy_pass http://127.0.0.1:8099;
         proxy_set_header Host \$host;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;

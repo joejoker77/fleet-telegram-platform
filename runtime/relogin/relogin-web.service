@@ -1,0 +1,31 @@
+[Unit]
+Description=relogin-web — stable sign-in address, mints the Claude link on arrival
+Documentation=file:/opt/relogin/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Root on purpose: its whole job is to drive relogin-trigger, which podman-execs into
+# a tenant's pod. It listens on 127.0.0.1 only — nginx is the sole way in.
+User=root
+ExecStart=/usr/local/sbin/relogin-web.py
+Restart=always
+RestartSec=5
+
+# It reads one file per tenant and runs one command. Nothing else.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=false
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

@@ -17,7 +17,6 @@ import { registerMcpRoutes } from "./mcp-routes.js";
 import { registerIdeRoutes } from "./ide-routes.js";
 import { registerSessionRoutes } from "./session-routes.js";
 import { registerIntegrationRoutes } from "./integration-routes.js";
-import { registerReloginRoutes } from "./relogin-routes.js";
 import { registerDeployRoutes } from "./deploy-routes.js";
 import {
   registerRegistryRoutes,
@@ -179,15 +178,6 @@ registerDeployRoutes(app, {
   jwtSecret: config.jwtSecret,
   auditSocket: config.auditSocket,
   githubWebhookSecret: config.githubWebhookSecret,
-});
-
-// Self-service sign-in: the one public route whose whole job is to be a STABLE
-// address. The expiry warning's button points here and the Claude link is minted
-// on the tap, so the button cannot go stale while the message sits unread.
-registerReloginRoutes(app, {
-  tenantHomeRoot: config.tenantHomeRoot,
-  triggerPath: process.env.RELOGIN_TRIGGER_PATH ?? "/usr/local/sbin/relogin-trigger",
-  auditSocket: config.auditSocket,
 });
 
 // M6.2 Composio integrations: public OAuth-callback landing + notify + audit.
