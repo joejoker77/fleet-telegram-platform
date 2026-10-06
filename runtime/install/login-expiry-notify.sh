@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""login-expiry-notify — tell the firm's admin whose Claude login is about to lapse.
+"""login-expiry-notify — tell people whose Claude login is about to lapse, and the admin.
 
-    login-expiry-notify [--warn-days 5] [--to <tenant>] [--dry-run] [--force] [--json]
+    login-expiry-notify [--warn-days 3] [--to <tenant>] [--dry-run] [--force] [--json]
+                        [--no-personal] [--only <tenant> ...]
 
 WHY. A tenant's login session (`refreshTokenExpiresAt`) lasts ~30 days from /login and is
 NOT extended by use. When it lapses the bot simply stops answering: no warning to the
@@ -24,12 +25,32 @@ are not in a time-limited org) are skipped — there is nothing to expire.
 WHEN IT SPEAKS. Only when the picture CHANGES: a new name entering the warning window, or
 an expiry actually landing. A quiet fleet means no message at all, so the admin can trust
 that a message means something moved. --force overrides this for a manual run.
+
+TELLING THE PERSON THEMSELVES (added 6 Oct 2026). Reporting to an administrator was never
+the fix: the administrator cannot sign in for anybody, so the message had to be relayed by
+hand and often was not. Where a tenant has the `relogin` helper installed, this now also
+starts a sign-in in their own pod at three days, two days and one day, and again once a day
+after it has lapsed. They get a link with a button in their own chat and send the code back
+as an ordinary message; nothing reaches an administrator's desk at all.
+
+The ladder is 3/2/1 rather than 7/3/1 (Dmitrii's call, 6 Oct 2026): a week's notice is
+ignored and then forgotten, and the thing being asked for takes twenty seconds.
+
+Each person hears once per rung, not once per run — the timer ticks daily, and `--force`
+does not override that, because forcing a report to an administrator is harmless and
+forcing a second link at a lawyer is not. The rungs are per person in
+/var/lib/fleet/login-expiry-personal.json; delete a name from it to let a rung fire again.
+
+A tenant without the helper is skipped in silence. That is what makes this safe to roll out
+to one person at a time: the installed set IS the enrolled set.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import subprocess
 import sys
 import time
 import urllib.parse
@@ -38,6 +59,11 @@ from datetime import datetime, timezone
 
 HOME_ROOT = os.environ.get("FLEET_HOME_ROOT", "/home")
 STATE_FILE = os.environ.get("FLEET_EXPIRY_STATE", "/var/lib/fleet/login-expiry.state")
+# Which rung of the ladder each person was last told about, so a daily tick is not a
+# daily message. 3, 2, 1 and then 0 — the last meaning "lapsed", which repeats daily.
+PERSONAL_STATE = os.environ.get("FLEET_EXPIRY_PERSONAL_STATE",
+                                "/var/lib/fleet/login-expiry-personal.json")
+TRIGGER = os.environ.get("FLEET_RELOGIN_TRIGGER", "/usr/local/sbin/relogin-trigger")
 # Read at call time, not here: load_conf() runs first and only then can the host config
 # in CONF have a say. Binding the env var at import would make FLEET_EXPIRY_ADMIN in that
 # file silently dead, which is exactly the bug this comment replaces.
@@ -136,6 +162,88 @@ def send(token: str, chat: str, text: str) -> None:
         raise SystemExit(f"login-expiry-notify: telegram refused: {payload}")
 
 
+# ---- telling the person themselves -------------------------------------------------
+
+def has_relogin(user: str) -> bool:
+    """The enrolled set is the installed set — see the note at the top about the canary."""
+    return os.path.exists(os.path.join(HOME_ROOT, user, "work", "bin", "relogin"))
+
+
+def rung(days: float) -> int:
+    """Which step of the 3/2/1 ladder a tenant is on; 0 once it has lapsed.
+
+    Ceiling, not rounding: at 2.7 days left the honest thing to say is "three days", and
+    saying "two" of something that is nearly three is how a person decides the warning
+    cannot be trusted.
+    """
+    if days <= 0:
+        return 0
+    return max(1, math.ceil(days))
+
+
+def read_personal() -> dict:
+    try:
+        with open(PERSONAL_STATE, encoding="utf8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def write_personal(state: dict) -> None:
+    os.makedirs(os.path.dirname(PERSONAL_STATE), exist_ok=True)
+    tmp = PERSONAL_STATE + ".tmp"
+    with open(tmp, "w", encoding="utf8") as fh:
+        json.dump(state, fh, indent=2, sort_keys=True)
+    os.replace(tmp, PERSONAL_STATE)
+
+
+def notify_people(rows: list[dict], steps: set[int], dry_run: bool) -> list[str]:
+    """Start a sign-in in each enrolled tenant's own pod. Returns a line per action.
+
+    Failures are reported, never raised: one pod that is down must not stop the rest of
+    the fleet being warned, nor the admin report that follows.
+    """
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    state = read_personal()
+    notes = []
+    for row in rows:
+        user = row["user"]
+        if not has_relogin(user):
+            continue
+        step = rung(row["days_left"])
+        if step not in steps and step != 0:
+            continue
+        seen = state.get(user) or {}
+        if step != 0 and seen.get("step") == step:
+            continue
+        if step == 0 and seen.get("step") == 0 and seen.get("date") == today:
+            continue
+        reason = "expired" if step == 0 else "warn"
+        if dry_run:
+            notes.append(f"would start a sign-in for {user} ({reason}, {step} day rung)")
+            continue
+        try:
+            out = subprocess.run([TRIGGER, user, "--reason", reason],
+                                 capture_output=True, text=True, timeout=240)
+        except (OSError, subprocess.SubprocessError) as exc:
+            notes.append(f"{user}: could not start a sign-in: {exc}")
+            continue
+        if out.returncode != 0:
+            notes.append(f"{user}: sign-in not started: "
+                         f"{(out.stderr or out.stdout).strip().splitlines()[-1:] or ['?']}")
+            continue
+        state[user] = {"step": step, "date": today}
+        notes.append(f"{user}: sign-in link sent ({reason}, {step} day rung)")
+    if not dry_run:
+        # Forget anybody who has signed in again, so the ladder starts over next time.
+        live = {row["user"] for row in rows}
+        for user in list(state):
+            if user not in live:
+                del state[user]
+        write_personal(state)
+    return notes
+
+
 def read_state() -> str:
     try:
         with open(STATE_FILE, encoding="utf8") as fh:
@@ -156,16 +264,24 @@ def write_state(signature: str) -> None:
 def main() -> int:
     load_conf()
     ap = argparse.ArgumentParser()
-    ap.add_argument("--warn-days", type=int, default=int(os.environ.get("FLEET_EXPIRY_WARN_DAYS", 5)))
+    ap.add_argument("--warn-days", type=int, default=int(os.environ.get("FLEET_EXPIRY_WARN_DAYS", 3)))
     ap.add_argument("--to", default=os.environ.get("FLEET_EXPIRY_ADMIN", DEFAULT_ADMIN))
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--force", action="store_true", help="send even if nothing changed")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--no-personal", action="store_true",
+                    help="report to the admin only; start nobody's sign-in")
+    ap.add_argument("--only", nargs="*", default=None,
+                    help="consider only these tenants (a canary, or one person's test)")
+    ap.add_argument("--steps", default=os.environ.get("FLEET_EXPIRY_PERSONAL_STEPS", "3,2,1"),
+                    help="days at which the person is told; the default ladder is 3/2/1")
     args = ap.parse_args()
 
     now = datetime.now(timezone.utc)
     rows = []
     for user in tenants():
+        if args.only is not None and user not in args.only:
+            continue
         exp = expiry_of(user)
         if exp is None:
             continue
@@ -181,6 +297,15 @@ def main() -> int:
     if args.json:
         print(json.dumps({"checked": len(tenants()), "flagged": rows}, indent=2))
         return 0
+
+    # The people come first, and they come before the quiet check below: whether the
+    # ADMIN has heard this already has nothing to do with whether the person has.
+    personal: list[str] = []
+    if not args.no_personal:
+        steps = {int(s) for s in args.steps.split(",") if s.strip().isdigit()}
+        personal = notify_people(rows, steps, args.dry_run)
+        for line in personal:
+            print(f"login-expiry-notify: {line}")
 
     # The signature deliberately ignores the clock: only WHO and WHICH DAY matter, so a
     # steady picture stays silent while a new name or a lapsed date speaks.
@@ -215,7 +340,19 @@ def main() -> int:
             lines.append(f"  • {r['name']} — {r['expires']} (in {r['days_left']:.1f} days)")
         lines.append("")
     lines.append("A lapsed sign-in means that person's bot stops answering, silently.")
-    lines.append("Each person must run /login in their own session — nobody can do it for them.")
+    if personal:
+        # Say what was already done, so nobody chases a person who has had the link.
+        lines.append("")
+        lines.append("Sign-in links sent to the people themselves:")
+        for line in personal:
+            lines.append(f"  • {line}")
+        lines.append("")
+        lines.append("They tap the button and send the code back in their own chat.")
+    missing = [r for r in rows if not has_relogin(r["user"])]
+    if missing:
+        lines.append("")
+        lines.append(f"Not enrolled in self-service sign-in ({len(missing)} of {len(rows)}): "
+                     "they must run /login in their own session — nobody can do it for them.")
     text = "\n".join(lines)
 
     if args.dry_run:

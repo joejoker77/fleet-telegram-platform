@@ -1,0 +1,6 @@
+{
+  "name": "relogin",
+  "version": "0.1.0",
+  "description": "Renew a lapsed Claude sign-in from the person's own Telegram chat, without asking the model.",
+  "author": { "name": "Monaco Solicitors fleet platform" }
+}

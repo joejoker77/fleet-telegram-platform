@@ -1,0 +1,153 @@
+#!/usr/bin/python3
+"""relogin-trigger — start (or inspect) a tenant's self-service sign-in from the host.
+
+    relogin-trigger <tenant>                   send them a sign-in link now
+    relogin-trigger <tenant> --reason warn     ... worded as the 3/2/1-day warning
+    relogin-trigger <tenant> --status          what is in flight for them
+    relogin-trigger <tenant> --cancel          drop a stale flow
+    relogin-trigger <tenant> --watch           collect the code over getUpdates
+    relogin-trigger --all-expiring --days 3    every tenant inside the window
+
+WHY A HOST COMMAND AT ALL. The helper lives in the pod, where the credentials are, and
+is normally reached by the person's own assistant. Two callers cannot do that: the
+expiry timer, which runs on the host and must work whether or not the pod is answering,
+and a human testing the chain before a real expiry has ever happened. Both go through
+here, so there is one place that knows how to get into a pod and one audit trail.
+
+WHAT IT CANNOT DO. If the container is not running there is no sign-in to start: the
+flow has to run beside the credentials it renews. The command says so plainly rather
+than pretending. That case needs the pod up first (`systemctl start claude-<tenant>`),
+which is an administrator's job and always was.
+"""
+from __future__ import annotations
+
+import argparse
+import glob
+import json
+import os
+import pwd
+import subprocess
+import sys
+import time
+
+HOME_ROOT = os.environ.get("FLEET_HOME_ROOT", "/home")
+HELPER = "work/bin/relogin"
+SKIP = {"cplane"}
+
+
+def tenants() -> list[str]:
+    found = []
+    for path in sorted(glob.glob(f"{HOME_ROOT}/*/.claude/channels/telegram-*")):
+        user = path.split("/")[2]
+        if user not in SKIP and user not in found:
+            found.append(user)
+    return found
+
+
+def container(user: str) -> str:
+    return f"claude-{user}"
+
+
+def pod_running(user: str) -> bool:
+    out = subprocess.run(["podman", "inspect", "-f", "{{.State.Running}}", container(user)],
+                         capture_output=True, text=True)
+    return out.returncode == 0 and out.stdout.strip() == "true"
+
+
+def run_in_pod(user: str, argv: list[str], timeout: int = 180) -> subprocess.CompletedProcess:
+    """Run the tenant's own helper as the tenant, inside their pod.
+
+    --user is the tenant's real uid:gid, and HOME is passed explicitly: podman exec does
+    not read the image's passwd for an exec, so without it the helper would look for a
+    credentials file under /root and find nothing.
+    """
+    entry = pwd.getpwnam(user)
+    home = entry.pw_dir
+    return subprocess.run(
+        ["podman", "exec", "--user", f"{entry.pw_uid}:{entry.pw_gid}",
+         "--env", f"HOME={home}",
+         "--env", f"USER={user}",
+         "--env", f"CLAUDE_CONFIG_DIR={home}/.claude",
+         "--env", f"TELEGRAM_STATE_DIR={home}/.claude/channels/telegram-{user}",
+         container(user), f"{home}/{HELPER}", *argv],
+        capture_output=True, text=True, timeout=timeout)
+
+
+def installed(user: str) -> bool:
+    return os.path.exists(os.path.join(HOME_ROOT, user, HELPER))
+
+
+def refresh_days_left(user: str) -> float | None:
+    path = os.path.join(HOME_ROOT, user, ".claude", ".credentials.json")
+    try:
+        with open(path, encoding="utf8") as fh:
+            blob = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    oauth = blob.get("claudeAiOauth", blob)
+    try:
+        return (int(oauth["refreshTokenExpiresAt"]) / 1000 - time.time()) / 86400
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def act(user: str, argv: list[str], quiet: bool = False) -> int:
+    if not installed(user):
+        print(f"{user}: relogin is not installed for this tenant "
+              f"(run /opt/relogin/rollout.py {user})", file=sys.stderr)
+        return 1
+    if not pod_running(user):
+        print(f"{user}: the pod is not running — a sign-in has to run beside the "
+              f"credentials, so start {container(user)} first", file=sys.stderr)
+        return 1
+    out = run_in_pod(user, argv)
+    text = (out.stdout + out.stderr).strip()
+    if not quiet or out.returncode != 0:
+        for line in text.splitlines():
+            print(f"{user}: {line}")
+    return out.returncode
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("user", nargs="?")
+    ap.add_argument("--reason", default="manual",
+                    choices=["manual", "warn", "expired", "test"])
+    ap.add_argument("--force", action="store_true", help="start over a live flow")
+    ap.add_argument("--status", action="store_true")
+    ap.add_argument("--cancel", action="store_true")
+    ap.add_argument("--watch", action="store_true")
+    ap.add_argument("--all-expiring", action="store_true",
+                    help="every installed tenant whose sign-in is inside --days")
+    ap.add_argument("--days", type=float, default=3.0)
+    args = ap.parse_args()
+
+    if args.all_expiring:
+        rc = 0
+        for user in tenants():
+            if not installed(user):
+                continue
+            left = refresh_days_left(user)
+            if left is None or left > args.days:
+                continue
+            reason = "expired" if left <= 0 else "warn"
+            rc |= act(user, ["start", "--reason", reason])
+        return rc
+
+    if not args.user:
+        ap.error("name a tenant, or pass --all-expiring")
+    if args.status:
+        return act(args.user, ["status"])
+    if args.cancel:
+        return act(args.user, ["cancel"])
+    if args.watch:
+        return act(args.user, ["watch", "--timeout", "900"], quiet=False)
+
+    argv = ["start", "--reason", args.reason]
+    if args.force:
+        argv.append("--force")
+    return act(args.user, argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

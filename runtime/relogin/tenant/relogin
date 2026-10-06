@@ -1,0 +1,561 @@
+#!/usr/bin/env python3
+"""relogin — let a person renew their own Claude sign-in from their Telegram chat.
+
+    relogin start [--force] [--reason WORD]   begin a sign-in and send the link
+    relogin code <CODE>                       hand the pasted code to that sign-in
+    relogin status [--json]                   what, if anything, is in flight
+    relogin cancel                            drop the flow and tidy up
+    relogin watch [--timeout 900]             collect the code from Telegram ourselves
+
+WHY. A tenant's Claude session (`refreshTokenExpiresAt`) lasts ~30 days from /login and
+is not extended by use. When it lapses the bot stops answering, silently, and only the
+person themself can fix it — they must sign in. Until now that meant an administrator
+noticing and telling them to open a terminal they have never seen. A lawyer will not do
+that. This does the whole thing in the chat they are already in: a link with a button,
+a code pasted back as an ordinary message, done.
+
+HOW IT WORKS, AND WHY IT IS BUILT THIS WAY.
+
+`claude auth login` is interactive: it prints an authorisation URL and then waits on
+"Paste code here if prompted >". There is no flag that takes the code on the command
+line, and `$.process.spawn` in a mod can only write stdin once and close it — so the
+process has to be kept alive by something that can type into it later. That something is
+tmux, which is already in the pod, already supervises the main session, and is already
+driven this way by the entrypoint (it answers the "Press Enter to continue" modal the
+same way). So the sign-in runs in its own tmux session, `relogin`, on the tenant's own
+tmux socket; we read the URL off the pane and type the code into it.
+
+SUCCESS IS READ FROM THE CREDENTIALS, NOT FROM THE SCREEN. The wording of the success
+line has changed between releases, and scraping it is how a working login gets reported
+as a failure. The ground truth is ~/.claude/.credentials.json: a sign-in that worked
+moves `refreshTokenExpiresAt` forward. We record the value before typing the code and
+wait for it to change. The pane is read only for the one thing the file cannot say — the
+"Invalid code" line, which means ask for the code again rather than keep waiting.
+
+TWO WAYS THE CODE COMES BACK, because the chat works differently either side of expiry:
+
+  * the login is still valid (the 3/2/1-day warning, or a manual run). The Telegram
+    poller is up, the message reaches the session, and the assistant — or the `relogin`
+    mod, which catches it before the model is asked — runs `relogin code`.
+  * the login is already dead. A session that STARTS without a valid login brings up no
+    channel, so no poller holds the single getUpdates slot: `relogin watch` may take it
+    itself without a 409. That is the only reason this command exists, and it refuses to
+    run while bot.pid is alive — two pollers on one token lose each other's messages.
+
+NO MODEL IS INVOLVED anywhere in here, by design. It is a plain script, so it works in
+exactly the state where the model cannot be reached, which is the state it is for.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
+
+HOME = os.path.expanduser("~")
+USER = os.environ.get("USER") or os.path.basename(HOME)
+CONFIG_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(HOME, ".claude")
+CREDS = os.path.join(CONFIG_DIR, ".credentials.json")
+RUN_DIR = os.path.join(CONFIG_DIR, "run")
+STATE_FILE = os.path.join(RUN_DIR, "relogin.json")
+TMUX_SOCKET = os.path.join(CONFIG_DIR, f"tmux-{os.getuid()}", "default")
+TMUX_SESSION = "relogin"
+
+# The sign-in URL as `claude auth login` prints it. Anchored on the host so a stray
+# link in the banner cannot be mistaken for it.
+URL_RE = re.compile(r"https://claude\.com/[A-Za-z0-9_\-./]*oauth/authorize\?[^\s]+")
+INVALID_RE = re.compile(r"Invalid code", re.I)
+
+# How long each step may take. The link appears in about a second; 45 s is for a pod
+# under load. The code is typed and answered quickly, but the exchange is a round trip
+# to Anthropic, so 90 s.
+URL_WAIT_S = 45
+CODE_WAIT_S = 90
+# A link older than this is stale: the authorisation page will refuse it, so `start`
+# begins a fresh one rather than re-sending something that cannot work.
+FLOW_TTL_S = 20 * 60
+# A pod whose login has lapsed restarts every few minutes, and `start` runs at each
+# session start. Without this the person's phone buzzes with the same link all night.
+# Inside the window a `start` with a live flow does nothing at all and says so.
+RESEND_COOLDOWN_S = 10 * 60
+
+
+# ---- the tenant's own Telegram bot -------------------------------------------------
+# A bot may only write to a chat that started it, so the message goes out over the
+# tenant's own token to the chat they last used — the same pair tg-send uses.
+
+def state_dir() -> str:
+    sd = os.environ.get("TELEGRAM_STATE_DIR")
+    if sd and os.path.isdir(sd):
+        return sd
+    guess = os.path.join(CONFIG_DIR, "channels", f"telegram-{USER}")
+    if os.path.isdir(guess):
+        return guess
+    base = os.path.join(CONFIG_DIR, "channels")
+    try:
+        for name in sorted(os.listdir(base)):
+            if name.startswith("telegram-"):
+                return os.path.join(base, name)
+    except OSError:
+        pass
+    die("no Telegram channel directory for this tenant")
+
+
+def bot_token(sd: str) -> str:
+    try:
+        with open(os.path.join(sd, ".env"), encoding="utf8") as fh:
+            for line in fh:
+                if line.startswith("TELEGRAM_BOT_TOKEN="):
+                    return line.split("=", 1)[1].strip().strip("\"'")
+    except OSError:
+        pass
+    die(f"no TELEGRAM_BOT_TOKEN in {sd}/.env")
+
+
+def chat_target(sd: str) -> tuple[str, str]:
+    """(chat_id, message_thread_id) — the conversation the person is actually in.
+
+    last_chat.json is the live one and carries the topic; access.json is the fallback
+    for a tenant who has not written since the file was introduced.
+    """
+    chat = thread = ""
+    try:
+        with open(os.path.join(sd, "last_chat.json"), encoding="utf8") as fh:
+            blob = json.load(fh)
+        chat = str(blob.get("chat_id") or "")
+        thread = str(blob.get("message_thread_id") or "")
+    except (OSError, ValueError):
+        pass
+    if not chat:
+        try:
+            with open(os.path.join(sd, "access.json"), encoding="utf8") as fh:
+                allow = json.load(fh).get("allowFrom") or []
+            chat = str(allow[0]) if allow else ""
+        except (OSError, ValueError, IndexError):
+            pass
+    if not chat:
+        die("no chat id for this tenant (no last_chat.json, no allowFrom)")
+    return chat, thread
+
+
+def api(token: str, method: str, payload: dict) -> dict:
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{token}/{method}",
+        data=json.dumps(payload).encode(),
+        headers={"content-type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=40) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as exc:
+        # Telegram puts the real reason in the body, and it is the only useful thing
+        # here ("chat not found", "button_url_invalid"); the status alone is not.
+        try:
+            return json.load(exc)
+        except Exception:
+            return {"ok": False, "description": f"HTTP {exc.code}"}
+
+
+def send(token: str, chat: str, thread: str, text: str, button: tuple[str, str] | None = None) -> int:
+    """Plain text, no parse mode — a 500-character URL has nothing safe to escape in.
+
+    The link goes twice: as an inline button (nothing to escape at all, and one tap on a
+    phone) and as text with the preview off, for a client that will not render buttons.
+    """
+    payload: dict = {
+        "chat_id": chat,
+        "text": text,
+        "disable_web_page_preview": True,
+    }
+    if thread:
+        payload["message_thread_id"] = int(thread)
+    if button:
+        payload["reply_markup"] = {"inline_keyboard": [[{"text": button[0], "url": button[1]}]]}
+    out = api(token, "sendMessage", payload)
+    if not out.get("ok"):
+        # A topic that has been deleted answers "message thread not found"; the chat
+        # itself is still reachable, and a warning nobody sees is worse than a stray one.
+        if thread and "thread" in str(out.get("description", "")).lower():
+            payload.pop("message_thread_id", None)
+            out = api(token, "sendMessage", payload)
+    if not out.get("ok"):
+        die(f"telegram refused: {out.get('description')}")
+    return int(out["result"]["message_id"])
+
+
+# ---- credentials -------------------------------------------------------------------
+
+def refresh_expiry() -> int | None:
+    """`refreshTokenExpiresAt` in milliseconds — the one field we read, never the tokens."""
+    try:
+        with open(CREDS, encoding="utf8") as fh:
+            blob = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    oauth = blob.get("claudeAiOauth", blob)
+    try:
+        return int(oauth["refreshTokenExpiresAt"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def days_left() -> float | None:
+    exp = refresh_expiry()
+    if exp is None:
+        return None
+    return (exp / 1000 - time.time()) / 86400
+
+
+def pretty(ms: int) -> str:
+    return datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%d %B %Y")
+
+
+# ---- tmux --------------------------------------------------------------------------
+
+def tmux(*args: str, check: bool = False) -> subprocess.CompletedProcess:
+    return subprocess.run(["tmux", "-S", TMUX_SOCKET, *args],
+                          capture_output=True, text=True, check=check)
+
+
+def tmux_alive() -> bool:
+    return tmux("has-session", "-t", TMUX_SESSION).returncode == 0
+
+
+def pane() -> str:
+    # -J rejoins the lines tmux wrapped, which a 500-character URL always is. Without it
+    # the link comes back in pieces and every one of them is a broken link.
+    return tmux("capture-pane", "-p", "-J", "-t", TMUX_SESSION).stdout
+
+
+def kill_flow() -> None:
+    if tmux_alive():
+        tmux("kill-session", "-t", TMUX_SESSION)
+
+
+# ---- state -------------------------------------------------------------------------
+
+def read_state() -> dict:
+    try:
+        with open(STATE_FILE, encoding="utf8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def write_state(state: dict) -> None:
+    os.makedirs(RUN_DIR, exist_ok=True)
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf8") as fh:
+        json.dump(state, fh, indent=2)
+    os.replace(tmp, STATE_FILE)
+
+
+def clear_state() -> None:
+    try:
+        os.unlink(STATE_FILE)
+    except OSError:
+        pass
+
+
+def die(msg: str) -> "NoReturn":  # noqa: F821
+    print(f"relogin: {msg}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+# ---- the code the person pastes ----------------------------------------------------
+
+def clean_code(raw: str) -> str | None:
+    """What the person sends back, reduced to the code itself, or None if it is not one.
+
+    People paste three things: the code alone, the code with a word around it, and the
+    whole callback URL out of the address bar. The last is the most common on a phone,
+    where selecting part of a URL is fiddly, so it is worth handling rather than telling
+    them off.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None
+    if text.startswith("http"):
+        query = urllib.parse.urlsplit(text).query
+        got = urllib.parse.parse_qs(query).get("code") or []
+        text = got[0].strip() if got else ""
+    # One token, no spaces. Codes carry the state after a '#', so '#' stays.
+    if not text or len(text.split()) != 1:
+        return None
+    text = text.strip().strip('`"\'<>')
+    if len(text) < 8 or len(text) > 512:
+        return None
+    # A bare English word is not a code; anything with the shape of one has a digit,
+    # a dash, an underscore or a '#' in it.
+    if not re.search(r"[0-9_\-#]", text):
+        return None
+    return text
+
+
+MESSAGE_START = (
+    "Your Claude sign-in needs renewing — until it is, I cannot answer you.\n"
+    "\n"
+    "1. Tap Sign in below and approve with your Claude account.\n"
+    "2. The page gives you a code. Copy it.\n"
+    "3. Send it back to me here, as an ordinary message. Nothing else.\n"
+    "\n"
+    "The link is good for about fifteen minutes. If it has gone stale, send me the word "
+    "relogin and I will make you another one."
+)
+
+MESSAGE_WARN = (
+    "Your Claude sign-in runs out in {days}. When it does I stop answering, with no "
+    "warning to you or anyone else — so it is worth doing now; it takes about twenty "
+    "seconds.\n"
+    "\n"
+    "1. Tap Sign in below and approve with your Claude account.\n"
+    "2. The page gives you a code. Copy it.\n"
+    "3. Send it back to me here, as an ordinary message.\n"
+    "\n"
+    "If you would rather leave it, nothing breaks today — I will ask again tomorrow."
+)
+
+
+# ---- commands ----------------------------------------------------------------------
+
+def cmd_start(args: argparse.Namespace) -> int:
+    sd = state_dir()
+    token = bot_token(sd)
+    chat, thread = chat_target(sd)
+
+    state = read_state()
+    live = (state.get("status") == "awaiting_code"
+            and tmux_alive()
+            and time.time() - float(state.get("started_at_epoch") or 0) < FLOW_TTL_S)
+    if live and not args.force:
+        since = time.time() - float(state.get("sent_at_epoch") or 0)
+        if since < RESEND_COOLDOWN_S:
+            print(f"relogin: a sign-in is already in flight and was sent "
+                  f"{int(since)}s ago — staying quiet")
+            return 0
+        # Re-send rather than restart: the page the person may already have open is
+        # bound to this flow's PKCE challenge, and a new one would invalidate it.
+        send(token, chat, thread, MESSAGE_START, ("Sign in to Claude", state["url"]))
+        state["sent_at_epoch"] = time.time()
+        write_state(state)
+        print("relogin: a sign-in was already in flight — link re-sent")
+        return 0
+
+    kill_flow()
+    clear_state()
+
+    started = time.time()
+    # `claude auth login` only: never a bare `claude`, which would load the Telegram
+    # plugin and take the poll lock off the real session. The trailing sleep keeps the
+    # window up after an unexpected exit so `status` can show what it said.
+    rc = tmux("new-session", "-d", "-s", TMUX_SESSION, "-x", "240", "-y", "50",
+              "claude auth login; echo '[relogin] auth login exited'; sleep 600")
+    if rc.returncode != 0:
+        die(f"could not start the sign-in: {rc.stderr.strip() or 'tmux refused'}")
+
+    url = ""
+    deadline = started + URL_WAIT_S
+    while time.time() < deadline:
+        found = URL_RE.search(pane())
+        if found:
+            url = found.group(0)
+            break
+        time.sleep(1)
+    if not url:
+        screen = "\n".join(line for line in pane().splitlines() if line.strip())[-800:]
+        kill_flow()
+        die(f"no sign-in link appeared in {URL_WAIT_S}s. Last screen:\n{screen}")
+
+    left = days_left()
+    if args.reason == "warn" and left is not None and left > 0:
+        whole = int(left)
+        text = MESSAGE_WARN.format(days="a day" if whole <= 1 else f"{whole} days")
+    else:
+        text = MESSAGE_START
+    message_id = send(token, chat, thread, text, ("Sign in to Claude", url))
+
+    write_state({
+        "status": "awaiting_code",
+        "reason": args.reason,
+        "url": url,
+        "chat_id": chat,
+        "thread_id": thread,
+        "message_id": message_id,
+        "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "started_at_epoch": started,
+        "sent_at_epoch": time.time(),
+        "expiry_before": refresh_expiry(),
+    })
+    print(f"relogin: sign-in started, link sent to chat {chat} (message {message_id})")
+    return 0
+
+
+def cmd_code(args: argparse.Namespace) -> int:
+    state = read_state()
+    if state.get("status") != "awaiting_code":
+        die("no sign-in is waiting for a code (run `relogin start` first)")
+    if not tmux_alive():
+        clear_state()
+        die("the sign-in is no longer running — start a new one")
+
+    code = clean_code(args.code)
+    if not code:
+        die("that does not look like a sign-in code")
+
+    sd = state_dir()
+    token = bot_token(sd)
+    chat = state.get("chat_id") or chat_target(sd)[0]
+    thread = state.get("thread_id") or ""
+    before = state.get("expiry_before")
+
+    # -l: literal, so a code with a '#' or a '-' in it is typed and not read as a key.
+    tmux("send-keys", "-t", TMUX_SESSION, "-l", code)
+    tmux("send-keys", "-t", TMUX_SESSION, "Enter")
+
+    deadline = time.time() + CODE_WAIT_S
+    while time.time() < deadline:
+        time.sleep(2)
+        now = refresh_expiry()
+        if now is not None and (before is None or now > int(before)):
+            kill_flow()
+            clear_state()
+            send(token, chat, thread,
+                 f"Signed in. You are good until {pretty(now)} — back to normal, "
+                 "ask me anything.")
+            print(f"relogin: signed in, valid to {pretty(now)}")
+            return 0
+        if INVALID_RE.search(pane()):
+            send(token, chat, thread,
+                 "That code was not accepted — the page usually gives a long one with a "
+                 "# in the middle, and it is easy to copy only half. Send me the whole "
+                 "code again; the link above still works.")
+            print("relogin: the code was refused, waiting for another")
+            return 3
+
+    send(token, chat, thread,
+         "I sent your code on but heard nothing back. Send me the word relogin and we "
+         "will start again.")
+    die("timed out waiting for the sign-in to complete")
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    state = read_state()
+    left = days_left()
+    out = {
+        "user": USER,
+        "flow": state.get("status", "idle"),
+        "reason": state.get("reason"),
+        "started_at": state.get("started_at"),
+        "tmux_alive": tmux_alive(),
+        "refresh_expires_at": (pretty(refresh_expiry()) if refresh_expiry() else None),
+        "days_left": (round(left, 2) if left is not None else None),
+    }
+    if args.json:
+        print(json.dumps(out, indent=2))
+        return 0
+    for key, value in out.items():
+        print(f"{key}: {value}")
+    return 0
+
+
+def cmd_cancel(_args: argparse.Namespace) -> int:
+    kill_flow()
+    clear_state()
+    print("relogin: cancelled")
+    return 0
+
+
+def poller_alive(sd: str) -> bool:
+    """Is the Telegram plugin holding the single getUpdates slot?
+
+    Two pollers on one token do not share: the Bot API hands each update to whoever
+    asks first and answers the other with 409. So `watch` must never run beside one.
+    """
+    try:
+        with open(os.path.join(sd, "bot.pid"), encoding="utf8") as fh:
+            pid = int(fh.read().strip())
+    except (OSError, ValueError):
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def cmd_watch(args: argparse.Namespace) -> int:
+    sd = state_dir()
+    if poller_alive(sd):
+        die("the Telegram poller is running — it will deliver the code; watch is for a "
+            "session that came up with no channel at all")
+    state = read_state()
+    if state.get("status") != "awaiting_code":
+        die("no sign-in is waiting for a code")
+    token = bot_token(sd)
+    want = str(state.get("chat_id") or "")
+
+    # -1 asks only for the newest update and gives us an offset to walk from, without
+    # replaying a backlog of messages the person sent while the bot was dead.
+    offset = None
+    deadline = time.time() + args.timeout
+    print(f"relogin: watching for the code for {args.timeout}s")
+    while time.time() < deadline:
+        payload = {"timeout": 25, "allowed_updates": ["message"]}
+        payload["offset"] = offset if offset is not None else -1
+        out = api(token, "getUpdates", payload)
+        if not out.get("ok"):
+            print(f"relogin: getUpdates refused: {out.get('description')}", file=sys.stderr)
+            time.sleep(5)
+            continue
+        for update in out.get("result", []):
+            offset = int(update["update_id"]) + 1
+            message = update.get("message") or {}
+            if str((message.get("chat") or {}).get("id")) != want:
+                continue
+            code = clean_code(message.get("text", ""))
+            if not code:
+                continue
+            print("relogin: code received over getUpdates")
+            return cmd_code(argparse.Namespace(code=code))
+    die("no code arrived in time")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="relogin", description=__doc__.splitlines()[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("start", help="begin a sign-in and send the link")
+    p.add_argument("--force", action="store_true", help="start a new flow over a live one")
+    p.add_argument("--reason", default="manual",
+                   choices=["manual", "warn", "expired", "test"],
+                   help="what prompted it; 'warn' changes the wording")
+    p.set_defaults(fn=cmd_start)
+
+    p = sub.add_parser("code", help="hand the pasted code to the waiting sign-in")
+    p.add_argument("code")
+    p.set_defaults(fn=cmd_code)
+
+    p = sub.add_parser("status", help="what, if anything, is in flight")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_status)
+
+    p = sub.add_parser("cancel", help="drop the flow and tidy up")
+    p.set_defaults(fn=cmd_cancel)
+
+    p = sub.add_parser("watch", help="collect the code from Telegram ourselves")
+    p.add_argument("--timeout", type=int, default=900)
+    p.set_defaults(fn=cmd_watch)
+
+    args = ap.parse_args()
+    return args.fn(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
