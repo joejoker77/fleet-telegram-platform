@@ -156,7 +156,7 @@ if offer_own_key openrouter; then prompt_secret_optional OPENROUTER_KEY \
 if offer_own_key pipedrive; then prompt_secret_optional PIPEDRIVE_TOKEN \
   "Pipedrive personal API token for the firm CRM (monacosolicitors2.pipedrive.com). Staged as ${USER_NAME}-pipedrive (x-api-token). Blank to skip."; fi
 prompt_secret_optional GITHUB_PAT \
-  "GitHub PAT for skill/MCP sharing + marketplace. Staged as ${USER_NAME}-git-fleet-platform (git @ github.com) AND ${USER_NAME}-github-github_pat (REST @ api.github.com, for marketplace publish). Blank to skip."
+  "GitHub PAT for skill/MCP sharing + marketplace. Staged as ${USER_NAME}-git-fleet-platform (git @ github.com) AND ${USER_NAME}-github-github_pat (REST @ api.github.com, for marketplace publish). NOT optional in practice: the catalogue write happens inside this tenant's pod with this credential, so without it every publish — including the hourly skill-autoshare sweep — fails with 'GitHub 404: Not Found', and the person never learns their skills are not being shared. Blank to skip (then bind it later with git-pat-vault.sh + m-key-vault.sh)."
 # ElevenLabs is a matrix service now (one firm key for every role, onboarded by
 # onboard-integrations.sh), so it is only asked for here if the matrix says per_user —
 # otherwise a per-tenant key would compete with the shared one for the same host.
@@ -283,6 +283,13 @@ else
   else
     warn "relogin rollout did not complete for $USER_NAME — re-run: python3 /opt/relogin/rollout.py $USER_NAME"
   fi
+fi
+
+# 8b) can this tenant publish a skill? The write happens in their pod with their own PAT,
+# and the failure mode is a 404 inside an hourly sweep nobody reads. One probe now, with
+# their credential, turns that into a sentence at onboarding.
+if [ "$DRY_RUN" != "1" ] && [ -z "${GITHUB_PAT:-}" ]; then
+  warn "no GitHub PAT for $USER_NAME — skill publishing (and the hourly auto-share) will fail for them until one is bound"
 fi
 
 # finalize: restart the pod so it picks up EVERYTHING placed above (Claude OAuth
