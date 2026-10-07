@@ -20,8 +20,11 @@ UNIT=/etc/systemd/system/relogin-web.service
 [ "$(id -u)" = "0" ] || { echo "run as root" >&2; exit 1; }
 
 if [ "${1:-}" = "--rollback" ]; then
-  systemctl disable --now relogin-web.service 2>/dev/null || true
-  rm -f "$UNIT" /usr/local/sbin/relogin-web.py /usr/local/sbin/relogin-trigger
+  systemctl disable --now relogin-web.service fleet-restart-requests.timer 2>/dev/null || true
+  rm -f "$UNIT" /usr/local/sbin/relogin-web.py /usr/local/sbin/relogin-trigger \
+        /usr/local/sbin/rc-reset-bridge /usr/local/sbin/fleet-restart-requests \
+        /etc/systemd/system/fleet-restart-requests.service \
+        /etc/systemd/system/fleet-restart-requests.timer
   systemctl daemon-reload
   echo "relogin removed ($DEST and the tenants' installed copies are kept)"
   exit 0
@@ -43,8 +46,17 @@ fi
 install -m 0755 "$HERE/relogin-trigger" /usr/local/sbin/relogin-trigger
 install -m 0755 "$HERE/relogin-web.py"  /usr/local/sbin/relogin-web.py
 install -m 0644 "$HERE/relogin-web.service" "$UNIT"
+# The cure for a dead remote-control session, and the thing that honours the restart a
+# tenant asks for after signing in. Without the second one a person is told "signed in"
+# and then met with "Login expired" on their next question, because the running session
+# still holds the credentials and the bridge it started with.
+install -m 0755 "$HERE/rc-reset-bridge" /usr/local/sbin/rc-reset-bridge
+install -m 0755 "$HERE/fleet-restart-requests" /usr/local/sbin/fleet-restart-requests
+install -m 0644 "$HERE/fleet-restart-requests.service" /etc/systemd/system/
+install -m 0644 "$HERE/fleet-restart-requests.timer" /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now relogin-web.service
+systemctl enable --now fleet-restart-requests.timer
 echo "relogin-web: $(systemctl is-active relogin-web.service) on 127.0.0.1:8099"
 
 if ! grep -rqs "location ^~ /relogin/" /etc/nginx/sites-available/ 2>/dev/null; then

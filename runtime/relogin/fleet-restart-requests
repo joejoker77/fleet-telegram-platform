@@ -1,0 +1,69 @@
+#!/usr/bin/python3
+"""Pick up restart requests tenants leave for themselves, and honour them gracefully.
+
+A session holds its credentials and its remote-control bridge from the moment it starts,
+so a fresh sign-in only takes effect at the next start. The helper inside the pod cannot
+restart its own pod, so it writes ~/.claude/run/restart-requested and this picks it up.
+
+    fleet-restart-requests            act on what is waiting
+    fleet-restart-requests --dry-run  say what would happen
+
+Each request goes through graceful-restart-pod-bot, which waits for the session to be
+idle and keeps the Telegram channel attached. The marker is removed once the restart is
+scheduled, so a request is honoured once.
+"""
+from __future__ import annotations
+
+import glob
+import json
+import os
+import subprocess
+import sys
+import time
+
+HOME_ROOT = os.environ.get("FLEET_HOME_ROOT", "/home")
+RESTARTER = os.environ.get("FLEET_GRACEFUL_RESTART",
+                           "/usr/local/sbin/graceful-restart-pod-bot")
+MAX_AGE_S = 6 * 3600   # older than this and the reason is long gone; drop it quietly
+
+
+def main() -> int:
+    dry = "--dry-run" in sys.argv
+    if os.geteuid() != 0 and not dry:
+        print("fleet-restart-requests: run as root", file=sys.stderr)
+        return 1
+
+    now = time.time()
+    seen = 0
+    for marker in sorted(glob.glob(f"{HOME_ROOT}/*/.claude/run/restart-requested")):
+        user = marker.split("/")[2]
+        seen += 1
+        try:
+            req = json.load(open(marker))
+        except Exception:
+            req = {}
+        reason = req.get("reason") or "unstated"
+        age = now - (req.get("at") or os.path.getmtime(marker))
+        if age > MAX_AGE_S:
+            print(f"{user}: request is {age/3600:.1f} h old ({reason}) — dropping it")
+            if not dry:
+                os.unlink(marker)
+            continue
+        if dry:
+            print(f"{user}: would schedule a graceful restart ({reason}, {age/60:.0f} min old)")
+            continue
+        p = subprocess.run([RESTARTER, user], capture_output=True, text=True, timeout=120)
+        first = (p.stdout or p.stderr).strip().splitlines()[:1]
+        if p.returncode == 0:
+            os.unlink(marker)
+            print(f"{user}: restart scheduled ({reason}) — {first[0] if first else ''}")
+        else:
+            # Leave the marker: whatever stopped this will be gone by the next tick.
+            print(f"{user}: could not schedule a restart ({reason}) — {first[0] if first else p.returncode}")
+    if not seen:
+        print("nothing waiting")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

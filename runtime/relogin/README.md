@@ -115,3 +115,37 @@ an argument is readable out of `/proc` by anything on the host.
   canary is one person, the host timer covers that case.
 - **Not yet in provisioning.** `add-user.sh` does not install this; `rollout.py <new-user>`
   does it in one line. Fold it in when the canary is over.
+
+## When the assistant says "Login expired" but the login is fine
+
+Seen on simon-dix, 7 Oct 2026. The person is told their login expired on every real
+request while trivial ones are answered normally; the credentials on disk are valid and a
+headless run as that tenant answers without complaint.
+
+**What is happening.** The listener resumes the remote-control session named in
+`~/.claude/projects/<project>/bridge-pointer.json`. A sign-in replaces the credentials and
+the server drops the session bound to the old ones, so the resume answers
+`400 Session not found`, which is visible only with `CLAUDE_DEBUG_LOG=1`. The pointer
+still names the dead session, so every restart goes back to it. Renaming the remote
+control does NOT help: the id comes from that file, not from the name.
+
+**Cure, one command:**
+
+```
+rc-reset-bridge <tenant>          # retire the pointer, graceful restart
+rc-reset-bridge <tenant> --now    # same, restart immediately
+```
+
+The next start creates a fresh session and environment, and remote control stays on, so
+the person keeps both the app and Telegram. The only thing lost is scrolling back into
+the previous app session.
+
+**Prevention.** The helper retires the pointer itself on a successful sign-in and writes
+`~/.claude/run/restart-requested`; `fleet-restart-requests` (timer, every two minutes)
+turns that into a graceful restart. A person who signs in through the chat is back to a
+working assistant without anyone touching the host.
+
+**Diagnosing another case.** Turn the debug log on for that one pod
+(`CLAUDE_DEBUG_LOG=1` in `/etc/claudeapp/tenant-<user>.env`, then restart), look for
+`reconnectSession(...) failed`, and turn it off again, because it grows fast. A plain
+`GET /v1/code/sessions/<id>` answers 200 for a dead session too, so it cannot be the test.

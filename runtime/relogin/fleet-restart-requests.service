@@ -1,0 +1,13 @@
+[Unit]
+Description=Honour restart requests tenants leave after a sign-in
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/fleet-restart-requests
+# Light hardening only: this drives graceful-restart-pod-bot, which drives podman, and
+# ProtectSystem=strict + PrivateTmp blind podman (see login-expiry-notify.service).
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectKernelModules=true
+TimeoutStartSec=300

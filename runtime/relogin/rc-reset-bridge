@@ -1,0 +1,37 @@
+#!/bin/sh
+# rc-reset-bridge <tenant> [--now] — cure for "the assistant answers simple things and
+# says Login expired for everything else".
+#
+# The listener resumes the remote-control session named in the pod's bridge pointer. When
+# a sign-in has replaced the credentials, the server drops that session and answers the
+# resume with "400 Session not found"; the pointer still names it, so every restart goes
+# back to the dead one. Moving the pointer aside makes the next start create a fresh
+# session, and remote control keeps working, so the person keeps both the app and Telegram.
+#
+# Backs the pointer up to /root/tenant-backups first. Graceful restart by default (waits
+# for the session to be idle); --now restarts immediately.
+set -eu
+U="${1:?usage: rc-reset-bridge <tenant> [--now]}"
+MODE="${2:-}"
+P=$(ls /home/"$U"/.claude/projects/*/bridge-pointer.json 2>/dev/null | head -1 || true)
+B=/root/tenant-backups
+mkdir -p "$B"
+
+if [ -n "$P" ]; then
+  cp -a "$P" "$B/bridge-pointer-$U-$(date -u +%Y%m%d-%H%M%S).json"
+  echo "was: $(cat "$P")"
+  mv "$P" "$P.stale-$(date -u +%Y%m%d-%H%M%S)"
+  echo "pointer retired (backup in $B)"
+else
+  echo "no bridge pointer for $U — nothing to retire"
+fi
+
+if [ "$MODE" = "--now" ]; then
+  systemctl restart "claude-pod@$U"
+  sleep 12
+else
+  /usr/local/sbin/graceful-restart-pod-bot "$U"
+  exit 0
+fi
+
+echo "now: $(cat /home/"$U"/.claude/projects/*/bridge-pointer.json 2>/dev/null)"

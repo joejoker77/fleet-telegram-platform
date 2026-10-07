@@ -506,6 +506,46 @@ def cmd_start(args: argparse.Namespace) -> int:
     return 0
 
 
+def retire_bridge_pointer() -> str | None:
+    """Forget the remote-control session this pod was resuming.
+
+    A sign-in replaces the credentials, and the server drops the remote-control session
+    that was bound to the old ones. The pointer on disk still names it, so the listener
+    goes on resuming a session that is gone: the assistant looks healthy, answers simple
+    things from the local session, and returns "Login expired · Please run /login" for
+    anything that runs through the bridge. simon-dix, 7 Oct 2026, two hours to find.
+    Dropping the file costs one thing only — the next connection starts a new session
+    instead of continuing the old one — and it is the difference between a working
+    assistant and a mystery.
+    """
+    import glob as _glob
+    moved = None
+    for path in _glob.glob(os.path.join(CONFIG_DIR, "projects", "*", "bridge-pointer.json")):
+        try:
+            os.replace(path, path + ".retired-" + time.strftime("%Y%m%d-%H%M%S"))
+            moved = path
+        except OSError:
+            pass
+    return moved
+
+
+def request_restart(reason: str) -> None:
+    """Ask the host to restart this pod once it is idle.
+
+    The session holds its credentials and its bridge from the moment it started, so a
+    fresh sign-in only takes effect at the next start. We cannot restart ourselves from
+    inside, so leave a marker: fleet-restart-requests picks it up within a couple of
+    minutes and goes through graceful-restart-pod-bot, which waits for idle and keeps
+    the Telegram channel.
+    """
+    try:
+        os.makedirs(RUN_DIR, exist_ok=True)
+        with open(os.path.join(RUN_DIR, "restart-requested"), "w", encoding="utf8") as fh:
+            json.dump({"reason": reason, "at": int(time.time()), "user": USER}, fh)
+    except OSError:
+        pass
+
+
 def cmd_code(args: argparse.Namespace) -> int:
     state = read_state()
     if state.get("status") != "awaiting_code":
@@ -540,10 +580,17 @@ def cmd_code(args: argparse.Namespace) -> int:
         if now is not None and (before is None or now > int(before)):
             kill_flow()
             clear_state()
+            # The session that is running right now still holds the old credentials and
+            # the old bridge. Retire the pointer and ask for a restart, or the person is
+            # told "signed in" and then met with "Login expired" on their next question.
+            retired = retire_bridge_pointer()
+            request_restart("signed in")
             send(token, chat, thread,
-                 f"Signed in. You are good until {pretty(now)} — back to normal, "
-                 "ask me anything.")
-            print(f"relogin: signed in, valid to {pretty(now)}")
+                 f"Signed in. You are good until {pretty(now)}. Give me a minute to pick "
+                 "the new sign-in up, then ask me anything.")
+            print(f"relogin: signed in, valid to {pretty(now)}"
+                  + (f"; retired {retired}" if retired else "")
+                  + "; restart requested")
             return 0
         if INVALID_RE.search(pane()):
             send(token, chat, thread,

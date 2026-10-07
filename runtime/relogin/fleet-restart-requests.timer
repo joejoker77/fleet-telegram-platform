@@ -1,0 +1,10 @@
+[Unit]
+Description=Check every couple of minutes for a tenant waiting on a restart
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=2min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
