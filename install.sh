@@ -16,7 +16,7 @@
 #   sudo ./install.sh [--dry-run] [--phase <name>] [--yes] [--config <file>]
 #     --dry-run     preflight + print the plan + describe every secret; change NOTHING
 #     --phase NAME  run only one phase (secrets|stores|services|image|egress|
-#                   security|authoring|marketplace|model|callback|tenants|verify)
+#                   security|authoring|marketplace|model|callback|features|tenants|verify)
 #     --yes         non-interactive confirmations (secrets must come from env/--config)
 #     --config F    source F first (sets config vars + any pre-supplied secret values)
 #
@@ -268,6 +268,27 @@ phase_callback() {
   run_cmd bash "$CP_INSTALL/m6.3-composio-web.sh" --domain "$CALLBACK_DOMAIN" ${CERTBOT_EMAIL:+--email "$CERTBOT_EMAIL"}
 }
 
+# ── PHASE: host features ──────────────────────────────────────────────────────
+# Everything that runs ON the host for every tenant, rather than inside a pod. Each of
+# these was written as its own installer and then enabled by hand on the firm host, so a
+# fresh server came up without them and nobody noticed until a tenant was missing a
+# feature everyone else had. They are idempotent and each one skips politely when its
+# prerequisite is absent, so the phase is safe to re-run.
+#
+# It runs BEFORE the bootstrap admin: add-user.sh installs smart-reminders and relogin
+# for the tenant it onboards, and both need the host side to exist first.
+phase_features() {
+  run_cmd bash "$RT_INSTALL/needrestart-guard.sh"                 # a mass restart must not kill the channels
+  run_cmd bash "$RT_INSTALL/m-memory-guard.sh" apply              # reap stale app sessions + swapfile
+  run_cmd bash "$RT_INSTALL/fleet-policy-install.sh"              # effort cap + context-window ladder
+  run_cmd bash "$RT_INSTALL/cc-cli-update-install.sh"             # nightly canary-first CLI update
+  run_cmd bash "$RT_INSTALL/cli-update-relay-install.sh"          # fleet-update events to the admin
+  run_cmd bash "$RT_INSTALL/login-expiry-notify-install.sh"       # warn before a sign-in expires
+  run_cmd bash "$HERE/runtime/relogin/install.sh"                 # and let the person renew it themselves
+  run_cmd bash "$HERE/runtime/smart-reminders/install.sh"         # scheduled prompts into a session
+  run_cmd bash "$HERE/runtime/skill-autoshare/install.sh"         # the catalogue fills itself
+}
+
 # ── PHASE: bootstrap admin ────────────────────────────────────────────────────
 # install.sh creates exactly ONE user — the bootstrap ADMIN — by handing off to
 # add-user.sh --is-admin (the single onboarding path: provision + token +
@@ -315,6 +336,7 @@ run_phase authoring     phase_authoring
 run_phase marketplace   phase_marketplace
 run_phase model         phase_model
 run_phase callback      phase_callback
+run_phase features      phase_features
 run_phase bootstrap_admin phase_bootstrap_admin
 run_phase verify        phase_verify
 log "done."
