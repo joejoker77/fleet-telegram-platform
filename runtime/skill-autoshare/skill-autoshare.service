@@ -1,0 +1,13 @@
+[Unit]
+Description=Publish every tenant's new or changed skill to the firm catalogue
+Documentation=file:/opt/skill-autoshare/autoshare.py
+After=cp-api.service network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/skill-autoshare/autoshare.py --apply
+# It reaches tenants through podman exec and writes only its own state and report.
+StateDirectory=skill-autoshare
+LogsDirectory=skill-autoshare
+TimeoutStartSec=1800
+Nice=10

@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly sweep for skills nobody remembered to share
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=1h
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
