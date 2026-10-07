@@ -337,16 +337,26 @@ Two judgement calls before publishing something on the user's behalf:
 You MAY create **session-scoped** subagents and slash commands on the fly for your own
 orchestration — that is separate from sharing and is fine.
 
-**After you create a skill, offer to share it.** The moment you have written a new skill
-for the user, say in the same reply what it does in one line and ask whether it should go
-into the firm catalogue. Say plainly which kind it is: a skill built on one person's voice,
-inbox habits or working style is personal and belongs on their machine, so say so and do
-not offer to share it; a skill that does a job any fee earner has (a letter, a chase, a
-review, a report) is firm-shaped, so offer `share-skill publish <name> --public --note
-"..."` and run it when they say yes. If the skill carries a client name, a deal number or a
-matter reference, generalise it first and say you have. Never publish without the user's
-yes, and never publish as private unless they ask for that: a private publish is listed to
-nobody but them.
+**Sharing happens by itself now — so say so when you create a skill.** Since 2026-10-07 an
+hourly job on the host publishes every new or changed skill to the firm catalogue under its
+author's name. You do not ask for permission to publish and you do not run `share-skill
+publish` to make it happen. What you MUST do, in the same reply that announces a new skill,
+is say in one line what it does and that it will appear in the firm catalogue within the
+hour — nobody should find their work listed without having been told.
+
+**Say how to keep it off other people's machines.** Two ways, and the result is the same:
+the skill is in the catalogue, listed to its owner, and not offered to colleagues. Put a
+`.noshare` file in the skill's folder, or `share: false` in its SKILL.md frontmatter. A
+skill that is plainly one person's — the owner's name in its title or description, or a
+playbook written as their own voice or standing rules — is detected and published that way
+without being asked. Mention this when the skill is personal; the user may disagree, and
+`share-skill publish <name> --public` is still theirs to run.
+
+**Write it as if a colleague will read it tomorrow, because one will.** The paragraph below
+is no longer advice for publishing day — it applies the moment you save the skill. Anything
+that looks like client data (an outside email address, a postcode, an NI number, a phone
+number, a deal id in a link) stops the publish altogether and the skill sits there unshared
+until a person fixes it, so keep identifiers out of it from the start.
 
 **A shared skill must run on any colleague's workspace, so generalise it before you publish.** Read the skill as if you were another lawyer's Claude and fix everything that only works here: the owner's name used as the actor ("give Daria the assessment", "draft to Paul") becomes "the lawyer" or "the user", with the owner kept only as the named source of the method; paths and files that exist only on this machine (a corpus folder under `~/work`, a scratch file, a personal index) are replaced by a fetch every workspace can do (`pd-attachments`, `deal-brief`, the firm's APIs); links to this workspace's memory (`[[...]]`) are inlined or dropped; personal account identifiers (a Composio connection, a Calendly link, a mailbox) become "your own connection"; client names, deal numbers and matter references go. Tools you call must be in every workspace's `~/work/bin`; if one is not (`pdf-text` is on some machines and not others), say so in the skill and give the fallback. Then tell the user in one line what you changed. If a skill cannot be made general because it is one person's voice or working style, it stays private and you say why instead of publishing it.
 
