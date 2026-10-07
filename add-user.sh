@@ -14,6 +14,9 @@
 #      tenant's OneCLI agent — each described, optional (blank = skip), staged per-user
 #   4. --is-admin → make-admin.sh + restart pod (mount the host-admin key)
 #   5. reconcile the tenant's skills/MCP via the control plane
+#   6. smart reminders (/opt/smart-reminders/rollout.py) — the `remind` tool + its skill
+#   7. self-service sign-in (/opt/relogin/rollout.py) — the `relogin` helper + its mod
+#      6 and 7 are host features: skipped quietly where they are not installed.
 #
 # Install-time rules apply (English descriptions before each prompt; English text).
 # Usage: sudo ./add-user.sh <os_user> <telegram_id> [--is-admin] [--dry-run] [--config F]
@@ -235,7 +238,7 @@ else
 fi
 
 # 6) reconcile skills/MCP for this tenant via the control plane
-log "6/7 reconcile skills + MCP"
+log "6/8 reconcile skills + MCP"
 if [ "$DRY_RUN" = "1" ]; then info "would run: cp-api deploy-reconcile.ts $USER_NAME --all --apply"
 else
   podman exec -w "$CP_DIR" cp-api node_modules/.bin/tsx apps/api/src/deploy-reconcile.ts "$USER_NAME" --all --apply >/dev/null 2>&1 \
@@ -247,7 +250,7 @@ fi
 # Placed before the finalize restart so the pod comes up with the tool already there. Skipped
 # quietly where the service is not installed — this script also runs on hosts that do not have it,
 # and a missing optional feature is not a failed provisioning.
-log "7/7 smart reminders for $USER_NAME"
+log "7/8 smart reminders for $USER_NAME"
 if [ ! -x /opt/smart-reminders/rollout.py ]; then
   info "smart-reminders is not installed on this host — skipping"
 elif [ "$DRY_RUN" = "1" ]; then
@@ -260,6 +263,25 @@ else
     # re-running it later costs nothing. Saying so is the point — a silent skip here is how a user
     # ends up as the only one without reminders.
     warn "smart-reminders rollout did not complete for $USER_NAME — re-run: python3 /opt/smart-reminders/rollout.py $USER_NAME"
+  fi
+fi
+
+# 8) self-service sign-in: the helper, the mod and the state directory. Without it the
+# login-expiry timer still writes to this person — with a one-tap button behind which there
+# is nothing to drive, because relogin-trigger execs the tenant's own helper. Rolled out to
+# the first thirty-five by hand (/opt/relogin/rollout.py --all); here so number thirty-six
+# gets it by being onboarded. Same shape as step 7: quiet skip where it is not installed,
+# non-fatal where it fails, because the rollout is idempotent and can be re-run.
+log "8/8 self-service sign-in for $USER_NAME"
+if [ ! -f /opt/relogin/rollout.py ]; then
+  info "relogin is not installed on this host — skipping"
+elif [ "$DRY_RUN" = "1" ]; then
+  info "would run: python3 /opt/relogin/rollout.py $USER_NAME"
+else
+  if python3 /opt/relogin/rollout.py "$USER_NAME" 2>&1 | sed 's/^/    /'; then
+    info "relogin helper + mod installed for $USER_NAME"
+  else
+    warn "relogin rollout did not complete for $USER_NAME — re-run: python3 /opt/relogin/rollout.py $USER_NAME"
   fi
 fi
 
