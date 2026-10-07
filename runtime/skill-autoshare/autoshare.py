@@ -238,6 +238,13 @@ def main() -> int:
         for n, who in sorted(cat.items()):
             print(f"{n:28} by {who}")
         print(f"\n{len(cat)} in the catalogue")
+        held = {k: v for k, v in load_state().items() if v.get("status") in ("held", "refused")}
+        if held:
+            print(f"\n{len(held)} waiting on a person:")
+            for k, v in sorted(held.items()):
+                why = v.get("why")
+                why = why[0] if isinstance(why, list) and why else why
+                print(f"  {k:44} {str(why)[:70]}")
         return 0
 
     state = load_state()
@@ -259,8 +266,12 @@ def main() -> int:
             if hits:
                 report["refused"].append({"skill": key, "why": "possible client data", "detail": hits})
                 print(f"held back     {key:42} -> possible client data")
-                for h in hits[:3]:
-                    print(f"                 {h}")
+                for hit in hits[:3]:
+                    print(f"                 {hit}")
+                if args.apply:
+                    # Remember the hash, so this is not re-checked and re-reported every hour.
+                    # The moment the author edits the skill it is looked at again.
+                    state[key] = {"hash": h, "status": "held", "why": hits[:3], "when": int(time.time())}
                 continue
             why_private = wants_private(folder, head, text, user, name)
             version = bump(prev.get("version", "1.0.0")) if prev else "1.0.0"
@@ -285,6 +296,8 @@ def main() -> int:
                 print("published      " + line)
             else:
                 report["refused"].append({"skill": key, "why": said})
+                state[key] = {"hash": h, "status": "refused", "why": said[:200],
+                              "version": version, "when": int(time.time())}
                 print("REFUSED        " + line + f"  {said}")
 
     if args.apply:
