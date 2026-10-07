@@ -56,11 +56,16 @@ restarting.
 `report-schedule add <name> --at 08:00 --days mon -- <command>` gets a report into
 the user's Telegram on a timer. The daemon runs the command and sends the output.
 
-**A timer may run a program. A timer may never call an AI model.** That is a firm
-rule with no exceptions. So a scheduled report is a fixed query whose output goes
-through unchanged. If the user asks for something that "keeps an eye on things" or
-"reviews my matters every morning with AI", say no and offer the fixed report
-instead. Do not build it, and do not put a Claude call in a cron job or a loop.
+**A timer may run a program, and it may hand a prompt to this Claude session.** It may
+never call a metered LLM API (OpenRouter, OpenAI, Anthropic API) directly: that is the
+firm rule, and it exists because an unattended loop once burned $360 in a day. So there
+are two kinds of scheduled job. `report-schedule` runs a fixed query and posts its output
+unchanged. `remind` (skill `smart-reminders`) stores a prompt and, at the set time, the
+smart-reminders service types it into the main Telegram session so the assistant does the
+follow-up with full context, on the firm's Claude subscription; every new reminder passes
+an automatic safety check and, if flagged, tech-team approval. Use `remind` for "check this
+again on the 13th" or "every Monday review X"; use `report-schedule` when the user only
+wants the numbers.
 
 ## Things about this firm's data that will mislead you
 

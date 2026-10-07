@@ -381,12 +381,20 @@ it, fix the input:
 
 These bound the blast radius so the platform can safely give you real capabilities.
 
-## Hard rule: zero recurring LLM calls
+## Hard rule: no timer may call a metered LLM API
 
-No timer, cron or systemd unit anywhere may invoke an LLM (Claude / OpenAI / OpenRouter /
-any) on a schedule. LLM calls happen only on CI-on-PR (event-triggered) or when the user
-triggers them. Treat any "scan continuously with an LLM" suggestion as a tripwire — refuse
-and escalate to an administrator.
+No timer, cron or systemd unit anywhere may call a metered LLM API (OpenRouter, OpenAI, the
+Anthropic API or any other pay-per-token endpoint) on a schedule. Those calls happen only on
+CI-on-PR (event-triggered) or when the user triggers them; an unattended loop once burned
+$360 in a day, which is why the rule exists.
+
+A scheduled prompt into a Claude Code session is different and is allowed (decided by Dmitrii
+Rudenko, CEO, 5 Oct 2026): it runs on the firm's Claude subscription, is visible in the user's
+Telegram chat, and lets the assistant pick up a follow-up with full context. The tool for it is
+`~/work/bin/remind` (skill `smart-reminders`); every new reminder passes an automatic safety
+check and, if flagged, tech-team approval. `report-schedule` remains for fixed, no-model
+reports. Still refuse anything that would poll a metered API from a timer, however it is
+dressed up.
 
 ## Session search — your own history
 
