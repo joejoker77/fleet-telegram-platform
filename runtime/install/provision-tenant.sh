@@ -132,6 +132,17 @@ if systemctl list-unit-files 'agentshield-settings-guard@*' >/dev/null 2>&1; the
     || echo "  WARN: could not enable agentshield settings guard"
 fi
 
+# The firm's Sonnet subagent types (doc-transcriber, research-assistant, data-worker).
+# They pin their own model in frontmatter, so they do not depend on the fleet-policy
+# subagent_model rollout — and they are plain files, re-applied on every run like the
+# hooks. Rolled out by hand to five tenants on 2026-10-02 and to nobody since; without
+# this a new hire's assistant forks the whole conversation for a transcription.
+if [ -x "$RT/install/install-sonnet-agents.sh" ]; then
+  "$RT/install/install-sonnet-agents.sh" "$USER_NAME" >/dev/null \
+    && echo "  sonnet subagents installed" \
+    || echo "  WARN: could not install sonnet subagents"
+fi
+
 # Managed firm CLAUDE.md = static base (English; Telegram + infra/security behavior,
 # tenant name substituted) + the per-ROLE access block (which firm systems this role may
 # use and exactly how to call each — from render-access-block.sh, role/scope driven by
