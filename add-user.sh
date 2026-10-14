@@ -292,7 +292,10 @@ else
   fi
 fi
 
-# 8b) can this tenant publish a skill? Ask the thing that answers, rather than inferring it
+# 8b) can this tenant publish a skill? By its full path: ~/work/bin is not on the pod's PATH
+# for a plain `podman exec`, so a bare `share-skill` answers "not found in $PATH" and reads as
+# a broken catalogue. The hourly sweep rewrites argv[0] to the absolute path for the same
+# reason. Ask the thing that answers, rather than inferring it
 # from a credential that turned out to have nothing to do with it: run their own share-skill
 # in their own pod. The old check here warned that publishing would fail without a GitHub
 # PAT, which was false — the catalogue moved to the control-plane registry and the warning
@@ -300,8 +303,8 @@ fi
 if [ "$DRY_RUN" != "1" ]; then
   if [ ! -s "/home/$USER_NAME/.claude/registry.token" ]; then
     warn "no sharing key for $USER_NAME — run: bash $RT_INSTALL/mint-registry-token.sh $USER_NAME"
-  elif podman exec -u "$USER_NAME" "claude-$USER_NAME" \
-         sh -lc 'share-skill list >/dev/null 2>&1'; then
+  elif podman exec -u "$USER_NAME" -e "HOME=/home/$USER_NAME" "claude-$USER_NAME" \
+         "/home/$USER_NAME/work/bin/share-skill" list >/dev/null 2>&1; then
     info "skill sharing works for $USER_NAME (catalogue answered from their pod)"
   else
     warn "sharing key is in place for $USER_NAME but the catalogue did not answer from their pod — check the control-plane registry"
