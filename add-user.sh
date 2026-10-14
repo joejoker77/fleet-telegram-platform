@@ -155,15 +155,15 @@ if offer_own_key openrouter; then prompt_secret_optional OPENROUTER_KEY \
   "OpenRouter API key (LLM gateway / voice fallback). Staged as ${USER_NAME}-openrouter-api (Authorization: Bearer @ openrouter.ai). Blank to skip."; fi
 if offer_own_key pipedrive; then prompt_secret_optional PIPEDRIVE_TOKEN \
   "Pipedrive personal API token for the firm CRM (monacosolicitors2.pipedrive.com). Staged as ${USER_NAME}-pipedrive (x-api-token). Blank to skip."; fi
-# The firm's skill catalogue is NOT on GitHub. `share-skill` talks to the control-plane
-# registry over the container bridge and authenticates with ~/.claude/registry.token, minted
-# per tenant in step 5b; the hourly auto-share runs `share-skill publish` inside the pod and
-# touches GitHub nowhere. This prompt used to say a PAT was "not optional in practice" and
-# that publishing would fail without one — measured 2026-10-14 on a tenant who had no PAT at
-# all: `share-skill list` answered with 55 skills from their pod. Genuinely optional, and
-# nobody should be typing the same firm token once per hire.
+# Two credentials, one catalogue, and they fail differently. Reading goes through the
+# control-plane registry with ~/.claude/registry.token (minted in step 5b) and cp-api's own
+# read token, so a tenant with no GitHub credential can list and install — measured. Writing
+# is dispatched into the pod, where registry-publish pushes to GitHub with a PAT the proxy
+# injects, and that one is still per tenant: 34 of 36 held it on 2026-10-14. It is the same
+# firm token for everybody, so it belongs in the role matrix as a shared key rather than in
+# this prompt once per hire.
 prompt_secret_optional GITHUB_PAT \
-  "GitHub PAT — OPTIONAL, and not needed for skills: the firm catalogue is the control-plane registry, not GitHub, and step 5b mints this tenant's key for it. This is only for GitHub itself (a repo of their own, or the plugin marketplace's REST side). Staged as ${USER_NAME}-git-fleet-platform (git @ github.com) and ${USER_NAME}-github-github_pat (REST @ api.github.com). Blank to skip."
+  "GitHub PAT for this tenant. READING the firm catalogue does not need it — cp-api reads the marketplace repo with a token of its own, so share-skill list answers without one. PUBLISHING does: registry-publish runs inside the pod and pushes with a PAT the egress proxy injects on api.github.com. Staged as ${USER_NAME}-git-fleet-platform (git @ github.com) and ${USER_NAME}-github-github_pat (REST @ api.github.com); note the live fleet binds the publish path as ${USER_NAME}-registry-github via m-key-vault.sh. Blank to skip — the check at the end of this run says what is missing."
 # ElevenLabs is a matrix service now (one firm key for every role, onboarded by
 # onboard-integrations.sh), so it is only asked for here if the matrix says per_user —
 # otherwise a per-tenant key would compete with the shared one for the same host.
@@ -308,6 +308,26 @@ if [ "$DRY_RUN" != "1" ]; then
     info "skill sharing works for $USER_NAME (catalogue answered from their pod)"
   else
     warn "sharing key is in place for $USER_NAME but the catalogue did not answer from their pod — check the control-plane registry"
+  fi
+  # Reading the catalogue and writing to it are different credentials, and only one of them is
+  # minted here. cp-api reads the private marketplace repo with a read token of its own, so
+  # `share-skill list` answers for everyone — while `publish` is dispatched INTO the pod, where
+  # registry-publish pushes with a GitHub PAT the egress proxy injects on api.github.com. Without
+  # that secret a tenant browses the catalogue and silently cannot contribute to it. Measured
+  # 2026-10-14: 34 of 36 tenants had it, and every one of the three without it was onboarded
+  # after the fleet-wide rollout that handed it out — this check exists so the next one is told.
+  REGISTRY_REPO_PROBE="${REGISTRY_REPO:-monacodigital/ClaudeCodeTeam}"
+  pub_out=$(mktemp)
+  podman exec -e "HOME=/home/$USER_NAME" "claude-$USER_NAME" \
+    curl -s -o /dev/null -w '%{http_code}' \
+    "https://api.github.com/repos/$REGISTRY_REPO_PROBE" > "$pub_out" 2>/dev/null || true
+  pub_code=$(cat "$pub_out" 2>/dev/null)
+  rm -f "$pub_out"
+  if [ "$pub_code" = "200" ]; then
+    info "and they can publish to it (the catalogue repo answers from their pod)"
+  else
+    warn "$USER_NAME can READ the catalogue but not publish to it: api.github.com/$REGISTRY_REPO_PROBE answered ${pub_code:-nothing} from their pod"
+    warn "  bind the firm's catalogue PAT for them: KV_USER=$USER_NAME KV_VALUE=<pat> bash $RT_INSTALL/m-key-vault.sh registry-github api.github.com Authorization 'Bearer {value}'"
   fi
 fi
 
