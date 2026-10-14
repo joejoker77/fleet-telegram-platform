@@ -155,8 +155,15 @@ if offer_own_key openrouter; then prompt_secret_optional OPENROUTER_KEY \
   "OpenRouter API key (LLM gateway / voice fallback). Staged as ${USER_NAME}-openrouter-api (Authorization: Bearer @ openrouter.ai). Blank to skip."; fi
 if offer_own_key pipedrive; then prompt_secret_optional PIPEDRIVE_TOKEN \
   "Pipedrive personal API token for the firm CRM (monacosolicitors2.pipedrive.com). Staged as ${USER_NAME}-pipedrive (x-api-token). Blank to skip."; fi
+# The firm's skill catalogue is NOT on GitHub. `share-skill` talks to the control-plane
+# registry over the container bridge and authenticates with ~/.claude/registry.token, minted
+# per tenant in step 5b; the hourly auto-share runs `share-skill publish` inside the pod and
+# touches GitHub nowhere. This prompt used to say a PAT was "not optional in practice" and
+# that publishing would fail without one — measured 2026-10-14 on a tenant who had no PAT at
+# all: `share-skill list` answered with 55 skills from their pod. Genuinely optional, and
+# nobody should be typing the same firm token once per hire.
 prompt_secret_optional GITHUB_PAT \
-  "GitHub PAT for skill/MCP sharing + marketplace. Staged as ${USER_NAME}-git-fleet-platform (git @ github.com) AND ${USER_NAME}-github-github_pat (REST @ api.github.com, for marketplace publish). NOT optional in practice: the catalogue write happens inside this tenant's pod with this credential, so without it every publish — including the hourly skill-autoshare sweep — fails with 'GitHub 404: Not Found', and the person never learns their skills are not being shared. Blank to skip (then bind it later with git-pat-vault.sh + m-key-vault.sh)."
+  "GitHub PAT — OPTIONAL, and not needed for skills: the firm catalogue is the control-plane registry, not GitHub, and step 5b mints this tenant's key for it. This is only for GitHub itself (a repo of their own, or the plugin marketplace's REST side). Staged as ${USER_NAME}-git-fleet-platform (git @ github.com) and ${USER_NAME}-github-github_pat (REST @ api.github.com). Blank to skip."
 # ElevenLabs is a matrix service now (one firm key for every role, onboarded by
 # onboard-integrations.sh), so it is only asked for here if the matrix says per_user —
 # otherwise a per-tenant key would compete with the shared one for the same host.
@@ -285,11 +292,20 @@ else
   fi
 fi
 
-# 8b) can this tenant publish a skill? The write happens in their pod with their own PAT,
-# and the failure mode is a 404 inside an hourly sweep nobody reads. One probe now, with
-# their credential, turns that into a sentence at onboarding.
-if [ "$DRY_RUN" != "1" ] && [ -z "${GITHUB_PAT:-}" ]; then
-  warn "no GitHub PAT for $USER_NAME — skill publishing (and the hourly auto-share) will fail for them until one is bound"
+# 8b) can this tenant publish a skill? Ask the thing that answers, rather than inferring it
+# from a credential that turned out to have nothing to do with it: run their own share-skill
+# in their own pod. The old check here warned that publishing would fail without a GitHub
+# PAT, which was false — the catalogue moved to the control-plane registry and the warning
+# did not — and it sent whoever read it looking for a token nobody needs.
+if [ "$DRY_RUN" != "1" ]; then
+  if [ ! -s "/home/$USER_NAME/.claude/registry.token" ]; then
+    warn "no sharing key for $USER_NAME — run: bash $RT_INSTALL/mint-registry-token.sh $USER_NAME"
+  elif podman exec -u "$USER_NAME" "claude-$USER_NAME" \
+         sh -lc 'share-skill list >/dev/null 2>&1'; then
+    info "skill sharing works for $USER_NAME (catalogue answered from their pod)"
+  else
+    warn "sharing key is in place for $USER_NAME but the catalogue did not answer from their pod — check the control-plane registry"
+  fi
 fi
 
 # finalize: restart the pod so it picks up EVERYTHING placed above (Claude OAuth
