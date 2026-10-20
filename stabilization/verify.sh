@@ -33,6 +33,10 @@ echo "== journal size capped =="
 grep -qs SystemMaxUse /etc/systemd/journald.conf.d/90-size.conf \
   && ok "journal ceiling set" || no "journal bounded only by 10% of the filesystem"
 
+echo "== onecli request log kept out of syslog =="
+grep -qs onecli /etc/rsyslog.d/30-onecli-quiet.conf \
+  && ok "onecli filtered from syslog" || no "onecli writes ~650MB/day into syslog"
+
 echo "== syslog actually rotates =="
 grep -qs "su root syslog" /etc/logrotate.d/rsyslog \
   && ok "logrotate su directive present" || no "logrotate will refuse the whole rsyslog stanza"

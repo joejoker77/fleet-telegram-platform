@@ -43,6 +43,11 @@ install -m 0644 "$HERE/logcaps/rsyslog.logrotate" /etc/logrotate.d/rsyslog
 install -d -m 0755 /etc/systemd/journald.conf.d
 install -m 0644 "$HERE/logcaps/90-size.conf" /etc/systemd/journald.conf.d/90-size.conf
 systemctl restart systemd-journald
+# onecli logs every proxied request at INFO (~1,500 lines/min, ~650MB/day with
+# ~40 tenants). Drop it before the 50-default.conf rules that write syslog;
+# journald keeps a capped copy, so `journalctl -t onecli` still works.
+install -m 0644 "$HERE/logcaps/30-onecli-quiet.conf" /etc/rsyslog.d/30-onecli-quiet.conf
+rsyslogd -N1 >/dev/null 2>&1 && systemctl restart rsyslog
 
 echo "== 6/6 reload + enable watchdog (does NOT restart any bot) =="
 systemctl daemon-reload
