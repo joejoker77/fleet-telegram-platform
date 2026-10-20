@@ -123,9 +123,11 @@ async function recoverHead(): Promise<void> {
     rl.on("close", resolve);
   });
   for (let i = tail.length - 1; i >= 0; i--) {
+    const line = tail[i];
+    if (!line) continue;
     let candidate: unknown;
     try {
-      candidate = JSON.parse(tail[i]);
+      candidate = JSON.parse(line);
     } catch {
       continue;
     }
