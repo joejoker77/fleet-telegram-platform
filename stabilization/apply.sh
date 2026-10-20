@@ -11,22 +11,22 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 [ "$(id -u)" -eq 0 ] || { echo "must run as root" >&2; exit 1; }
 
-echo "== 1/5 resource + crashtail drop-ins =="
+echo "== 1/6 resource + crashtail drop-ins =="
 install -d -m 0755 /etc/systemd/system/claude-tg@.service.d
 install -m 0644 "$HERE/systemd/claude-tg@.service.d/20-resources.conf" \
                 /etc/systemd/system/claude-tg@.service.d/20-resources.conf
 install -m 0644 "$HERE/systemd/claude-tg@.service.d/30-crashtail.conf" \
                 /etc/systemd/system/claude-tg@.service.d/30-crashtail.conf
 
-echo "== 2/5 watchdog + crashtail scripts =="
+echo "== 2/6 watchdog + crashtail scripts =="
 install -m 0755 "$HERE/bin/claude-tg-watchdog"  /usr/local/sbin/claude-tg-watchdog
 install -m 0755 "$HERE/bin/claude-tg-crashtail" /usr/local/sbin/claude-tg-crashtail
 
-echo "== 3/5 watchdog timer =="
+echo "== 3/6 watchdog timer =="
 install -m 0644 "$HERE/systemd/claude-tg-watchdog.service" /etc/systemd/system/claude-tg-watchdog.service
 install -m 0644 "$HERE/systemd/claude-tg-watchdog.timer"   /etc/systemd/system/claude-tg-watchdog.timer
 
-echo "== 4/5 nested-claude guard (shared copy; wiring is manual, see below) =="
+echo "== 4/6 nested-claude guard (shared copy; wiring is manual, see below) =="
 install -d -m 0755 /usr/local/share/claude-guard
 install -m 0755 "$HERE/nested-claude-guard/block-nested-claude.py" /usr/local/share/claude-guard/block-nested-claude.py
 install -m 0644 "$HERE/nested-claude-guard/empty-mcp.json"         /usr/local/share/claude-guard/empty-mcp.json
@@ -34,7 +34,17 @@ install -m 0755 "$HERE/nested-claude-guard/claude-sub"            /usr/local/bin
 # claude-sub looks for empty-mcp.json next to itself:
 install -m 0644 "$HERE/nested-claude-guard/empty-mcp.json"        /usr/local/bin/empty-mcp.json
 
-echo "== 5/5 reload + enable watchdog (does NOT restart any bot) =="
+echo "== 5/6 log caps (syslog rotation + journal ceiling) =="
+# Stock Ubuntu ships /etc/logrotate.d/rsyslog with `su root syslog`; without it
+# logrotate refuses every file in that stanza ("insecure permissions") and syslog
+# never rotates at all. That is how /var/log/syslog reached 631M on 2026-10-20
+# while a crash-looping unit wrote ~1,900 lines a minute into it.
+install -m 0644 "$HERE/logcaps/rsyslog.logrotate" /etc/logrotate.d/rsyslog
+install -d -m 0755 /etc/systemd/journald.conf.d
+install -m 0644 "$HERE/logcaps/90-size.conf" /etc/systemd/journald.conf.d/90-size.conf
+systemctl restart systemd-journald
+
+echo "== 6/6 reload + enable watchdog (does NOT restart any bot) =="
 systemctl daemon-reload
 systemctl enable --now claude-tg-watchdog.timer
 

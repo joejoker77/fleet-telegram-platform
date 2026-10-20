@@ -29,5 +29,15 @@ echo "  (guard WIRED only if each bot's settings.json references it — check ma
 echo "== journald persistent =="
 [ -d /var/log/journal ] && ok "/var/log/journal present" || no "journald is volatile"
 
+echo "== journal size capped =="
+grep -qs SystemMaxUse /etc/systemd/journald.conf.d/90-size.conf \
+  && ok "journal ceiling set" || no "journal bounded only by 10% of the filesystem"
+
+echo "== syslog actually rotates =="
+grep -qs "su root syslog" /etc/logrotate.d/rsyslog \
+  && ok "logrotate su directive present" || no "logrotate will refuse the whole rsyslog stanza"
+{ [ -e /var/log/syslog.1 ] || [ -e /var/log/syslog.1.gz ]; } \
+  && ok "a rotated syslog exists" || no "syslog has never rotated"
+
 [ "$fail" -eq 0 ] && echo "ALL M0 CHECKS PASSED" || echo "SOME CHECKS FAILED"
 exit "$fail"
