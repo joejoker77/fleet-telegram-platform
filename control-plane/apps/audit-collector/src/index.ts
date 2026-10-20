@@ -92,8 +92,18 @@ function currentFile(): string {
   return path.join(DIR, `audit-${day}.log`);
 }
 
+// How many trailing lines recoverHead will scan backwards for a usable record.
+const TAIL_SCAN = 50;
+
 // Recover the chain head from the newest existing record so restarts continue
 // the same chain instead of forking a new genesis.
+//
+// The last line may be a partial write: we only ever append, so a crash or a
+// full disk leaves a truncated record with no trailing newline. That line must
+// never abort startup — a collector that cannot start writes no audit at all,
+// and (restart policy being `always`) spins, flooding syslog. So walk backwards
+// from the end to the newest line that both parses and validates, and say how
+// many were skipped.
 async function recoverHead(): Promise<void> {
   const files = fs
     .readdirSync(DIR)
@@ -102,21 +112,34 @@ async function recoverHead(): Promise<void> {
   const last = files.at(-1);
   if (!last) return;
   const full = path.join(DIR, last);
-  let lastLine = "";
+  const tail: string[] = [];
   await new Promise<void>((resolve) => {
     const rl = readline.createInterface({ input: fs.createReadStream(full) });
     rl.on("line", (l) => {
-      if (l.trim()) lastLine = l;
+      if (!l.trim()) return;
+      tail.push(l);
+      if (tail.length > TAIL_SCAN) tail.shift();
     });
     rl.on("close", resolve);
   });
-  if (lastLine) {
-    const parsed = auditRecord.safeParse(JSON.parse(lastLine));
-    if (parsed.success) {
-      prevHash = parsed.data.hash;
-      log.info({ recoveredFrom: last, head: prevHash.slice(0, 12) }, "recovered chain head");
+  for (let i = tail.length - 1; i >= 0; i--) {
+    let candidate: unknown;
+    try {
+      candidate = JSON.parse(tail[i]);
+    } catch {
+      continue;
     }
+    const parsed = auditRecord.safeParse(candidate);
+    if (!parsed.success) continue;
+    prevHash = parsed.data.hash;
+    const skipped = tail.length - 1 - i;
+    if (skipped > 0) {
+      log.warn({ file: last, skipped }, "skipped damaged trailing record(s) recovering chain head");
+    }
+    log.info({ recoveredFrom: last, head: prevHash.slice(0, 12) }, "recovered chain head");
+    return;
   }
+  log.warn({ file: last, scanned: tail.length }, "no usable record in tail — continuing from genesis");
 }
 
 async function commit(raw: unknown): Promise<AuditRecord> {
@@ -198,7 +221,12 @@ function handleConnection(sock: net.Socket): void {
 
 async function main(): Promise<void> {
   fs.mkdirSync(DIR, { recursive: true });
-  await recoverHead();
+  // Never let chain recovery stop the collector from accepting events.
+  try {
+    await recoverHead();
+  } catch (err) {
+    log.warn({ err }, "chain head recovery failed — continuing from genesis");
+  }
 
   // Remove a stale socket from a previous run before binding.
   try {
