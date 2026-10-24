@@ -35,6 +35,28 @@ const CODE_TIMEOUT_MS = 120_000
 const SUMMONS = /^\/?re-?login[.!]?$/i
 
 /**
+ * A message that arrived over a channel is NOT submitted as the person typed it.
+ * Claude Code wraps it first, and `prompt.submit` sees the wrapper:
+ *
+ *     <channel source="plugin:telegram:telegram" chat_id="…" message_id="…" …>
+ *     relogin
+ *     </channel>
+ *
+ * Both tests below are exact — one word, or one token with no whitespace — so until
+ * this was unwrapped NOTHING sent from Telegram could match either, and Telegram is
+ * the only way the people this mod exists for ever reach it. It read as working
+ * because it was first verified by typing into the pod's own pane, which has no
+ * envelope. Found 2026-10-24: a lapsed tenant's code went to the model, which was
+ * the one thing that could not answer it.
+ */
+const CHANNEL_ENVELOPE =
+  /^<channel(?:\s+[A-Za-z_][\w-]*="[^"]*")*\s*>\s*([\s\S]*?)\s*<\/channel>$/
+
+function unwrapChannel(text: string): string {
+  return CHANNEL_ENVELOPE.exec(text)?.[1]?.trim() ?? text
+}
+
+/**
  * Could this message be a sign-in code? Deliberately loose — the helper decides, and it
  * also accepts the whole callback URL. The one job here is to let ordinary prose
  * through: a code is a single token with a digit, dash, underscore or '#' in it.
@@ -52,7 +74,7 @@ export const register: Register = (on) => {
     const helper = `${home}/work/bin/relogin`
     if (!(await $.fs.exists(helper))) return next(e)
 
-    const text = (e.text ?? '').trim()
+    const text = unwrapChannel((e.text ?? '').trim())
 
     if (SUMMONS.test(text)) {
       const run = await $.process.run([helper, 'start'], { timeoutMs: START_TIMEOUT_MS })

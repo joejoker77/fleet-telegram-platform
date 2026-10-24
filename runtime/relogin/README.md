@@ -75,6 +75,16 @@ each side of expiry:
   reached, so the assistant cannot act. The mod's `prompt.submit` hook fires *before* the
   model request, so it sees the code in a session that can no longer think. This is the
   only reason the mod exists.
+
+  **The hook must unwrap the channel envelope first.** A message that comes in over a
+  channel is not submitted as the person typed it: Claude Code wraps it in
+  `<channel source="plugin:telegram:telegram" chat_id="…" …>\n<text>\n</channel>` and
+  queues *that* as the prompt, so `e.text` is the whole block. The hook's tests are
+  exact — one word, or one whitespace-free token — so from 6 to 24 October 2026 nothing
+  sent from Telegram could match either of them, and Telegram is the only way the people
+  this is for ever reach it. It read as working because it was first verified by typing
+  into the pod's own pane, which has no envelope. Verify this branch over Telegram, never
+  from the pane.
 - **Login lapsed and the session restarted.** A session that starts without a valid login
   brings up no channel at all ("Channels are not currently available"), so no poller holds
   the single getUpdates slot and `relogin watch` may take it itself. The mod starts that
