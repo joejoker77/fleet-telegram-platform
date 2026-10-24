@@ -117,14 +117,21 @@ export const register: Register = (on) => {
 
         const status = await $.process.run([helper, 'status', '--json'], { timeoutMs: 20_000 })
         if (status.exitCode !== 0) return
-        const { days_left: daysLeft, flow } = JSON.parse(status.stdout) as {
-          days_left: number | null
-          flow: string
-        }
+        const { days_left: daysLeft, flow, tmux_alive: tmuxAlive } =
+          JSON.parse(status.stdout) as {
+            days_left: number | null
+            flow: string
+            tmux_alive: boolean
+          }
         // Only the dead case. The living ones are the host's 3/2/1-day warning, which
         // works even when the pod never comes up — this hook, by definition, does not.
         if (daysLeft !== null && daysLeft > 0) return
-        if (flow === 'awaiting_code') return
+        // A flow only holds this off while it is actually running. State that says
+        // `awaiting_code` with no tmux behind it is a corpse, and it does not clear
+        // itself: it blocked every later restart from starting a real sign-in, which
+        // is how damani-lealh sat awaiting_code from 9 to 24 October 2026 with a dead
+        // login and no way back. `start` retires a flow past its TTL by itself.
+        if (flow === 'awaiting_code' && tmuxAlive) return
 
         // The helper keeps its own ten-minute quiet period, so a pod restarting in a
         // loop sends one link, not one per restart.
