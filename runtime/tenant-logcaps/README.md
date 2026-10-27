@@ -72,6 +72,24 @@ for good by editing the constants at the top of the script.
 Each `--apply` run writes a JSON report to `/var/log/tenant-logcaps/`, so what
 a sweep removed is answerable after the fact.
 
+## Never leave a backup in /etc/logrotate.d
+
+logrotate reads **every** file in that directory, whatever it is called. A copy
+of a config kept beside the original is therefore read as a second config, trips
+`duplicate log entry`, and logrotate exits 1 — having rotated **nothing at all**,
+including the other, perfectly good configs.
+
+That is not hypothetical. `rsyslog.bak-20261020`, left there on 2026-10-20 while
+fixing syslog rotation, took `logrotate.service` down with it and the host went
+a week with no rotation of anything. It is a large part of why the pane dumps
+reached 6.6 GB. Both strays (that one and an August `claude-pane.pre-logcaps`)
+were moved to `/var/backups/logrotate-superseded/` on 2026-10-27.
+
+So: this component keeps its backup in `/var/backups/logrotate-superseded/`, and
+`install.sh` parses the whole of `/etc/logrotate.conf` after writing and warns if
+anything in the directory is broken. Check `systemctl is-failed logrotate.service`
+before trusting that any log on this host is being rotated.
+
 ## Steady state
 
 Transcripts settle at roughly a month of sessions; pane dumps at ~25 MB a

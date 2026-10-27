@@ -5,8 +5,10 @@
 # tenant hold ~400MB of pane dumps and put 6.6 GB of them across the fleet.
 # delaycompress is pointless with copytruncate -- nothing holds the rotated
 # copy open -- so it only kept .1 uncompressed at full size.
+# `size` alone, not `daily size`: given both, logrotate says "'size' overrides
+# previously specified 'daily'" and the time directive is dead weight. The
+# daily logrotate.timer is what makes this a daily check.
 /home/*/.claude/channels/telegram-*/logs/claude-pane.log {
-    daily
     rotate 3
     size 20M
     copytruncate
@@ -20,7 +22,6 @@
 /home/*/.claude/channels/telegram-*/logs/session-indexer.log
 /home/*/.claude/channels/telegram-*/logs/transcript-exporter.log
 /home/*/.claude/channels/telegram-*/logs/progress-sidecar.log {
-    weekly
     rotate 2
     size 10M
     copytruncate
