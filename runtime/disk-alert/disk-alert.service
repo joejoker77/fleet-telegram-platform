@@ -1,0 +1,10 @@
+[Unit]
+Description=Disk-space alert to the admin on Telegram (no model calls)
+After=local-fs.target
+
+[Service]
+Type=oneshot
+Environment=DISK_ALERT_PCT=80
+Environment=DISK_ALERT_PATHS=/,/home
+ExecStart=/opt/disk-alert/disk_alert.py
+StateDirectory=disk-alert
