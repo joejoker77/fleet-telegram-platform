@@ -1,0 +1,13 @@
+[Unit]
+Description=Cap Claude's own logs inside every tenant's home
+Documentation=file:/opt/tenant-logcaps/tenant-logcaps.py
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/tenant-logcaps/tenant-logcaps.py --apply
+# Reads and deletes under /home only, and writes its own run reports.
+LogsDirectory=tenant-logcaps
+TimeoutStartSec=3600
+Nice=15
+IOSchedulingClass=idle

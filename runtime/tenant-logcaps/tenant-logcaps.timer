@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily sweep of aged Claude logs in tenant homes
+
+[Timer]
+OnCalendar=*-*-* 03:40:00
+RandomizedDelaySec=600
+Persistent=true
+
+[Install]
+WantedBy=timers.target
