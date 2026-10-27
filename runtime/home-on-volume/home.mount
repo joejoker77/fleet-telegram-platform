@@ -1,0 +1,18 @@
+[Unit]
+Description=Tenant homes, bind-mounted from the ms-claude-vol1 volume
+Documentation=file:/opt/ms-home-migrate/README.md
+# The data lives on the volume; /home is only a name for it. Both facts are
+# load-bearing: the pods bind-mount /home/<user>/... by absolute path, so the
+# name has to stay, and the volume has to be there before the name means
+# anything.
+Requires=mnt-ms_claude_vol1.mount
+After=mnt-ms_claude_vol1.mount
+
+[Mount]
+What=/mnt/ms_claude_vol1/home
+Where=/home
+Type=none
+Options=bind
+
+[Install]
+WantedBy=multi-user.target
