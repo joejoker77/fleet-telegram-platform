@@ -47,9 +47,15 @@ done
 # Regular files only, one level deep, and no build droppings: `ls bin/*` expands a
 # directory into its contents with a header line, which on the first dry run turned a
 # stray __pycache__ in the skeleton into 64 bogus "would install" entries.
+# The firm skills are in here for the same reason CLAUDE.md is. They reached everyone once, at
+# provisioning, and every change since has been a hand loop or has simply not happened:
+# supervision-levels was written on 2026-11-02 and the CEO asked for it to go to the whole firm
+# the way the six went. A skill is one or more files under .claude/skills/<name>/, so the find
+# goes deeper than bin's; the same provenance rule protects a lawyer who has edited their copy.
 mapfile -t FILES < <(cd "$SKEL" && {
   find bin -maxdepth 1 -type f ! -name '*.pyc' -printf '%p\n' 2>/dev/null | sort
   find esign/bin -maxdepth 1 -type f ! -name '*.pyc' -printf '%p\n' 2>/dev/null | sort
+  find .claude/skills -mindepth 2 -type f ! -name '*.pyc' -printf '%p\n' 2>/dev/null | sort
   [ -f CLAUDE.md ] && echo CLAUDE.md
 })
 [ "${#FILES[@]}" -gt 0 ] || { echo "skeleton has nothing to ship" >&2; exit 2; }
@@ -93,20 +99,27 @@ for t in $(tenants); do
 
     case "$action" in
       current) kept=$((kept+1)); continue ;;
-      local)   printf '  %-19s %-28s changed locally, left alone\n' "$t" "$rel"; skipped=$((skipped+1)); continue ;;
+      local)   printf '  %-19s %-46s changed locally, left alone\n' "$t" "$rel"; skipped=$((skipped+1)); continue ;;
     esac
 
     if [ "$DRY" = 1 ]; then
-      printf '  %-19s %-28s would %s\n' "$t" "$rel" "$action"
+      printf '  %-19s %-46s would %s\n' "$t" "$rel" "$action"
     else
       if [ ! -d "$(dirname "$dst")" ]; then
         # A directory we create is the tenant's, like the rest of ~/work: sa-sign writes
-        # ~/work/esign/work and .composio-user and fails on a root-owned esign/.
-        mkdir -p "$(dirname "$dst")"
-        chown -R "$t:$t" "$home/work/${rel%%/*}"
+        # ~/work/esign/work and .composio-user and fails on a root-owned esign/. Only the
+        # levels that are actually missing are created and handed over — a `chown -R` of the
+        # top level would also take ownership of everything else already under it, and under
+        # .claude/skills that is the lawyer's own work.
+        d="$home/work"
+        IFS=/ read -r -a parts <<< "$(dirname "$rel")"
+        for part in "${parts[@]}"; do
+          d="$d/$part"
+          [ -d "$d" ] || { mkdir -p "$d" && chown "$t:$t" "$d"; }
+        done
       fi
-      install -m "$mode" -o "$t" -g "$t" "$src" "$dst" || { printf '  %-19s %-28s FAILED\n' "$t" "$rel"; continue; }
-      printf '  %-19s %-28s %sd\n' "$t" "$rel" "$action"
+      install -m "$mode" -o "$t" -g "$t" "$src" "$dst" || { printf '  %-19s %-46s FAILED\n' "$t" "$rel"; continue; }
+      printf '  %-19s %-46s %sd\n' "$t" "$rel" "$action"
     fi
     [ "$action" = install ] && installed=$((installed+1)) || updated=$((updated+1))
   done
