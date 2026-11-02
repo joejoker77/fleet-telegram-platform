@@ -54,8 +54,14 @@ ROLE_DIR = "/etc/claude-role"
 
 # Shipped with every workspace (tenant skel, relogin and smart-reminders rollouts) or
 # owned by the platform — never the tenant's own work, so never published.
+#
+# A skill that is MISSING from this set and present in every workspace is published once per
+# tenant, each under a different author: supervision-levels went firm-wide on 2026-11-02 and
+# came back as thirty identical catalogue entries. So the rule is part of shipping a firm
+# skill, not an afterthought — add the name here in the same change that puts it in the skel.
 FIRM = {"chase-draft", "client-update", "field-lookup", "matter-brief", "send-for-signature",
-        "share-skill", "week-ahead", "relogin", "smart-reminders", "synced"}
+        "share-skill", "week-ahead", "relogin", "smart-reminders", "supervision-levels",
+        "synced"}
 
 PII = [
     ("an outside email address", re.compile(r"[\w.+-]+@(?!monacosolicitors\.co\.uk|grapple|example\.)[\w-]+\.[\w.]{2,}")),
