@@ -11,7 +11,8 @@
       "admin": "high",
       "manager": "high",
       "finance": "high",
-      "basic": "high"
+      "basic": "high",
+      "starter": "high"
     },
     "rollout": "all"
   },

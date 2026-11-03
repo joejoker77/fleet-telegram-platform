@@ -8,7 +8,7 @@
 # (onboard-integrations.sh reads the SAME matrix). Edit entitlements in role-matrix.json,
 # not here.
 set -eu
-ROLE="${1:?usage: render-access-block.sh <admin|manager|finance|basic>}"
+ROLE="${1:?usage: render-access-block.sh <admin|manager|finance|basic|starter>}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 MATRIX="${ROLE_MATRIX_JSON:-$HERE/role-matrix.json}"
 

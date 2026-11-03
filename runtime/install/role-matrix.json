@@ -24,7 +24,8 @@
     "admin",
     "manager",
     "finance",
-    "basic"
+    "basic",
+    "starter"
   ],
   "service_order": [
     "supabase",
@@ -63,7 +64,8 @@
         "db.xoluhviwobrwkieyxbkg-rr-eu-west-2-swwjh.supabase.co"
       ],
       "roles": {
-        "admin": "read"
+        "admin": "read",
+        "starter": "read"
       }
     },
     "payload": {
@@ -145,7 +147,8 @@
         "admin": "rw",
         "manager": "rw",
         "finance": "rw",
-        "basic": "rw"
+        "basic": "rw",
+        "starter": "rw"
       }
     },
     "composio": {
@@ -159,7 +162,8 @@
         "admin": "rw",
         "manager": "rw",
         "finance": "rw",
-        "basic": "rw"
+        "basic": "rw",
+        "starter": "rw"
       }
     },
     "elevenlabs": {
@@ -172,7 +176,8 @@
         "admin": "rw",
         "manager": "rw",
         "finance": "rw",
-        "basic": "rw"
+        "basic": "rw",
+        "starter": "rw"
       }
     },
     "msgraph": {

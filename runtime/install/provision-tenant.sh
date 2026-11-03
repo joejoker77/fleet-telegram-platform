@@ -13,7 +13,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
 
-USER_NAME="${1:?usage: provision-tenant.sh <os_user> <telegram_id> [--role <admin|manager|finance|basic>] [--admin]}"
+USER_NAME="${1:?usage: provision-tenant.sh <os_user> <telegram_id> [--role <admin|manager|finance|basic|starter>] [--admin]}"
 TG_ID="${2:?telegram_id required}"
 AGENT_IDENT="${USER_NAME}-bot"
 # Role drives BOTH the per-role RBAC access block in CLAUDE.md and control-plane
@@ -27,7 +27,7 @@ while [ $# -gt 0 ]; do
     *) echo "ERROR: unknown arg: $1" >&2; exit 1 ;;
   esac
 done
-case "$ROLE" in admin|manager|finance|basic) ;; *) echo "ERROR: invalid role: $ROLE (admin|manager|finance|basic)" >&2; exit 1 ;; esac
+case "$ROLE" in admin|manager|finance|basic|starter) ;; *) echo "ERROR: invalid role: $ROLE (admin|manager|finance|basic|starter)" >&2; exit 1 ;; esac
 ADMIN=false; [ "$ROLE" = admin ] && ADMIN=true
 RT="$ROOT/runtime"
 TOKDIR=/etc/cl-egress

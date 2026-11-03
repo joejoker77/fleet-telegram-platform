@@ -69,7 +69,7 @@ onecli_secret_exists() {
 # the firm roles so provision-tenant, role-matrix.json and the vault bindings all agree.
 ROLE="${ROLE_ARG:-}"
 if [ -z "$ROLE" ]; then if [ "$IS_ADMIN" = "1" ]; then ROLE="admin"; else ROLE="basic"; fi; fi
-case "$ROLE" in admin|manager|finance|basic) ;; *) die "invalid --role: $ROLE (admin|manager|finance|basic)";; esac
+case "$ROLE" in admin|manager|finance|basic|starter) ;; *) die "invalid --role: $ROLE (admin|manager|finance|basic|starter)";; esac
 if [ "$ROLE" = "admin" ]; then IS_ADMIN=1; else IS_ADMIN=0; fi
 
 # role_entitled <role> <service> — true iff role-matrix.json grants <role> access to <service>.
@@ -202,6 +202,21 @@ if [ -f "$GW_INSTALL" ] && role_entitled "$ROLE" supabase; then
       || warn "could not grant DB read access — run: bash $GW_INSTALL --grant $USER_NAME"
   else
     info "cp-dbread not installed — no DB read access yet (set it up via onboard-integrations.sh)"
+  fi
+fi
+
+# 4c) Grapple's read-only replica, same shape as 4b: the password is a libpq credential and
+#     cannot be injected as a header, so entitlement is a token for the m9.2 gateway rather
+#     than a vault binding. `starter` reaches the replica and nothing else.
+GRAPPLE_INSTALL="$RT_INSTALL/../../control-plane/install/m9.2-grapple-replica-gateway.sh"
+if [ -f "$GRAPPLE_INSTALL" ] && role_entitled "$ROLE" grapple_replica; then
+  if [ "$DRY_RUN" = "1" ]; then info "would grant Grapple replica access to $USER_NAME (role $ROLE is entitled)"
+  elif podman container exists cp-grapple 2>/dev/null; then
+    bash "$GRAPPLE_INSTALL" --grant "$USER_NAME" >/dev/null 2>&1 \
+      && info "granted Grapple replica access (cp-grapple token)" \
+      || warn "could not grant Grapple replica access — run: $GRAPPLE_INSTALL --grant $USER_NAME"
+  else
+    info "cp-grapple not installed — no Grapple replica access yet"
   fi
 fi
 
