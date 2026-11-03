@@ -18,6 +18,7 @@
   },
   "context_window": {
     "rollout": "all",
+    "default_window": 200000,
     "ladder": [
       1000000,
       800000,

@@ -15,6 +15,24 @@
 //    1M -> 400k -> 200k in a live headless session, and a 120k conversation compacted to 20k
 //    on the next turn after the window went to 100k.
 //
+// BROKEN SINCE THE 2.1.3xx LINE, job 1 only - measured 2026-11-03 against 2.1.316. Claude Code
+// now issues its model requests through Bun's own `fetch` (`Bun.fetch`), which is a DIFFERENT
+// object from `globalThis.fetch` and is non-writable and non-configurable, so it cannot be
+// hooked at all. Pointed at a mock API, the mock logged two POST /v1/messages and the hook
+// below saw neither, while it kept seeing the MCP servers and the telemetry batch, which do go
+// through globalThis.fetch. The consequence was not small: with no snapshot written,
+// fleet-governor answered "no fresh usage data" on every tick for seven weeks, no tenant ever
+// left step 0, and one conversation reached 600k tokens resent on every single request.
+//
+// Job 2 below is unaffected and still does its work. The floor under it is now
+// context_window.default_window in fleet-policy.json, which claude-pod-run passes as
+// CLAUDE_CODE_AUTO_COMPACT_WINDOW when the pod starts. That variable IS still read by 2.1.316:
+// set it to 1000 and the CLI answers with its own range warning.
+//
+// To revive job 1, something has to see the response headers from outside the process. A
+// pass-through inside the pod that ANTHROPIC_BASE_URL points at is the obvious candidate, and
+// it needs a decision of its own, because the firm's model traffic would then cross our code.
+//
 // Never throws, never delays a response, never sends anything anywhere. If Claude Code stops
 // using fetch or changes the header names, the snapshot just stops updating and the governor
 // holds its current decision (it never tightens on stale data).
