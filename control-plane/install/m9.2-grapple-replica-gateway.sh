@@ -61,6 +61,15 @@ die(){ printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 install -d -m 0700 "$STATE_DIR"
 [ -f "$TOKENS_FILE" ] || { printf '{}\n' > "$TOKENS_FILE"; chmod 600 "$TOKENS_FILE"; }
 
+# The snapshot the gateway reads is only as current as the last install, and a grant or a
+# revoke is exactly when entitlement has changed. Refresh it here: the gateway re-reads the
+# file per request, so nothing needs restarting. Without this a role created after the
+# install (as `starter` was) is absent from the snapshot and its tenants are refused.
+refresh_matrix(){
+  [ -f "$MATRIX_SRC" ] && [ -d "$STATE_DIR" ] || return 0
+  install -m 0644 "$MATRIX_SRC" "$MATRIX_DST"
+}
+
 grant_tenant(){
   local u="${1:?--grant needs a user}" tok digest
   id "$u" >/dev/null 2>&1 || die "no such user: $u"
@@ -160,8 +169,8 @@ run_test(){
 }
 
 case "${1:-}" in
-  --grant)  grant_tenant "${2:-}"; exit 0 ;;
-  --revoke) revoke_tenant "${2:-}"; exit 0 ;;
+  --grant) refresh_matrix;  grant_tenant "${2:-}"; exit 0 ;;
+  --revoke) refresh_matrix; revoke_tenant "${2:-}"; exit 0 ;;
   --test)   run_test; exit $? ;;
   "" ) ;;
   * ) die "unknown argument: $1 (use --grant <user> / --revoke <user> / --test)" ;;

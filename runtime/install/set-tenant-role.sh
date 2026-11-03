@@ -213,9 +213,15 @@ fi
 
 # ── 4. the two database gateways, whose entitlement is a token file ─────────
 c_hd "4/4  database gateways"
-gw_sync(){ # $1 service  $2 installer  $3 container  $4 token file
-  local svc="$1" inst="$2" cont="$3" tok="$4"
+gw_sync(){ # $1 service  $2 installer  $3 container  $4 token file  $5 state dir
+  local svc="$1" inst="$2" cont="$3" tok="$4" state="$5"
   if [ ! -f "$inst" ]; then echo "  $svc: installer missing — skipped"; return; fi
+  # The gateway decides entitlement from a COPY of the matrix, re-read per request. Refresh it
+  # whether or not the token changes: a role may keep its token and change scope, and a role
+  # that did not exist at install time is simply missing from a stale copy.
+  if [ -d "$state" ] && [ "$DRY" != 1 ]; then
+    install -m 0644 "$MATRIX" "$state/role-matrix.json" && echo "  $svc: role matrix refreshed"
+  fi
   if role_entitled "$NEW_ROLE" "$svc"; then
     if [ -f "/home/$USER_NAME/.claude/$tok" ]; then echo "  $svc: already granted"; return; fi
     if [ "$DRY" = 1 ]; then echo "  $svc: would grant"; return; fi
@@ -229,8 +235,8 @@ gw_sync(){ # $1 service  $2 installer  $3 container  $4 token file
       && c_ok "  $svc: revoked" || c_no "  $svc: revoke FAILED — run: $inst --revoke $USER_NAME"
   fi
 }
-gw_sync supabase        "$REPO/control-plane/install/m9.1-dbread-gateway.sh"         cp-dbread dbread.token
-gw_sync grapple_replica "$REPO/control-plane/install/m9.2-grapple-replica-gateway.sh" cp-grapple grapple.token
+gw_sync supabase        "$REPO/control-plane/install/m9.1-dbread-gateway.sh"          cp-dbread  dbread.token  /etc/claudeapp/dbread
+gw_sync grapple_replica "$REPO/control-plane/install/m9.2-grapple-replica-gateway.sh" cp-grapple grapple.token /etc/claudeapp/grapple-replica
 
 c_hd "done"
 echo "  $USER_NAME is now role '$NEW_ROLE'."

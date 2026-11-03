@@ -130,8 +130,10 @@ app.post("/query", async (req, reply) => {
 
   const scope = await scopeForTenant(tenant);
   if (!scope) {
-    req.log.warn({ tenant }, "tenant has no Supabase entitlement — refused");
-    return reply.code(403).send({ error: "your role has no access to the firm database" });
+    req.log.warn({ tenant, service: SERVICE }, "tenant has no entitlement for this service — refused");
+    return reply.code(403).send({
+      error: `your role has no access to this database (service "${SERVICE}")`,
+    });
   }
 
   const body = (req.body ?? {}) as { sql?: unknown; params?: unknown };
