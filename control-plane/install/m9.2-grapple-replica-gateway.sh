@@ -39,6 +39,7 @@ PW_SECRET=cp_grapple_password
 STATE_DIR=/etc/claudeapp/grapple-replica
 TOKENS_FILE="$STATE_DIR/tokens.json"
 TOKEN_NAME=grapple.token     # the tenant-side file name, beside dbread.token
+GW_MODULES="$REPO/control-plane/apps/dbread-gateway/node_modules"
 MATRIX_SRC="$RT/install/role-matrix.json"
 MATRIX_DST="$STATE_DIR/role-matrix.json"
 FWD_UNIT=/etc/systemd/system/cl-grapple-forwarder.service
@@ -107,7 +108,12 @@ PY
 write_test_script(){
   cat > "$STATE_DIR/selftest.mjs" <<'JS'
 import { readFileSync } from "node:fs";
-import pg from "pg";
+import { createRequire } from "node:module";
+// Resolved from the gateway's own node_modules, not from this file's directory: an ESM bare
+// import looks only beside the importing file (and ignores NODE_PATH), and this script lives
+// in /etc/claudeapp, where there is no node_modules and never should be. pg is CommonJS, so a
+// require rooted at the gateway's tree is the honest way to reach it.
+const pg = createRequire(process.env.GW_MODULES + "/")("pg");
 const password = readFileSync(process.env.PW_FILE, "utf8").trim();
 const client = new pg.Client({
   host: process.env.PG_HOST,
@@ -143,10 +149,11 @@ run_test(){
   podman secret inspect "$PW_SECRET" >/dev/null 2>&1 || die "no $PW_SECRET secret yet — install first"
   write_test_script
   log "testing the connection (pg_is_in_recovery, and what the role can see)"
+  [ -d "$GW_MODULES/pg" ] || die "pg is not installed under $GW_MODULES — build the gateway first"
   podman run --rm --network host \
     --workdir "$REPO/control-plane" -v "$REPO:$REPO:ro" -v "$STATE_DIR:$STATE_DIR:ro" \
     --secret "$PW_SECRET" \
-    -e NODE_PATH="$REPO/control-plane/node_modules" \
+    -e GW_MODULES="$GW_MODULES" \
     -e PW_FILE="/run/secrets/$PW_SECRET" \
     -e PG_HOST="$PG_HOST" -e PG_PORT="$PG_PORT" -e PG_DB="$PG_DB" -e PG_USER="$PG_USER" -e PG_SSL="$PG_SSL" \
     "$NODE_IMAGE" node "$STATE_DIR/selftest.mjs"
