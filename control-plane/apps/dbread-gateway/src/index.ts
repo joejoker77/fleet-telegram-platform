@@ -39,7 +39,10 @@ const ROLE_DIR = process.env.CLAUDE_ROLE_DIR ?? "/etc/claude-role";
 // Bounds. The role cannot write, so these cap cost/volume rather than enforce safety.
 const MAX_ROWS = Number(process.env.DBREAD_MAX_ROWS ?? 1000);
 const STATEMENT_TIMEOUT_MS = Number(process.env.DBREAD_STATEMENT_TIMEOUT_MS ?? 15000);
-const SERVICE = "supabase"; // the role-matrix service this gateway fronts
+// Which role-matrix service this instance fronts. The firm database gateway leaves it at
+// "supabase"; a second instance (e.g. the Grapple read-only replica) sets DBREAD_SERVICE so
+// entitlement is decided by its OWN row in the matrix and cannot borrow the firm DB's.
+const SERVICE = process.env.DBREAD_SERVICE ?? "supabase";
 
 const app = Fastify({ logger: { name: "dbread-gateway" } });
 

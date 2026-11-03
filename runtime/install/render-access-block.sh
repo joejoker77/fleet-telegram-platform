@@ -22,6 +22,9 @@ if [ -f /etc/cl-egress.env ]; then
   . /etc/cl-egress.env
 fi
 DBREAD_ENDPOINT="${GW:-10.89.2.1}:${DBREAD_PORT_DEFAULT}"
+# Same idea for Grapple's read-only replica, one port along (m9.2 gateway).
+GRAPPLE_PORT_DEFAULT=10258
+GRAPPLE_ENDPOINT="${GW:-10.89.2.1}:${GRAPPLE_PORT_DEFAULT}"
 
 if [ ! -f "$MATRIX" ]; then
   echo '<!-- BEGIN ROLE-ACCESS -->'
@@ -47,6 +50,7 @@ PY
 # ── presentation prose (keyed by service) ─────────────────────────────────────
 whatis() { case "$1" in
   supabase)   echo "the firm's database — all MS projects, incl. the chatbot's DB";;
+  grapple_replica) echo "Grapple's read-only copy of their database — the redacted ai_analytics views";;
   payload)    echo "the chatbot's CMS — client & lawyer chatbot sessions";;
   rota)       echo "emails lawyers the client's info after the CDF form; buttons to action Pipedrive deals";;
   strapi)     echo "CMS for terms pages, the letter-builder tool, internal settings";;
@@ -73,6 +77,7 @@ howreach() { # $1=service $2=key_type $3=scope
     # not on the API host. Calling api.xero.com "directly" fails, and an agent told otherwise
     # will invent a reason — one did, and told its user our firewall was blocking the address.
     xero)     echo '`xero-call` helper';;
+    grapple_replica) echo "SQL via the Grapple replica gateway";;
     supabase) if [ "${3:-}" = read ]; then echo "SQL via the read-only DB gateway"
               else echo "direct REST, key auto-injected"; fi;;
     *) if [ "$2" = per_user ]; then echo "direct REST, your own key (auto-injected)"; else echo "direct REST, key auto-injected"; fi;;
@@ -108,6 +113,33 @@ MD
 # per-service concrete how-to (presentation; emitted only for entitled services)
 detail() { local scope="${2:-rw}"
   case "$1" in
+    grapple_replica)
+      # A direct libpq connection, so the same shape as the Supabase read tier: the password
+      # stays host-side in a podman secret and the tenant gets an HTTP endpoint. A pod has no
+      # DNS of its own, so it could not reach db.<ref>.supabase.co directly even if it held
+      # the password.
+      cat <<MD
+#### Grapple replica — a read-only copy of Grapple's database
+- Grapple's own dev built this: a **read-only replica**, and a role that may only SELECT the
+  redacted views in the \`ai_analytics\` schema. Nothing you send can change anything.
+- **Endpoint:** \`POST http://${GRAPPLE_ENDPOINT}/query\`
+- **Auth:** \`Authorization: Bearer \$(cat ~/.claude/grapple.token)\` — your own token.
+- **Body:** \`{"sql": "...", "params": [...]}\` — one statement, \`\$1\`/\`\$2\` placeholders for
+  values rather than pasting them into the SQL.
+- **Example:**
+  \`\`\`
+  curl -s -X POST http://${GRAPPLE_ENDPOINT}/query \\
+    -H "Authorization: Bearer \$(cat ~/.claude/grapple.token)" \\
+    -H 'Content-Type: application/json' \\
+    -d '{"sql":"select * from ai_analytics.<view> limit 20"}'
+  \`\`\`
+- Start with \`select table_name from information_schema.tables where table_schema = 'ai_analytics'\`
+  to see what you may read; there is no other schema you can reach.
+- Results are capped, so filter and use \`limit\`; \`truncated: true\` means there was more.
+- This is **Grapple's** data, under the same confidentiality rule as everything else here: it
+  does not go into a web search, a personal app, or any outside model.
+MD
+    ;;
     supabase)
       if [ "$scope" = read ]; then
         # Read tier = the read-only PostgreSQL role behind the host gateway, NOT the REST
@@ -288,6 +320,27 @@ injects the bearer) and calls the Accounting API with it plus the right `Xero-te
 - The old OAuth2 Custom Connection is gone. It mints valid tokens carrying all 46 scopes and
   Xero still answers 403 with an empty body, because the paid entitlement is not active. Do not
   try to revive it, and do not wait on Xero support to explain that 403.
+
+**Xero's call allowance is tiny and the whole firm shares it.** Xero counts calls per
+organisation per app: 1,000 a rolling 24 hours on the firm's current plan, 60 a minute, 5 at
+once. Every Claude session, the Invoice Bot, the won-deal sweeper and WordPress draw on the
+same allowance. Twice in October 2026 one session's loops used it up and the Invoice Bot could
+not raise invoices until the next day. So:
+- **Batch, never loop.** One `Invoices?InvoiceNumbers=INV-1,INV-2,…` call (up to about 40
+  numbers) replaces 40 calls. Use `ContactIDs=a,b,c`, `Statuses=`, `page=` (100 a page),
+  `summaryOnly=true` for lists, and `If-Modified-Since` for "what changed". A per-invoice
+  `Invoices/<id>/History` loop costs one call per invoice: run it only with the user's say-so,
+  once, and save the output to a file so it is never run again to "refresh".
+- **Reuse what you already fetched** in this conversation or saved to disk before calling again.
+  Never run a script with `--help` unless you have read that it handles `--help`.
+- `xero-call --budget` shows how many calls are left firm-wide, without spending one. Check it
+  before anything that will make more than about 20 calls, and tell the user the cost first.
+- `xero-call` stops by itself: after a 429 it refuses until Xero reopens (exit 5, and it says
+  when), and below a reserve kept for the Invoice Bot it refuses routine calls (`--urgent` lets
+  one essential lookup through). When it refuses, do not retry, do not sleep-and-loop, and do
+  not call `api.xero.com` another way: tell the user when Xero is back and carry on without it.
+- A 429 is not a broken connection and nobody needs to re-authorise anything. Say that it is
+  the shared daily allowance, and that the Invoice Bot is held up too.
 MD
     ;;
     exa) cat <<'MD'

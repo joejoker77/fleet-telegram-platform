@@ -17,7 +17,8 @@
     "  Telegram chat_id). Shared key != shared mailbox; never document it as a shared account.",
     "roles.<role>: rw = full; read = read-only (must be backed by a real read-scoped key/RLS,",
     "  else the read restriction is not enforced -- see supabase/basic).",
-    "xero: READ ONLY for every role (Tom, 2026-08-21). Not backed by a read-scoped Xero connection yet, so it is enforced by xero-call refusing non-GET and by the rendered guide, not by the credential. The Invoice Bot (n8n WojrCjQAy3Un581s) still writes and must keep doing so; it does not go through xero-call."
+    "xero: READ ONLY for every role (Tom, 2026-08-21). Not backed by a read-scoped Xero connection yet, so it is enforced by xero-call refusing non-GET and by the rendered guide, not by the credential. The Invoice Bot (n8n WojrCjQAy3Un581s) still writes and must keep doing so; it does not go through xero-call.",
+    "grapple_replica: Grapple's read-only replica of their database (the redacted ai_analytics views). Reached like the supabase read tier \u2014 SQL to a host-side gateway on tcp/10258, not REST \u2014 because it is a libpq credential and a tenant process never holds one. Installed by control-plane/install/m9.2-grapple-replica-gateway.sh. Read-only is enforced by the server itself (a replica in recovery) and by the role's grants, not by us."
   ],
   "role_order": [
     "admin",
@@ -27,6 +28,7 @@
   ],
   "service_order": [
     "supabase",
+    "grapple_replica",
     "payload",
     "rota",
     "strapi",
@@ -52,6 +54,16 @@
         "admin": "rw",
         "manager": "rw",
         "basic": "read"
+      }
+    },
+    "grapple_replica": {
+      "label": "Grapple replica (read-only)",
+      "key_type": "ms_shared",
+      "hosts": [
+        "db.xoluhviwobrwkieyxbkg-rr-eu-west-2-swwjh.supabase.co"
+      ],
+      "roles": {
+        "admin": "read"
       }
     },
     "payload": {
