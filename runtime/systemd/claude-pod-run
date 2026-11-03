@@ -185,11 +185,12 @@ PY
     chmod 0644 "$MANAGED"
     POLICY_ARGS+=(-v "$MANAGED:/etc/claude-code/managed-settings.json:ro")
   fi
-  # The starting auto-compaction window. Without it Claude Code keeps its own default and a
-  # conversation can reach 600k tokens resent on every request before anything acts — which is
-  # what happened while the governor had no usage numbers to act on (the tap can no longer see
-  # the limit headers: Claude Code sends model requests through Bun's own fetch). The governor
-  # can still tighten this live through the tap; this is the floor under it, not a replacement.
+  # The starting auto-compaction window, and it is normally ABSENT from the policy on purpose:
+  # a pod then starts at the top of the ladder and fleet-governor decides from the first
+  # response onwards, which is the whole point of having a governor. Set context_window.
+  # default_window only to put a hard ceiling under everyone — a blunt instrument, measured
+  # 2026-11-03 to bite 30 of 35 tenants at 200k — or as a safety net if the usage tap ever goes
+  # blind again. The governor still moves the window live through the tap either way.
   [ "${P_DEFWIN:--}" != "-" ] && POLICY_ARGS+=(-e CLAUDE_CODE_AUTO_COMPACT_WINDOW="$P_DEFWIN")
 
   TAP=/usr/local/lib/fleet/fleet-usage-tap.js
