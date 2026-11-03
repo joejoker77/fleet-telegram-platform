@@ -283,6 +283,9 @@ if [ -f "$TMPL" ] && ! grep -q "dport $POD_PORT" "$TMPL"; then
   sed -i "s#\(.*ip saddr __SUBNET__ tcp dport 10255 counter accept\)#\1\n    ip saddr __SUBNET__ tcp dport $POD_PORT counter accept#" "$TMPL"
   echo "  added to $TMPL so it survives a restart of the machine"
 fi
+# The template alone does not persist: the boot unit applies the RENDERED
+# /etc/cl-egress.nft, which begins with `delete table`. m8.2 renders for the same reason.
+bash "$RT/install/render-egress-nft.sh" --apply
 ufw status >/dev/null 2>&1 && { ufw allow from "$SUBNET" to any port "$POD_PORT" proto tcp >/dev/null 2>&1 || true; }
 
 run_test; test_rc=$?
