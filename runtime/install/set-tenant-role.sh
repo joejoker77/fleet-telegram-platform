@@ -63,7 +63,8 @@ sys.exit(0 if sys.argv[2] in m.get("role_order", []) else 1)
 PY
 
 OLD_ROLE="$(tr -d ' \t\r\n' < "/etc/claude-role/$USER_NAME")"
-c_hd "$USER_NAME: $OLD_ROLE -> $NEW_ROLE${DRY:+ (dry run)}"
+DRY_NOTE=""; [ "$DRY" = 1 ] && DRY_NOTE=" (dry run)"
+c_hd "$USER_NAME: $OLD_ROLE -> $NEW_ROLE$DRY_NOTE"
 [ "$OLD_ROLE" = "$NEW_ROLE" ] && echo "  already on that role; re-applying anyway (idempotent)"
 
 # ── what each role may reach, for the report ────────────────────────────────
