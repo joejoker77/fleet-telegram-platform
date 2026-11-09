@@ -31,8 +31,13 @@ const START_TIMEOUT_MS = 90_000
 /** The code exchange is a round trip to Anthropic; the helper itself waits 90 s. */
 const CODE_TIMEOUT_MS = 120_000
 
-/** The whole message is the word, give or take the slash people add out of habit. */
-const SUMMONS = /^\/?re-?login[.!]?$/i
+/**
+ * The whole message is the word, give or take the slash people add out of habit, and
+ * optionally `force`. Force exists because the helper now refuses to mint a link for
+ * someone who is already signed in — right, and a dead end for the person whose session
+ * is broken for some other reason. They need a way to insist.
+ */
+const SUMMONS = /^\/?re-?login(?:[ \t]+(force))?[.!]?$/i
 
 /**
  * A message that arrived over a channel is NOT submitted as the person typed it.
@@ -76,11 +81,16 @@ export const register: Register = (on) => {
 
     const text = unwrapChannel((e.text ?? '').trim())
 
-    if (SUMMONS.test(text)) {
-      const run = await $.process.run([helper, 'start'], { timeoutMs: START_TIMEOUT_MS })
+    const summons = SUMMONS.exec(text)
+    if (summons) {
+      const argv = summons[1] ? [helper, 'start', '--force'] : [helper, 'start']
+      const run = await $.process.run(argv, { timeoutMs: START_TIMEOUT_MS })
+      // The helper says which of the two it did; a link was not always sent, and a
+      // transcript line claiming one was is how an operator reads the wrong story.
+      const said = run.stdout.trim().split('\n').pop() ?? ''
       return {
         drop: run.exitCode === 0
-          ? 'relogin: sign-in link sent to this chat'
+          ? `relogin: ${said || 'sign-in link sent to this chat'}`
           : `relogin: could not start a sign-in — ${run.stderr.trim() || 'see the pod log'}`,
       }
     }

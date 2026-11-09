@@ -89,6 +89,10 @@ FLOW_TTL_S = 20 * 60
 # Inside the window a `start` with a live flow does nothing at all and says so.
 RESEND_COOLDOWN_S = 10 * 60
 
+# Below this many days left, a manual "relogin" is taken at face value. Above it, the
+# person is already signed in and asking again only starts a loop — see cmd_start.
+MANUAL_NEEDS_DAYS = 1.0
+
 
 # ---- the tenant's own Telegram bot -------------------------------------------------
 # A bot may only write to a chat that started it, so the message goes out over the
@@ -367,6 +371,17 @@ MESSAGE_WARN = (
     "If you would rather leave it, nothing breaks today — I will ask again tomorrow."
 )
 
+# Nothing to renew. Said in full rather than "you are fine", because the person asking
+# has usually just been told by something else that they are not.
+MESSAGE_ALREADY = (
+    "You are already signed in — your Claude account is good until {when}, so there is "
+    "nothing to do and no link to tap.\n"
+    "\n"
+    "If I am still not answering you properly, it is not the sign-in and a new one will "
+    "not fix it. Send me the words relogin force to make a fresh one anyway, or tell "
+    "your administrator what I am doing wrong."
+)
+
 # Same button, but the sign-in has already lapsed, so there is nothing to put off.
 MESSAGE_EXPIRED = (
     "My Claude sign-in has run out, so I cannot answer you until it is renewed. It "
@@ -413,6 +428,23 @@ def cmd_start(args: argparse.Namespace) -> int:
             print(f"relogin: nudge sent to chat {chat} — no flow started, "
                   f"the link is minted when they tap")
             return 0
+
+    # A sign-in nobody needs is not harmless. Until 2026-11-09 the word "relogin" minted
+    # a link unconditionally, so someone whose key had just been renewed — by the very
+    # flow they were in the middle of — was handed another link, tapped it, got another
+    # code, and went round again. paul-young did that five times in one morning holding a
+    # key valid for another 28 days. So a manual request now answers with the truth, and
+    # says how to override it, because "you are fine" is exactly what a person with a
+    # genuinely broken session must not be stonewalled with.
+    manual_left = days_left()
+    if (args.reason == "manual" and not args.force
+            and manual_left is not None and manual_left > MANUAL_NEEDS_DAYS):
+        expiry = refresh_expiry()
+        send(token, chat, thread,
+             MESSAGE_ALREADY.format(when=pretty(expiry) if expiry else "its usual term"))
+        print(f"relogin: nothing to renew — signed in for another {manual_left:.1f} day(s); "
+              f"told chat {chat}, no flow started")
+        return 0
 
     state = read_state()
     live = (state.get("status") == "awaiting_code"
