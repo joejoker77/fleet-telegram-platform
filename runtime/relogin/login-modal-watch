@@ -52,6 +52,18 @@ TMUX_SESSION = os.environ.get("FLEET_TMUX_SESSION", "claude")
 # half the modal away is not a pane we want to send keys at.
 MODAL_MARKERS = ("Paste code here if prompted", "Browser didn't open?")
 
+# A message from the person, sitting unread behind the modal. Claude Code renders a
+# queued inbound channel message as "← telegram · <chat>: <text>". Its presence settles
+# what we are looking at: nobody is quietly finishing a sign-in at the terminal while
+# the owner of the bot is talking to it and getting nothing back.
+QUEUED_MARKER = "← telegram"
+
+# The sign-in the person was handed at the terminal cannot be rescued from here. The
+# pane renders their pasted code elided ("WIs5…#BwjFJ…"), the full text never reaches
+# us, and it is bound to the pane's own challenge anyway. What we can do is end the
+# dead attempt and hand the sign-in to the route that does take a code from the chat.
+RELOGIN_TRIGGER = "/usr/local/sbin/relogin-trigger"
+
 
 def tenants() -> list[str]:
     found = []
@@ -178,7 +190,7 @@ def main() -> int:
         return 1
 
     now = time.time()
-    cleared, stuck = [], []
+    cleared, stuck, handed_over = [], [], []
     looked = unseen = found = 0
     for user in (args.only or tenants()):
         screen = pane(user)
@@ -193,30 +205,57 @@ def main() -> int:
         found += 1
         waited = int(now - since)
         left = days_left(user)
-        if left is None or left <= 0:
-            # Nothing to sign in WITH. The window is the cure, not the disease.
-            print(f"{user}: sign-in window open, credentials expired — leaving it alone")
+        queued = QUEUED_MARKER in screen
+
+        # A message queued behind the window removes the only reason to wait. The dwell
+        # time is there to avoid interrupting a sign-in somebody is in the middle of;
+        # an unread message from the bot's owner proves nobody is.
+        grace = 0 if queued else args.grace
+        if waited < grace:
+            print(f"{user}: sign-in window open {waited}s, key good for "
+                  f"{'?' if left is None else format(left, '.1f')}d "
+                  f"— waiting until {grace}s before touching it")
             continue
-        if waited < args.grace:
-            print(f"{user}: sign-in window open {waited}s, key good for {left:.1f}d "
-                  f"— waiting until {args.grace}s before touching it")
+
+        expired = left is None or left <= 0
+        if expired and not queued:
+            # Nothing to sign in WITH, and nobody waiting. The window is the cure.
+            print(f"{user}: sign-in window open, credentials expired, nothing queued "
+                  f"— leaving it alone")
             continue
+
         if args.dry_run:
-            print(f"{user}: would clear a sign-in window stuck {waited}s "
-                  f"with a key good for {left:.1f}d")
+            what = ("end it and hand the sign-in to the chat" if expired
+                    else f"clear it (key good for {left:.1f}d)")
+            print(f"{user}: would {what} — window stuck {waited}s"
+                  f"{', person waiting behind it' if queued else ''}")
             continue
-        if clear(user):
-            cleared.append((user, waited, left))
-            try:
-                os.unlink(state_path(user))
-            except OSError:
-                pass
-            print(f"{user}: cleared a sign-in window stuck {waited}s "
-                  f"(key good for {left:.1f}d) — the bot can hear again")
-        else:
+
+        if not clear(user):
             stuck.append((user, waited))
             print(f"{user}: sign-in window would not close after {waited}s — needs a person",
                   file=sys.stderr)
+            continue
+
+        try:
+            os.unlink(state_path(user))
+        except OSError:
+            pass
+
+        if expired:
+            # The terminal route was used and the person answered in the chat, where
+            # their code could never land. Their key really is dead, so clearing the
+            # window is only half of it: start the route that does take a code from the
+            # chat, and they get a working link where they are already looking.
+            handed = run([RELOGIN_TRIGGER, user, "--reason", "expired"], timeout=120)
+            ok = handed.returncode == 0
+            handed_over.append((user, waited, ok))
+            print(f"{user}: ended a dead sign-in window stuck {waited}s and "
+                  f"{'sent them a working link in their chat' if ok else 'COULD NOT hand over — ' + (handed.stderr.strip() or 'see relogin-trigger')}")
+        else:
+            cleared.append((user, waited, left))
+            print(f"{user}: cleared a sign-in window stuck {waited}s "
+                  f"(key good for {left:.1f}d) — the bot can hear again")
 
     # Always say what was looked at. A watchdog that prints nothing when it found
     # nothing is indistinguishable from a watchdog that did not run, and this whole
@@ -224,11 +263,17 @@ def main() -> int:
     print(f"looked at {looked} bot(s), {unseen} unreachable, "
           f"{found} showing a sign-in window, {len(cleared)} cleared")
 
-    if cleared or stuck:
+    if cleared or stuck or handed_over:
         lines = ["Bots that were stuck behind a sign-in window:"]
         for user, waited, left in cleared:
             lines.append(f"• {user} — deaf for {waited // 60} min with a valid key "
                          f"({left:.0f} days left). Window closed, it is answering again.")
+        for user, waited, ok in handed_over:
+            lines.append(f"• {user} — a sign-in was opened at the terminal and their key "
+                         f"had run out, so the code they sent in chat could not land. "
+                         f"Deaf {waited // 60} min. Window ended and "
+                         + ("a working link sent to their chat."
+                            if ok else "the hand-over FAILED — they need you."))
         for user, waited in stuck:
             lines.append(f"• {user} — deaf for {waited // 60} min and the window would "
                          f"not close. Needs looking at.")
