@@ -1,0 +1,13 @@
+[Unit]
+Description=Clear a /login window that is holding a tenant's bot hostage
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/login-modal-watch
+# Everything this does is podman exec + reading one credentials file; ProtectSystem=strict
+# and PrivateTmp blind podman (see login-expiry-notify.service).
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectKernelModules=true
+TimeoutStartSec=600

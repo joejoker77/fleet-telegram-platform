@@ -1,0 +1,228 @@
+#!/usr/bin/python3
+"""login-modal-watch — clear a sign-in window that is holding a bot hostage.
+
+Claude Code's `/login` opens a MODAL in the bot's own terminal. Until a code is typed
+into that same terminal, the session reads nothing else: every Telegram message queues
+behind it and the bot goes silent. Nothing notices. The container is up, the poller is
+up, the credentials may be perfectly valid, and no health check in the fleet looks at
+what is actually on the screen. paul-young lost six hours to this on 2026-11-09 — his
+key had been renewed at 09:36 and his bot stayed deaf until the window was closed by
+hand at 12:45.
+
+The window is legitimate when there is nothing to sign in with: a cold start, or a
+genuinely expired account, where somebody must complete a sign-in. So this only acts
+when the credentials on disk are VALID and the window has been sitting there past
+GRACE_S anyway — which is not a sign-in in progress, it is a sign-in nobody is coming
+to finish.
+
+    login-modal-watch              look at every tenant, clear what is stuck
+    login-modal-watch --dry-run    say what it would do, touch nothing
+    login-modal-watch --only a b   just these tenants
+    login-modal-watch --grace 300  override the dwell time (seconds)
+
+Reports to the admin's Telegram, because the whole lesson of the day this was written
+is that a thing which fixes itself quietly is a thing nobody knows was broken.
+"""
+from __future__ import annotations
+
+import argparse
+import glob
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
+
+HOME_ROOT = os.environ.get("FLEET_HOME_ROOT", "/home")
+STATE_DIR = "/var/lib/login-modal-watch"
+GRACE_S = int(os.environ.get("LOGIN_MODAL_GRACE_S", "600"))
+DEFAULT_ADMIN = os.environ.get("FLEET_EXPIRY_ADMIN", "tonysoprano1337")
+SKIP = {"cplane"}
+# The bot's own tmux session. Overridable so the detect/clear path can be exercised
+# against a stand-in session instead of a real lawyer's bot.
+TMUX_SESSION = os.environ.get("FLEET_TMUX_SESSION", "claude")
+
+# The modal's own furniture. Both lines are Claude Code's, and neither appears in
+# ordinary output; requiring either one alone would be enough, but a pane that scrolled
+# half the modal away is not a pane we want to send keys at.
+MODAL_MARKERS = ("Paste code here if prompted", "Browser didn't open?")
+
+
+def tenants() -> list[str]:
+    found = []
+    for path in sorted(glob.glob(f"{HOME_ROOT}/*/.claude/channels/telegram-*")):
+        user = path.split("/")[2]
+        if user not in SKIP and user not in found:
+            found.append(user)
+    return found
+
+
+def run(argv: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
+    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+
+
+def pane(user: str) -> str | None:
+    """What is on the bot's screen right now, or None if we cannot see it."""
+    p = run(["podman", "exec", "--user", user,
+             "--env", f"TMUX_TMPDIR={HOME_ROOT}/{user}/.claude",
+             f"claude-{user}", "tmux", "-u", "capture-pane", "-p", "-t", TMUX_SESSION])
+    return p.stdout if p.returncode == 0 else None
+
+
+def days_left(user: str) -> float | None:
+    """Days until the refresh token dies. None when there is no dated session at all."""
+    path = f"{HOME_ROOT}/{user}/.claude/.credentials.json"
+    try:
+        with open(path, encoding="utf8") as fh:
+            blob = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    oauth = blob.get("claudeAiOauth", blob)
+    try:
+        when = datetime.fromtimestamp(int(oauth["refreshTokenExpiresAt"]) / 1000, timezone.utc)
+    except (KeyError, TypeError, ValueError):
+        return None
+    return (when - datetime.now(timezone.utc)).total_seconds() / 86400
+
+
+def state_path(user: str) -> str:
+    return os.path.join(STATE_DIR, f"{user}.json")
+
+
+def first_seen(user: str, now: float, present: bool, dry: bool) -> float:
+    """Epoch at which this modal first appeared. Forgets it as soon as it is gone."""
+    path = state_path(user)
+    if not present:
+        if not dry:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        return 0.0
+    try:
+        with open(path, encoding="utf8") as fh:
+            return float(json.load(fh)["since"])
+    except (OSError, ValueError, KeyError):
+        if not dry:
+            os.makedirs(STATE_DIR, exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf8") as fh:
+                json.dump({"since": now, "user": user}, fh)
+            os.replace(tmp, path)
+        return now
+
+
+def clear(user: str) -> bool:
+    """Esc, then look again. True when the screen came back."""
+    run(["podman", "exec", "--user", user,
+         "--env", f"TMUX_TMPDIR={HOME_ROOT}/{user}/.claude",
+         f"claude-{user}", "tmux", "send-keys", "-t", TMUX_SESSION, "Escape"])
+    time.sleep(2)
+    after = pane(user) or ""
+    return not any(m in after for m in MODAL_MARKERS)
+
+
+def tell_admin(admin: str, text: str) -> bool:
+    base = f"{HOME_ROOT}/{admin}/.claude/channels/telegram-{admin}"
+    token = ""
+    try:
+        with open(os.path.join(base, ".env"), encoding="utf8") as fh:
+            for line in fh:
+                if line.startswith("TELEGRAM_BOT_TOKEN="):
+                    token = line.split("=", 1)[1].strip()
+        with open(os.path.join(base, "access.json"), encoding="utf8") as fh:
+            allow = json.load(fh).get("allowFrom") or []
+        chat = str(allow[0]) if allow else ""
+    except (OSError, ValueError, IndexError):
+        return False
+    if not token or not chat:
+        return False
+    body = urllib.parse.urlencode({"chat_id": chat, "text": text}).encode()
+    req = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage", data=body)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return resp.status == 200
+    except (urllib.error.URLError, OSError):
+        return False
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--only", nargs="*", default=None)
+    ap.add_argument("--grace", type=int, default=GRACE_S)
+    ap.add_argument("--to", default=DEFAULT_ADMIN)
+    args = ap.parse_args()
+
+    if os.geteuid() != 0 and not args.dry_run:
+        print("login-modal-watch: run as root", file=sys.stderr)
+        return 1
+
+    now = time.time()
+    cleared, stuck = [], []
+    looked = unseen = found = 0
+    for user in (args.only or tenants()):
+        screen = pane(user)
+        if screen is None:
+            unseen += 1                   # pod down or no tmux; not our problem
+            continue
+        looked += 1
+        present = any(m in screen for m in MODAL_MARKERS)
+        since = first_seen(user, now, present, args.dry_run)
+        if not present:
+            continue
+        found += 1
+        waited = int(now - since)
+        left = days_left(user)
+        if left is None or left <= 0:
+            # Nothing to sign in WITH. The window is the cure, not the disease.
+            print(f"{user}: sign-in window open, credentials expired — leaving it alone")
+            continue
+        if waited < args.grace:
+            print(f"{user}: sign-in window open {waited}s, key good for {left:.1f}d "
+                  f"— waiting until {args.grace}s before touching it")
+            continue
+        if args.dry_run:
+            print(f"{user}: would clear a sign-in window stuck {waited}s "
+                  f"with a key good for {left:.1f}d")
+            continue
+        if clear(user):
+            cleared.append((user, waited, left))
+            try:
+                os.unlink(state_path(user))
+            except OSError:
+                pass
+            print(f"{user}: cleared a sign-in window stuck {waited}s "
+                  f"(key good for {left:.1f}d) — the bot can hear again")
+        else:
+            stuck.append((user, waited))
+            print(f"{user}: sign-in window would not close after {waited}s — needs a person",
+                  file=sys.stderr)
+
+    # Always say what was looked at. A watchdog that prints nothing when it found
+    # nothing is indistinguishable from a watchdog that did not run, and this whole
+    # file exists because something failed quietly for months.
+    print(f"looked at {looked} bot(s), {unseen} unreachable, "
+          f"{found} showing a sign-in window, {len(cleared)} cleared")
+
+    if cleared or stuck:
+        lines = ["Bots that were stuck behind a sign-in window:"]
+        for user, waited, left in cleared:
+            lines.append(f"• {user} — deaf for {waited // 60} min with a valid key "
+                         f"({left:.0f} days left). Window closed, it is answering again.")
+        for user, waited in stuck:
+            lines.append(f"• {user} — deaf for {waited // 60} min and the window would "
+                         f"not close. Needs looking at.")
+        lines.append("")
+        lines.append("A /login window in a bot's own terminal blocks everything behind it, "
+                     "and no other check sees it.")
+        tell_admin(args.to, "\n".join(lines))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,11 @@
+[Unit]
+Description=Look for bots stuck behind a sign-in window
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=login-modal-watch.service
+
+[Install]
+WantedBy=timers.target
