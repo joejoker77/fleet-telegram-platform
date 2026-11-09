@@ -5,6 +5,12 @@ After=network-online.target
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/fleet-restart-requests
+# This job's whole purpose is to hand work to a watcher that must outlive it.
+# graceful-restart-pod-bot now puts that watcher in a transient unit of its own, so
+# this is belt and braces for the fallback path: with the default KillMode the cgroup
+# teardown at the end of ExecStart kills the watcher about a second after it is armed,
+# which silently voided every post-sign-in restart until 2026-11-09.
+KillMode=process
 # Light hardening only: this drives graceful-restart-pod-bot, which drives podman, and
 # ProtectSystem=strict + PrivateTmp blind podman (see login-expiry-notify.service).
 ProtectHome=false

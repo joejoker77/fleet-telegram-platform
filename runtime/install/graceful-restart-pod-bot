@@ -37,6 +37,10 @@ HARD_TIMEOUT_SEC="${HARD_TIMEOUT_SEC:-3600}"     # 60 min — force restart anyw
 # A line with one of these glyphs followed by text ending in "…" => Claude busy.
 SPINNER_GLYPHS='*·✢✺✷✶✱✸✻✽'
 
+# One transient unit per tenant, so two arms for the same person cannot collide and
+# `systemctl status` can be pointed at a watcher that is misbehaving.
+watch_unit() { echo "graceful-restart-pod-bot-$1"; }
+
 require_root() {
   if [ "$EUID" -ne 0 ]; then
     echo "graceful-restart-pod-bot: must run as root (via host-sudo)" >&2
@@ -180,15 +184,55 @@ cmd_restart() {
     rm -f "$state_file"
   fi
 
-  # Daemonise the watcher. Pass thresholds through so a test override survives
-  # into the detached process.
-  IDLE_THRESHOLD_SEC="$IDLE_THRESHOLD_SEC" HARD_TIMEOUT_SEC="$HARD_TIMEOUT_SEC" PROBE_SEC="$PROBE_SEC" \
-    setsid nohup "$0" __watch "$u" </dev/null >/dev/null 2>&1 &
-  disown 2>/dev/null || true
+  # Daemonise the watcher INTO ITS OWN CGROUP, not the caller's.
+  #
+  # `setsid nohup ... &` is not enough, and this cost two outages. setsid escapes the
+  # controlling terminal, not the cgroup. A caller that is itself a systemd unit --
+  # fleet-restart-requests.service is Type=oneshot -- has its whole cgroup torn down the
+  # moment its main process exits, and the "detached" watcher dies with it, about a second
+  # after being armed. It did that to all 32 pods on 2026-08-21, and again to every tenant
+  # who signed in between then and 2026-11-09: the caller printed "restart scheduled", the
+  # journal recorded it, and nothing ever restarted. Asking PID 1 for a transient unit gives
+  # the watcher a cgroup of its own, so it outlives whoever called us, unit or not.
+  local armed="" unit
+  unit="$(watch_unit "$u")"
+  if command -v systemd-run >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    systemctl reset-failed "$unit" >/dev/null 2>&1 || true
+    if systemd-run --unit="$unit" --quiet --collect \
+         --description="graceful restart watcher for $u" \
+         --setenv=IDLE_THRESHOLD_SEC="$IDLE_THRESHOLD_SEC" \
+         --setenv=HARD_TIMEOUT_SEC="$HARD_TIMEOUT_SEC" \
+         --setenv=PROBE_SEC="$PROBE_SEC" \
+         "$0" __watch "$u" >/dev/null 2>&1; then
+      armed="in $unit"
+    fi
+  fi
+  if [ -z "$armed" ]; then
+    IDLE_THRESHOLD_SEC="$IDLE_THRESHOLD_SEC" HARD_TIMEOUT_SEC="$HARD_TIMEOUT_SEC" PROBE_SEC="$PROBE_SEC" \
+      setsid nohup "$0" __watch "$u" </dev/null >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+    armed="as a detached process (no systemd to ask)"
+  fi
 
-  sleep 0.3
+  # Never print "scheduled" without looking. The watcher writes its state file on its first
+  # tick; if that file never appears, or the pid in it is already gone, then no restart is
+  # coming and the caller has to hear that instead of a success line. A caller that keeps
+  # its request marker on a non-zero exit will simply try again on the next tick.
+  local pid="" i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    sleep 0.3
+    pid=$(awk -F= '/^pid=/{print $2}' "$state_file" 2>/dev/null || true)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then break; fi
+    pid=""
+  done
+  if [ -z "$pid" ]; then
+    echo "graceful-restart-pod-bot: armed the watcher for $u $armed and it did not come up —" >&2
+    echo "  NOTHING is scheduled for claude-pod@${u}.service." >&2
+    rm -f "$state_file"
+    exit 3
+  fi
 
-  echo "Graceful restart scheduled for claude-pod@${u}.service."
+  echo "Graceful restart scheduled for claude-pod@${u}.service (watcher pid=$pid, $armed)."
   echo "  Triggers after ${IDLE_THRESHOLD_SEC}s of continuous idle, or ${HARD_TIMEOUT_SEC}s hard cap."
   echo "  Status: $0 $u status"
   echo "  Cancel: $0 $u cancel"
