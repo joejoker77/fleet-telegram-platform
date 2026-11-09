@@ -30,6 +30,7 @@ import glob
 import json
 import os
 import pwd
+import re
 import subprocess
 import sys
 import time
@@ -64,6 +65,20 @@ QUEUED_MARKER = "← telegram"
 # dead attempt and hand the sign-in to the route that does take a code from the chat.
 RELOGIN_TRIGGER = "/usr/local/sbin/relogin-trigger"
 
+# The pane is created 200x60. A client that attaches at 80 columns shrinks it for as
+# long as it stays, and tmux keeps the smaller size after it goes. That is not cosmetic:
+# the TUI elides a queued message at the pane width, so an 80-column pane turns the code
+# we need into "WIs5…#BwjFJ…". paul-young's bot ran at 80x23 for six hours because a
+# support session attached and never detached.
+PANE_COLS, PANE_ROWS = 200, 60
+
+# A sign-in code as it comes back from the callback page: one token, the code, '#', the
+# state. Deliberately strict — it has to be told apart from the authorize URL sitting in
+# the modal two lines above it, which is why '/', '=', '&' and '?' are excluded.
+CODE_RE = re.compile(r"^[A-Za-z0-9_-]{16,}#[A-Za-z0-9_-]{8,}$")
+# Claude Code's own mark for "there is more of this than fits".
+ELLIPSIS = "\u2026"
+
 
 def tenants() -> list[str]:
     found = []
@@ -74,11 +89,12 @@ def tenants() -> list[str]:
     return found
 
 
-def run(argv: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
-    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+def run(argv: list[str], timeout: int = 30,
+        inp: str | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, input=inp)
 
 
-def in_pod(user: str, *argv: str) -> subprocess.CompletedProcess:
+def in_pod(user: str, *argv: str, inp: str | None = None) -> subprocess.CompletedProcess:
     """Run something in a tenant's container as that tenant.
 
     By NUMBER, not by name. The host account and the container account share a uid but
@@ -91,14 +107,16 @@ def in_pod(user: str, *argv: str) -> subprocess.CompletedProcess:
         uid = str(pwd.getpwnam(user).pw_uid)
     except KeyError:
         uid = user
-    return run(["podman", "exec", "--user", uid,
+    return run(["podman", "exec", "--interactive", "--user", uid,
                 "--env", f"TMUX_TMPDIR={HOME_ROOT}/{user}/.claude",
-                f"claude-{user}", *argv])
+                f"claude-{user}", *argv], inp=inp)
 
 
 def pane(user: str) -> str | None:
     """What is on the bot's screen right now, or None if we cannot see it."""
-    p = in_pod(user, "tmux", "-u", "capture-pane", "-p", "-t", TMUX_SESSION)
+    # -J rejoins what tmux wrapped. Without it a long code comes back as two half-lines
+    # and matches nothing, which is the same failure as reading it truncated.
+    p = in_pod(user, "tmux", "-u", "capture-pane", "-J", "-p", "-t", TMUX_SESSION)
     return p.stdout if p.returncode == 0 else None
 
 
@@ -143,6 +161,73 @@ def first_seen(user: str, now: float, present: bool, dry: bool) -> float:
                 json.dump({"since": now, "user": user}, fh)
             os.replace(tmp, path)
         return now
+
+
+def widen(user: str) -> None:
+    """Put the pane back to the size it was created at.
+
+    A support session that attaches at 80 columns and walks away leaves the window that
+    size for good, and everything the TUI renders is cut to fit — including the code we
+    are trying to read.
+    """
+    in_pod(user, "tmux", "resize-window", "-t", TMUX_SESSION,
+           "-x", str(PANE_COLS), "-y", str(PANE_ROWS))
+
+
+def queued_code(screen: str) -> tuple[str | None, bool]:
+    """The newest sign-in code sitting unread in the pane.
+
+    Returns (code, truncated). `truncated` says a line that was shaped like a code was
+    cut off by the pane width — we must NOT type half a credential, so the caller widens
+    the pane and looks again rather than guessing at the rest.
+    """
+    best, truncated = None, False
+    for raw in screen.splitlines():
+        line = raw.strip()
+        if "oauth/authorize" in line:
+            continue                       # the modal's own URL, wrapped across lines
+        # A queued message is drawn as "← telegram · <chat>: <text>", and the text moves
+        # to the line below only when it will not fit beside the prefix. Both shapes
+        # carry the same code, so take the body off the prefix when there is one.
+        if QUEUED_MARKER in line and ": " in line:
+            line = line.split(": ", 1)[1].strip()
+        if not line:
+            continue
+        if line.endswith(ELLIPSIS):
+            stem = line[:-1].strip()
+            # Enough of a code to recognise, not enough to use.
+            if "#" in stem and " " not in stem and len(stem) >= 16:
+                truncated = True
+            continue
+        if CODE_RE.match(line):
+            best = line                    # keep going: the last one is the newest
+    return best, truncated
+
+
+def type_code(user: str, code: str) -> bool:
+    """Put the code into the modal the way a person would, and say whether it took.
+
+    Through a tmux buffer rather than `send-keys <code>`: a sign-in code is single-use
+    but it is a credential until it is spent, and an argument is readable out of /proc
+    by anything on the host for as long as the call lasts.
+    """
+    load = in_pod(user, "tmux", "load-buffer", "-b", "relogin-code", "-", inp=code)
+    if load.returncode != 0:
+        return False
+    in_pod(user, "tmux", "paste-buffer", "-b", "relogin-code", "-t", TMUX_SESSION, "-d")
+    in_pod(user, "tmux", "send-keys", "-t", TMUX_SESSION, "Enter")
+    # The exchange is a round trip to Anthropic; the helper allows 90 s for it.
+    for _ in range(30):
+        time.sleep(3)
+        after = pane(user) or ""
+        if "Login successful" in after:
+            in_pod(user, "tmux", "send-keys", "-t", TMUX_SESSION, "Enter")
+            return True
+        if not any(m in after for m in MODAL_MARKERS):
+            return True                    # modal gone: it was accepted
+        if "Invalid code" in after or "expired" in after.lower():
+            return False
+    return False
 
 
 def clear(user: str) -> bool:
@@ -190,7 +275,7 @@ def main() -> int:
         return 1
 
     now = time.time()
-    cleared, stuck, handed_over = [], [], []
+    cleared, stuck, handed_over, signed_in = [], [], [], []
     looked = unseen = found = 0
     for user in (args.only or tenants()):
         screen = pane(user)
@@ -224,12 +309,47 @@ def main() -> int:
                   f"— leaving it alone")
             continue
 
+        # First choice: finish the sign-in the person is already trying to do. They were
+        # given a link at the terminal and sent the code to the chat, where it cannot
+        # reach the modal — but it IS sitting in the pane, unread, in full, as long as
+        # the pane is its proper width. Type it in for them and the thing they did works.
+        candidate, truncated = queued_code(screen)
+        if not candidate and truncated and not args.dry_run:
+            widen(user)
+            time.sleep(1)
+            screen = pane(user) or screen
+            candidate, truncated = queued_code(screen)
+
         if args.dry_run:
-            what = ("end it and hand the sign-in to the chat" if expired
-                    else f"clear it (key good for {left:.1f}d)")
+            if candidate:
+                what = "type the code waiting in the pane and finish the sign-in"
+            elif truncated:
+                what = "widen the pane to read a code that is cut off, then type it"
+            elif expired:
+                what = "end it and hand the sign-in to the chat"
+            else:
+                what = f"clear it (key good for {left:.1f}d)"
             print(f"{user}: would {what} — window stuck {waited}s"
                   f"{', person waiting behind it' if queued else ''}")
             continue
+
+        if candidate:
+            before = left
+            if type_code(user, candidate):
+                now_left = days_left(user)
+                signed_in.append((user, waited, now_left))
+                try:
+                    os.unlink(state_path(user))
+                except OSError:
+                    pass
+                print(f"{user}: typed the code that was waiting in the chat — signed in, "
+                      f"key now good for "
+                      f"{'?' if now_left is None else format(now_left, '.1f')}d "
+                      f"(was {'none' if before is None else format(before, '.1f') + 'd'})")
+                continue
+            print(f"{user}: the code waiting in the pane was refused — "
+                  f"falling back to a fresh sign-in", file=sys.stderr)
+            screen = pane(user) or screen
 
         if not clear(user):
             stuck.append((user, waited))
@@ -263,11 +383,16 @@ def main() -> int:
     print(f"looked at {looked} bot(s), {unseen} unreachable, "
           f"{found} showing a sign-in window, {len(cleared)} cleared")
 
-    if cleared or stuck or handed_over:
+    if cleared or stuck or handed_over or signed_in:
         lines = ["Bots that were stuck behind a sign-in window:"]
         for user, waited, left in cleared:
             lines.append(f"• {user} — deaf for {waited // 60} min with a valid key "
                          f"({left:.0f} days left). Window closed, it is answering again.")
+        for user, waited, now_left in signed_in:
+            lines.append(f"• {user} — a sign-in was opened at the terminal and the code "
+                         f"came back by chat, where it could not land. Deaf "
+                         f"{waited // 60} min. I typed it in; they are signed in"
+                         + (f" for another {now_left:.0f} days." if now_left else "."))
         for user, waited, ok in handed_over:
             lines.append(f"• {user} — a sign-in was opened at the terminal and their key "
                          f"had run out, so the code they sent in chat could not land. "
