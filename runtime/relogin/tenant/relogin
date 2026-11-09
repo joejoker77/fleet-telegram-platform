@@ -91,7 +91,9 @@ RESEND_COOLDOWN_S = 10 * 60
 
 # Below this many days left, a manual "relogin" is taken at face value. Above it, the
 # person is already signed in and asking again only starts a loop — see cmd_start.
-MANUAL_NEEDS_DAYS = 1.0
+# Just outside the 3/2/1 ladder on purpose: the warning tells people to send the word
+# when a link has gone stale, so every day we nudge them must honour it.
+MANUAL_NEEDS_DAYS = 4.0
 
 
 # ---- the tenant's own Telegram bot -------------------------------------------------
@@ -436,8 +438,15 @@ def cmd_start(args: argparse.Namespace) -> int:
     # key valid for another 28 days. So a manual request now answers with the truth, and
     # says how to override it, because "you are fine" is exactly what a person with a
     # genuinely broken session must not be stonewalled with.
+    #
+    # --print-url is exempt and must stay exempt: that is somebody standing in the
+    # browser having tapped our own button, which is the primary way in and is meant to
+    # work whenever they tap it, days ahead of expiry included. Answering that with a
+    # page full of "you are already signed in" takes the working route away to protect
+    # them from the broken one.
     manual_left = days_left()
     if (args.reason == "manual" and not args.force
+            and not getattr(args, "print_url", False)
             and manual_left is not None and manual_left > MANUAL_NEEDS_DAYS):
         expiry = refresh_expiry()
         send(token, chat, thread,
