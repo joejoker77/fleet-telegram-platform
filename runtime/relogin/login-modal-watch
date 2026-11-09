@@ -29,6 +29,7 @@ import argparse
 import glob
 import json
 import os
+import pwd
 import subprocess
 import sys
 import time
@@ -65,11 +66,27 @@ def run(argv: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
     return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
 
 
+def in_pod(user: str, *argv: str) -> subprocess.CompletedProcess:
+    """Run something in a tenant's container as that tenant.
+
+    By NUMBER, not by name. The host account and the container account share a uid but
+    not always a name: the oldest pod on this host answers `--user dmitriirudenko` with
+    "no matching entries in passwd file" because uid 1000 is called `ubuntu` in there.
+    Reading the pane by name skipped him silently, which for a watchdog means the one
+    bot it never checks is the CEO's.
+    """
+    try:
+        uid = str(pwd.getpwnam(user).pw_uid)
+    except KeyError:
+        uid = user
+    return run(["podman", "exec", "--user", uid,
+                "--env", f"TMUX_TMPDIR={HOME_ROOT}/{user}/.claude",
+                f"claude-{user}", *argv])
+
+
 def pane(user: str) -> str | None:
     """What is on the bot's screen right now, or None if we cannot see it."""
-    p = run(["podman", "exec", "--user", user,
-             "--env", f"TMUX_TMPDIR={HOME_ROOT}/{user}/.claude",
-             f"claude-{user}", "tmux", "-u", "capture-pane", "-p", "-t", TMUX_SESSION])
+    p = in_pod(user, "tmux", "-u", "capture-pane", "-p", "-t", TMUX_SESSION)
     return p.stdout if p.returncode == 0 else None
 
 
@@ -118,9 +135,7 @@ def first_seen(user: str, now: float, present: bool, dry: bool) -> float:
 
 def clear(user: str) -> bool:
     """Esc, then look again. True when the screen came back."""
-    run(["podman", "exec", "--user", user,
-         "--env", f"TMUX_TMPDIR={HOME_ROOT}/{user}/.claude",
-         f"claude-{user}", "tmux", "send-keys", "-t", TMUX_SESSION, "Escape"])
+    in_pod(user, "tmux", "send-keys", "-t", TMUX_SESSION, "Escape")
     time.sleep(2)
     after = pane(user) or ""
     return not any(m in after for m in MODAL_MARKERS)

@@ -159,3 +159,34 @@ working assistant without anyone touching the host.
 (`CLAUDE_DEBUG_LOG=1` in `/etc/claudeapp/tenant-<user>.env`, then restart), look for
 `reconnectSession(...) failed`, and turn it off again, because it grows fast. A plain
 `GET /v1/code/sessions/<id>` answers 200 for a dead session too, so it cannot be the test.
+
+## If you are helping someone sign in, do not use their terminal
+
+There is a terminal route — attach to the pod's tmux and type `/login` — and it is the
+one that goes wrong. `/login` opens a MODAL in the bot's own pane. Until a code is typed
+into **that same pane**, the session reads nothing else: every Telegram message the
+person sends queues up behind it and the bot goes silent, while the container, the
+poller and the credentials all look perfectly healthy. The person, meanwhile, is told
+to send their code as a message — so they paste it into Telegram, where it cannot
+possibly reach the modal. Both sides then wait for the other. That cost paul-young six
+hours on 2026-11-09.
+
+Use the supported route instead. From the host:
+
+    relogin-trigger <tenant>              send them a sign-in link now
+    relogin-trigger <tenant> --status     what is in flight, and how long their key has
+    relogin-trigger <tenant> --cancel     drop a flow that has gone stale
+
+The link goes to their chat, the code comes back through their chat, and the helper
+types it in for them. Nothing blocks the pane.
+
+Two things worth knowing before you touch anything:
+
+- **Check first.** `--status` prints `refresh_expires_at` and `days_left`. More often
+  than you would think, the sign-in is fine and the complaint is something else; a
+  fresh link will not fix that and sends the person round a loop.
+- **A stuck modal is now cleared for you.** `login-modal-watch.timer` looks at every
+  bot's pane every five minutes and presses Esc on a sign-in window that has been
+  sitting there over ten minutes while the credentials on disk are valid. It leaves
+  the window alone when the credentials really are expired, because then it is the
+  cure and somebody has to finish it. It reports to the admin's Telegram either way.
