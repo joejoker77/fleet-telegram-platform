@@ -16,7 +16,8 @@
 #   5. reconcile the tenant's skills/MCP via the control plane
 #   6. smart reminders (/opt/smart-reminders/rollout.py) — the `remind` tool + its skill
 #   7. self-service sign-in (/opt/relogin/rollout.py) — the `relogin` helper + its mod
-#      6 and 7 are host features: skipped quietly where they are not installed.
+#   8. client SMS (/opt/client-sms/rollout.py) — the `client-sms` tool + its skill
+#      6, 7 and 8 are host features: skipped quietly where they are not installed.
 #
 # Install-time rules apply (English descriptions before each prompt; English text).
 # Usage: sudo ./add-user.sh <os_user> <telegram_id> [--is-admin] [--dry-run] [--config F]
@@ -260,7 +261,7 @@ else
 fi
 
 # 6) reconcile skills/MCP for this tenant via the control plane
-log "6/8 reconcile skills + MCP"
+log "6/9 reconcile skills + MCP"
 if [ "$DRY_RUN" = "1" ]; then info "would run: cp-api deploy-reconcile.ts $USER_NAME --all --apply"
 else
   podman exec -w "$CP_DIR" cp-api node_modules/.bin/tsx apps/api/src/deploy-reconcile.ts "$USER_NAME" --all --apply >/dev/null 2>&1 \
@@ -272,7 +273,7 @@ fi
 # Placed before the finalize restart so the pod comes up with the tool already there. Skipped
 # quietly where the service is not installed — this script also runs on hosts that do not have it,
 # and a missing optional feature is not a failed provisioning.
-log "7/8 smart reminders for $USER_NAME"
+log "7/9 smart reminders for $USER_NAME"
 if [ ! -x /opt/smart-reminders/rollout.py ]; then
   info "smart-reminders is not installed on this host — skipping"
 elif [ "$DRY_RUN" = "1" ]; then
@@ -294,7 +295,7 @@ fi
 # the first thirty-five by hand (/opt/relogin/rollout.py --all); here so number thirty-six
 # gets it by being onboarded. Same shape as step 7: quiet skip where it is not installed,
 # non-fatal where it fails, because the rollout is idempotent and can be re-run.
-log "8/8 self-service sign-in for $USER_NAME"
+log "8/9 self-service sign-in for $USER_NAME"
 if [ ! -f /opt/relogin/rollout.py ]; then
   info "relogin is not installed on this host — skipping"
 elif [ "$DRY_RUN" = "1" ]; then
@@ -304,6 +305,24 @@ else
     info "relogin helper + mod installed for $USER_NAME"
   else
     warn "relogin rollout did not complete for $USER_NAME — re-run: python3 /opt/relogin/rollout.py $USER_NAME"
+  fi
+fi
+
+# 9) client SMS: the `client-sms` client, its skill and the row in the tools table. Claude never
+# holds the SMS credential — the client drops a request and the root service (/opt/client-sms,
+# unit client-sms) sends it through n8n, notes it on the deal and logs who asked. Same shape as
+# steps 7 and 8: quiet skip where the service is not installed, non-fatal where it fails,
+# because the rollout is idempotent and can be re-run.
+log "9/9 client SMS for $USER_NAME"
+if [ ! -x /opt/client-sms/rollout.py ]; then
+  info "client-sms is not installed on this host — skipping"
+elif [ "$DRY_RUN" = "1" ]; then
+  info "would run: python3 /opt/client-sms/rollout.py $USER_NAME"
+else
+  if python3 /opt/client-sms/rollout.py "$USER_NAME" 2>&1 | sed 's/^/    /'; then
+    info "client-sms + skill installed for $USER_NAME"
+  else
+    warn "client-sms rollout did not complete for $USER_NAME — re-run: python3 /opt/client-sms/rollout.py $USER_NAME"
   fi
 fi
 
