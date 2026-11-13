@@ -34,6 +34,9 @@ while [ $# -gt 0 ]; do
   esac
 done
 case "$UID_ARG" in (*[!0-9]*|"") echo "ERROR: --user-id must be the numeric telegram chat_id" >&2; exit 2;; esac
+# Cross-tenant isolation: the id must be this workspace's own (see composio-own-id.sh).
+. "$(dirname "$(readlink -f "$0")")/composio-own-id.sh"
+composio_assert_own_user "$UID_ARG" || exit 3
 [ -n "$TOOL" ] || { echo "ERROR: --tool required (e.g. GMAIL_FETCH_EMAILS)" >&2; exit 2; }
 case "$TOOL" in (*[!A-Z0-9_]*) echo "ERROR: --tool must be a tool slug (A-Z 0-9 _), e.g. GMAIL_FETCH_EMAILS" >&2; exit 2;; esac
 case "$ACCOUNT" in (*[!a-zA-Z0-9_-]*) echo "ERROR: --account must be an alias or connected_account_id (a-z 0-9 _ -)" >&2; exit 2;; esac

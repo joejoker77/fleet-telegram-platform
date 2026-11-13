@@ -37,6 +37,9 @@ while [ $# -gt 0 ]; do
   esac
 done
 case "$UID_ARG" in (*[!0-9]*|"") echo "ERROR: --user-id must be the numeric telegram chat_id" >&2; exit 2;; esac
+# Cross-tenant isolation: the id must be this workspace's own (see composio-own-id.sh).
+. "$(dirname "$(readlink -f "$0")")/composio-own-id.sh"
+composio_assert_own_user "$UID_ARG" || exit 3
 case "$TOOLKITS" in (*[!a-zA-Z0-9_,-]*) echo "ERROR: --toolkits must be comma-separated slugs" >&2; exit 2;; esac
 case "$MAX_ACCT" in (*[!0-9]*|"") echo "ERROR: --max-accounts must be an integer 2-10" >&2; exit 2;; esac
 [ "$MAX_ACCT" -ge 2 ] && [ "$MAX_ACCT" -le 10 ] || { echo "ERROR: --max-accounts must be 2-10" >&2; exit 2; }

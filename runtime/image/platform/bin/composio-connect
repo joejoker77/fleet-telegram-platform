@@ -43,6 +43,9 @@ while [ $# -gt 0 ]; do
 done
 case "$TOOLKIT" in (*[!a-zA-Z0-9_-]*|"") echo "ERROR: --toolkit must be a slug (e.g. gmail)" >&2; exit 2;; esac
 case "$UID_ARG" in (*[!0-9]*|"") echo "ERROR: --user-id must be the numeric telegram chat_id" >&2; exit 2;; esac
+# Cross-tenant isolation: the id must be this workspace's own (see composio-own-id.sh).
+. "$(dirname "$(readlink -f "$0")")/composio-own-id.sh"
+composio_assert_own_user "$UID_ARG" || exit 3
 # alias is optional, but recommended for a 2nd+ account of the same toolkit so
 # the bot/user can tell them apart. Keep it a friendly, URL-safe slug.
 case "$ALIAS" in (*[!a-zA-Z0-9_-]*) echo "ERROR: --alias must be a slug (a-z 0-9 _ -), e.g. work or personal" >&2; exit 2;; esac
